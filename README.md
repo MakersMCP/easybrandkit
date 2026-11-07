@@ -86,6 +86,10 @@ npx easybrandkit <url> [options]
 
 The address can be a website or an App Store or Google Play listing. A listing gives the app icon and screenshots, and the brand is read from the website the listing names. A social profile is not a brand's site, so easybrandkit refuses one and asks for the website.
 
+Run it again with the same `--out` and the new kit takes the place of the earlier one there, but only once the run has ended well. Files of your own in that folder stay, unless one has the name of a file the kit writes. A run that fails, is refused, or is stopped with Ctrl-C or a kill leaves the folder as it was: an earlier kit stays whole, and a folder the run would have made is not made.
+
+Only a run killed outright, as `kill -9`, `taskkill /F` or a power cut do, can leave something behind: a folder whose name starts with `.easybrandkit-part-`, in the kit's folder or in the folder above it, which the run makes when it is not there. A run there that ends well removes it once nothing in it has changed for 15 minutes. Killed in the moment its files are being swapped, a run can also leave the kit's folder without its `brand.json`, with the earlier kit's files in that part folder's `.earlier`. No run removes those, and a later run refuses a folder that holds files but no `brand.json`, so move them back by hand.
+
 Installed globally (`npm install -g easybrandkit`), the command is `easybrandkit`. npx keeps the copy an earlier run fetched, so `npx easybrandkit@latest` is how you get a newer version.
 
 It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and nothing is downloaded: easybrandkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile.
@@ -150,6 +154,7 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 4. Brings each logo to the middle of the screen, finishes its fade-in, hides whatever paints over it (a popup backdrop, the next line of text) and cuts it out with a margin of its own background. The background is read from that margin's pixels, not from the CSS. A logo drawn as SVG is also written out as a vector, with the page's styles on it and its scripts removed.
 5. Hides floating overlays and takes the first screen at 2x.
 6. Fetches store listings and profile pictures over HTTPS from a fixed list of hosts, and refuses private addresses.
+7. Writes the kit into a folder of the run's own, inside the kit's folder or next to it, and moves the files into place only once every step has worked, so a run that fails or is stopped changes nothing there.
 
 ## Limits
 

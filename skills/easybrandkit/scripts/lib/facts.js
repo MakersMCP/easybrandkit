@@ -559,14 +559,9 @@ function writeFacts(dir, { name, site, generator, pages = [], skipped = [] }) {
   return facts;
 }
 
-// An earlier run's facts, by their fixed names only.
-function removeFacts(dir) {
-  for (const file of ["FACTS.md", "facts.json", ...PAGE_FILES.map((name) => path.join("pages", name))]) fs.rmSync(path.join(dir, file), { force: true });
-  try {
-    fs.rmdirSync(path.join(dir, "pages"));
-  } catch {
-    // Missing, or holding files that are not ours.
-  }
-}
+// The files a run with --facts writes, by their fixed names: what a new kit
+// takes the place of in an earlier one's facts. A file of someone's own in
+// pages/ is not one of them.
+const FACT_FILES = ["FACTS.md", "facts.json", ...PAGE_FILES.map((name) => `pages/${name}`)];
 
-module.exports = { readModel, readFactPages, pickPages, robotsRules, robotsAllow, pageLines, writeFacts, removeFacts };
+module.exports = { readModel, readFactPages, pickPages, robotsRules, robotsAllow, pageLines, writeFacts, FACT_FILES };

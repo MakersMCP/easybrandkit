@@ -5,16 +5,19 @@
 // folder rules that need no browser.
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
+const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
@@ -102,6 +105,49 @@ async function serve(handler) {
 
 const svg = (fill, w, h) => `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="${fill}"/></svg>`;
 
+// Every file and folder in dir, hidden ones too, each file with a hash of its
+// bytes: what a run left there.
+function filesOf(dir) {
+  const found = [];
+  const walk = (at, rel) => {
+    for (const entry of fs.readdirSync(at, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const name = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        found.push(`${name}/`);
+        walk(path.join(at, entry.name), name);
+      } else {
+        found.push(`${name} ${crypto.createHash("sha1").update(fs.readFileSync(path.join(at, entry.name))).digest("hex")}`);
+      }
+    }
+  };
+  if (fs.existsSync(dir)) walk(dir, "");
+  return found;
+}
+
+function writeFiles(dir, files) {
+  for (const [file, body] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), body);
+  }
+}
+
+// An earlier kit as a run leaves it, with facts and two files of the user's own.
+const EARLIER = {
+  "brand.json": JSON.stringify({ version: 1, logos: [{ file: "logo-01.png", svg: "logo-01.svg" }, { file: "logo-02.png" }], screenshots: [{ file: "screen-01.png" }], card: { file: "card.png" } }),
+  "BRAND.md": "# Acme brand kit\n",
+  "_brand.yml": "meta:\n  name: Acme\n",
+  "logo-01.png": "png",
+  "logo-01.svg": "<svg/>",
+  "logo-02.png": "png",
+  "screen-01.png": "png",
+  "card.png": "png",
+  "FACTS.md": "# Acme facts\n",
+  "facts.json": "{}",
+  "pages/home.md": "home",
+  "pages/mine.txt": "mine",
+  "notes.txt": "mine",
+};
+
 test("addresses: bare domains get https, sub-pages point to the home page", () => {
   assert.equal(normalizeUrl("acme.com"), "https://acme.com/");
   assert.equal(normalizeUrl("http://acme.com/tr"), "http://acme.com/tr");
@@ -134,22 +180,59 @@ test("stores and social networks: a listing leads to its website, a profile is r
   }
 });
 
-test("never writes into a folder that holds someone else's files", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-dir-"));
-  try {
-    fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
-    assert.throws(() => prepareDir(dir), /not empty/);
-    assert.equal(fs.readFileSync(path.join(dir, "notes.txt"), "utf8"), "mine");
-    // An earlier kit is replaced, by file name only.
-    fs.rmSync(path.join(dir, "notes.txt"));
-    fs.writeFileSync(path.join(dir, "logo-01.png"), "old");
-    fs.writeFileSync(path.join(dir, "_brand.yml"), "meta:\n  name: Old\n");
-    fs.writeFileSync(path.join(dir, "brand.json"), JSON.stringify({ version: 1, logos: [{ file: "../../escape.png" }, { file: "logo-01.png" }] }));
-    prepareDir(dir);
-    assert.deepEqual(fs.readdirSync(dir), []);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test("never writes into a folder that holds someone else's files, and reads an earlier kit without changing it", (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-dir-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const dir = path.join(parent, "kit");
+  assert.equal(prepareDir(dir), null, "not there");
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
+  assert.throws(() => prepareDir(dir), /kit is not empty and holds no earlier brand kit/);
+  assert.equal(fs.readFileSync(path.join(dir, "notes.txt"), "utf8"), "mine");
+  // An earlier kit's files, by file name only, are what a new kit takes the
+  // place of; reading them changes nothing.
+  fs.rmSync(path.join(dir, "notes.txt"));
+  fs.writeFileSync(path.join(dir, "logo-01.png"), "old");
+  fs.writeFileSync(path.join(dir, "_brand.yml"), "meta:\n  name: Old\n");
+  fs.writeFileSync(path.join(dir, "brand.json"), JSON.stringify({ version: 1, logos: [{ file: "../../escape.png" }, { file: "logo-01.png" }, { file: ".git" }, { file: ".." }] }));
+  const files = prepareDir(dir);
+  assert.deepEqual(files.slice(0, 5), ["escape.png", "logo-01.png", "brand.json", "BRAND.md", "_brand.yml"]);
+  assert.ok(files.includes("FACTS.md") && files.includes("pages/home.md") && !files.includes(".git") && !files.includes(".."), files.join(" "));
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["_brand.yml", "brand.json", "logo-01.png"]);
+  // A link to the kit's folder is that folder, and the run works inside it.
+  fs.symlinkSync(dir, path.join(parent, "link"), "junction");
+  assert.deepEqual(prepareDir(path.join(parent, "link")), files);
+  const run = startRun(path.join(parent, "link"), files);
+  assert.equal(path.dirname(fs.realpathSync(run.work)), fs.realpathSync(dir));
+  discardRun(run);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["_brand.yml", "brand.json", "logo-01.png"]);
+  // A file, or a link to nothing, is no folder.
+  assert.throws(() => prepareDir(path.join(dir, "logo-01.png")), /logo-01\.png is a file, not a folder\. Pick a folder with --out\.$/);
+  fs.symlinkSync(path.join(parent, "gone"), path.join(parent, "dangling"), "junction");
+  assert.throws(() => prepareDir(path.join(parent, "dangling")), /dangling is a link to .*gone, which is not there\. Pick a folder with --out\.$/);
+  // The part folder of a run that was killed outright counts for nothing.
+  const empty = path.join(parent, "empty");
+  fs.mkdirSync(path.join(empty, ".easybrandkit-part-1-0a1b2c3d"), { recursive: true });
+  assert.equal(prepareDir(empty), null);
+});
+
+test("a run that fails leaves its folder as it was: an earlier kit stays whole, and a folder it would have made is not left", async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  // No browser: the run gets past the folder and fails as it starts one.
+  const chrome = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = path.join(parent, "no-chrome");
+  t.after(() => {
+    if (chrome === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = chrome;
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit("https://acme.example/", { dir, stores: false }), (err) => /No Chrome, Chromium, Edge or Brave found/.test(err.message) && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  await assert.rejects(makeKit("https://acme.example/", { dir: path.join(parent, "new", "acme") }), (err) => /No Chrome/.test(err.message) && err.earlierKit === undefined);
+  assert.deepEqual(fs.readdirSync(parent), ["kit"]);
 });
 
 test("the skill folder carries its own version, the same as the package's", () => {
@@ -440,5 +523,147 @@ test("logos: a lockup on a picture is not the logo; the vector keeps the page's 
   } finally {
     server.close();
     fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  }
+});
+
+// A page with a header logo, and a footer logo when given its color.
+const brandPage = (header, footer) => `<!doctype html><html><head><title>Acme</title><style>
+    body{margin:0;background:#fff} header{height:60px;display:flex;align-items:center;padding-left:20px}
+    main{height:1400px} footer{height:200px;background:rgb(29,36,62);display:flex;align-items:center;padding-left:20px}
+  </style></head><body>
+  <header><a href="/">${svg(header, 120, 30)}</a></header><main><h1>Acme</h1></main>
+  ${footer ? `<footer><a href="/">${svg(footer, 140, 36)}</a></footer>` : ""}
+  </body></html>`;
+const BOT_CHECK = `<!doctype html><html><head><title>Human Verification</title><script src="/awswaf/challenge.js"></script></head><body><h1>Confirm you are human</h1></body></html>`;
+
+test("a kit survives runs that fail, and one that ends well takes its place and keeps the user's files", { skip: noBrowser }, async (t) => {
+  let html = brandPage("rgb(255,0,0)", "rgb(255,255,255)");
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(html));
+  const bot = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(BOT_CHECK));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    bot.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const first = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(first.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  writeFiles(dir, { "notes.txt": "mine", "FACTS.md": "# Acme facts\n", "pages/home.md": "home", "pages/mine.txt": "mine" });
+  const good = filesOf(dir);
+
+  await assert.rejects(makeKit("http://127.0.0.1:9/", { dir, stores: false }), /ERR_UNSAFE_PORT/);
+  assert.deepEqual(filesOf(dir), good, "a page that does not open");
+  await assert.rejects(makeKit(bot.origin, { dir, stores: false }), /answered with a bot check/);
+  assert.deepEqual(filesOf(dir), good, "a bot check");
+  // A disk that fills up as the kit is written, after the page was read.
+  const write = fs.writeFileSync;
+  const full = t.mock.method(fs, "writeFileSync", function (file, ...rest) {
+    if (path.basename(String(file)) === "brand.json") throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    return write.call(this, file, ...rest);
+  });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), /ENOSPC/);
+  full.mock.restore();
+  assert.deepEqual(filesOf(dir), good, "a full disk");
+
+  // Ended well: the new kit, with one logo now, in place of the earlier one;
+  // the earlier facts go, the user's files stay, and no part folder is left.
+  html = brandPage("rgb(0,0,255)");
+  const { kit } = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  const names = filesOf(dir).map((line) => line.split(" ")[0]);
+  assert.deepEqual(names, ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "notes.txt", "pages/", "pages/mine.txt", "screen-01.png"]);
+  const logo = readPng(path.join(dir, "logo-01.png"));
+  assert.deepEqual(logo.pixel(logo.width >> 1, logo.height >> 1), [0, 0, 255], "the new logo");
+
+  // Through a link to the folder, the files go into the folder it points at.
+  fs.symlinkSync(dir, path.join(parent, "link"), "junction");
+  html = brandPage("rgb(0,128,0)");
+  await makeKit(site.origin, { dir: path.join(parent, "link"), stores: false });
+  assert.equal(fs.lstatSync(path.join(parent, "link")).isSymbolicLink(), true);
+  assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), names);
+  const green = readPng(path.join(dir, "logo-01.png"));
+  assert.deepEqual(green.pixel(green.width >> 1, green.height >> 1), [0, 128, 0], "the logo read through the link");
+});
+
+test("the CLI says once that a new kit could not be put in place, and the kit there stays as it was", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  // A folder of the user's where the new kit has its card.
+  fs.rmSync(path.join(dir, "card.png"));
+  fs.mkdirSync(path.join(dir, "card.png"));
+  const before = filesOf(dir);
+  // Not spawnSync: the page is served from this process.
+  const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores"], { stdio: ["ignore", "ignore", "pipe"] });
+  let said = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  const [code] = await once(child, "close");
+  assert.equal(code, 1, said);
+  const lines = said.trim().split("\n");
+  assert.equal(lines.pop(), `easybrandkit: The new kit could not be put in ${dir}: card.png is a folder there, where the new kit has a file. The kit already there is as it was.`);
+  assert.ok(lines.every((line) => line.endsWith("...")), said);
+  assert.deepEqual(filesOf(dir), before);
+});
+
+// The processes left in a process group, on Linux, zombies aside:
+// /proc/<pid>/stat holds the state and the group after the command's name.
+function processesIn(group) {
+  if (process.platform !== "linux") return [];
+  const found = [];
+  for (const pid of fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const [state, , pgrp] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (Number(pgrp) === group && state !== "Z") found.push(Number(pid));
+    } catch {
+      // Gone already.
+    }
+  }
+  return found;
+}
+
+test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says so, and leaves no browser running", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  const groups = [];
+  t.after(() => {
+    site.server.close();
+    for (const group of groups) for (const pid of processesIn(group)) process.kill(pid, "SIGKILL");
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  await makeKit(site.origin, { dir, stores: false });
+  const good = filesOf(dir);
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Ctrl-C reaches the whole process group, the browser too; a kill can
+  // reach the kit alone. With --json the run says nothing as it works, so the
+  // signal comes once its part folder holds a logo.
+  for (const [signal, group, json] of [["SIGINT", true, false], ["SIGTERM", false, false], ["SIGTERM", true, true]]) {
+    // A group of its own, as a terminal gives a command, which the browser joins.
+    const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const closed = once(child, "close");
+    groups.push(child.pid);
+    let said = "";
+    let out = "";
+    child.stderr.on("data", (chunk) => (said += chunk));
+    child.stdout.on("data", (chunk) => (out += chunk));
+    const working = () => (json ? fs.readdirSync(dir).some((name) => name.startsWith(".easybrandkit-part-") && fs.existsSync(path.join(dir, name, "logo-01.png"))) : said.includes("Taking the first screen"));
+    for (let waited = 0; waited < 60_000 && !working(); waited += 50) await wait(50);
+    assert.ok(working(), `the run got as far as the logos: ${said}`);
+    process.kill(group ? -child.pid : child.pid, signal);
+    const [code, ended] = await closed;
+    assert.equal(ended, signal, `exit ${code}`);
+    assert.deepEqual(filesOf(dir), good, signal);
+    const message = `stopped by ${signal}. The kit already in ${dir} is as it was.`;
+    assert.equal(said.trim().split("\n").pop(), `easybrandkit: ${message}`);
+    assert.equal(out, json ? `${JSON.stringify({ ok: false, error: message })}\n` : "");
+    await wait(1_000);
+    assert.deepEqual(processesIn(child.pid), [], `no browser left running after ${signal}`);
   }
 });

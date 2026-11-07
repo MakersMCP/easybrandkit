@@ -21,6 +21,10 @@
 //   FACTS.md, facts.json, pages/
 //                  with --facts: the site's own claims with their pages
 //                  (see facts.js)
+//
+// The files are made in a part folder of the run's own and put in place only
+// once the run has ended well, so a run that fails, is refused or is stopped
+// leaves the folder as it was (see run.js).
 
 const fs = require("fs");
 const path = require("path");
@@ -29,9 +33,10 @@ const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture }
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
 const { brandYml } = require("./brandyml");
-const { readFactPages, writeFacts, removeFacts } = require("./facts");
+const { readFactPages, writeFacts, FACT_FILES } = require("./facts");
 const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, sleep } = require("./time");
+const { PART, SaveError, startRun, discardRun, saveRun } = require("./run");
 const version = require("./version");
 
 // Logos are read from the desktop layout: a narrow screen shows the mobile
@@ -81,7 +86,7 @@ function homePageOf(raw) {
 }
 
 // The files an earlier kit lists, by name only: a brand.json someone edited
-// cannot point the clean-up outside the folder.
+// cannot point a new kit's move outside the folder, or at a hidden file.
 function kitFiles(kit) {
   const files = [
     ...[].concat(kit.logos || []).flatMap((logo) => [logo && logo.file, logo && logo.svg]),
@@ -89,15 +94,30 @@ function kitFiles(kit) {
     kit.card && kit.card.file,
     ...[].concat(kit.stores || []).flatMap((source) => [].concat((source && source.assets) || []).map((asset) => asset && asset.file)),
   ];
-  return files.filter((file) => typeof file === "string" && file).map((file) => path.basename(file));
+  return files.filter((file) => typeof file === "string" && file).map((file) => path.basename(file)).filter((file) => !file.startsWith("."));
 }
 
-// The kit's folder: created when missing, reused when an earlier easybrandkit run
-// made it (that kit's files are replaced), refused when it holds anything
-// else, so a run never mixes into or overwrites someone's own files.
+// What the kit's folder holds, read before a run and again as its files go
+// in: nothing (null), when it is not there or empty, or an earlier
+// easybrandkit kit, whose file names come back: the files its brand.json
+// lists, by name only, and the fixed names a kit writes. A folder that holds
+// anything else is refused, so a run never mixes into or overwrites
+// someone's own files, and so is a path that is not a folder. A link to a
+// folder counts as that folder. The part folders of runs do not count, and
+// nothing is changed.
 function prepareDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-  if (fs.readdirSync(dir).length === 0) return;
+  const there = fs.statSync(dir, { throwIfNoEntry: false });
+  if (!there) {
+    let link = null;
+    try {
+      link = fs.readlinkSync(dir);
+    } catch {
+      return null;
+    }
+    throw new Error(`${dir} is a link to ${link}, which is not there. Pick a folder with --out.`);
+  }
+  if (!there.isDirectory()) throw new Error(`${dir} is a file, not a folder. Pick a folder with --out.`);
+  if (fs.readdirSync(dir).filter((name) => !PART.test(name)).length === 0) return null;
   let old = null;
   try {
     old = JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8"));
@@ -107,8 +127,7 @@ function prepareDir(dir) {
   if (!old || old.version !== 1) {
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
   }
-  for (const file of [...kitFiles(old), "brand.json", "BRAND.md", "_brand.yml"]) fs.rmSync(path.join(dir, file), { force: true });
-  removeFacts(dir);
+  return [...new Set([...kitFiles(old), "brand.json", "BRAND.md", "_brand.yml", ...FACT_FILES])];
 }
 
 // The site's name: og:site_name, else the title up to its first separator
@@ -305,20 +324,6 @@ function siteOfListing(raw) {
   }
 }
 
-// A failed run leaves nothing half made: its own files go, and so does the
-// folder when this run created it.
-const RUN_FILE = /^((logo|screen)-\d+\.png|logo-\d+\.svg|card\.png|(appstore|googleplay|x|youtube|linkedin|threads|pinterest)-(icon|profile|shot-\d+)\.(png|jpg|webp))$/;
-function cleanUp(target, existed) {
-  for (const file of fs.readdirSync(target)) if (RUN_FILE.test(file)) fs.rmSync(path.join(target, file), { force: true });
-  if (!existed) {
-    try {
-      fs.rmdirSync(target);
-    } catch {
-      // Not empty: what is left there is not this run's.
-    }
-  }
-}
-
 async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 120_000, log = () => {} } = {}) {
   setTimeLimit(timeLimit);
   const asked = normalizeUrl(rawUrl);
@@ -329,15 +334,17 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   }
   const notes = [];
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
-  const existed = fs.existsSync(target);
-  prepareDir(target);
-  let given = null;
-  let read = null;
+  // The files are made in the run's part folder, work, and go in place only
+  // once everything has been read and written.
+  const run = startRun(target, prepareDir(target));
+  const work = run.work;
   try {
+    let given = null;
+    let read = null;
     let page = "";
     if (listing) {
       log(`Reading the ${listing.type === "appstore" ? "App Store" : "Google Play"} listing`);
-      given = await readSource(listing, target);
+      given = await readSource(listing, work);
       if (!given.ok) throw new Error(`${asked} could not be read: ${given.error}.`);
       page = siteOfListing(given.site || "");
       notes.push(
@@ -352,47 +359,54 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     }
     // The app's own name, up to a tagline ("Duolingo: Learn Languages").
     const appName = given ? String(given.name || "").split(/\s*[:|\u2013\u2014]\s*|\s+-\s+/)[0] : "";
-    if (page) read = await readPage(page, target, log, appName, facts);
+    if (page) read = await readPage(page, work, log, appName, facts);
+    const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
+    if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
+    if (facts && !read) notes.push("No facts were read: the listing names no website.");
+    const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : []) : [];
+    const sources = [...(given ? [given] : []), ...others];
+    for (const source of others) {
+      if (!source.ok) notes.push(`${source.url} could not be read: ${source.error}.`);
+    }
+    const kit = {
+      version: 1,
+      url: read ? read.pageUrl : asked,
+      // A listing names the product the user pointed at; its maker's site can
+      // carry the company's name instead.
+      name: (given && given.name) || (read ? read.name : "App"),
+      capturedAt: new Date().toISOString(),
+      generator: `easybrandkit ${version}`,
+      colors: read ? read.colors : [],
+      fonts: found.brand.fonts,
+      text: read ? read.text : { title: given.name || "", description: given.description || "", headings: [], ctas: [] },
+      logos: read ? read.logos : [],
+      screenshots: read ? read.screenshots : [],
+      card: read ? read.card : null,
+      icons: found.icons,
+      images: found.images,
+      manifest: found.manifest,
+      links: found.links,
+      stores: sources,
+      notes,
+    };
+    fs.writeFileSync(path.join(work, "brand.json"), JSON.stringify(kit, null, 2) + "\n");
+    writeMarkdown(kit, work);
+    // The page's ground is not in brand.json: its list of colors can file
+    // that color under the header or footer.
+    fs.writeFileSync(path.join(work, "_brand.yml"), brandYml(kit, { background: found.brand.background || "", site: read ? read.pageUrl : "" }));
+    const claims = facts && read ? writeFacts(work, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
+    // The folder is read again as the files go in: it can have changed
+    // while the site was read.
+    saveRun(run, () => prepareDir(target) || []);
+    return { dir: target, kit, facts: claims };
   } catch (err) {
-    cleanUp(target, existed);
+    // For the CLI, which says that an earlier kit is as it was. saveRun's
+    // own errors say what the folder holds.
+    if (run.earlier && !(err instanceof SaveError)) err.earlierKit = target;
     throw err;
+  } finally {
+    discardRun(run);
   }
-  const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
-  if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
-  if (facts && !read) notes.push("No facts were read: the listing names no website.");
-  const others = stores && read ? await readSources(found.links, target, log, given ? [given.type] : []) : [];
-  const sources = [...(given ? [given] : []), ...others];
-  for (const source of others) {
-    if (!source.ok) notes.push(`${source.url} could not be read: ${source.error}.`);
-  }
-  const kit = {
-    version: 1,
-    url: read ? read.pageUrl : asked,
-    // A listing names the product the user pointed at; its maker's site can
-    // carry the company's name instead.
-    name: (given && given.name) || (read ? read.name : "App"),
-    capturedAt: new Date().toISOString(),
-    generator: `easybrandkit ${version}`,
-    colors: read ? read.colors : [],
-    fonts: found.brand.fonts,
-    text: read ? read.text : { title: given.name || "", description: given.description || "", headings: [], ctas: [] },
-    logos: read ? read.logos : [],
-    screenshots: read ? read.screenshots : [],
-    card: read ? read.card : null,
-    icons: found.icons,
-    images: found.images,
-    manifest: found.manifest,
-    links: found.links,
-    stores: sources,
-    notes,
-  };
-  fs.writeFileSync(path.join(target, "brand.json"), JSON.stringify(kit, null, 2) + "\n");
-  writeMarkdown(kit, target);
-  // The page's ground is not in brand.json: its list of colors can file
-  // that color under the header or footer.
-  fs.writeFileSync(path.join(target, "_brand.yml"), brandYml(kit, { background: found.brand.background || "", site: read ? read.pageUrl : "" }));
-  const claims = facts && read ? writeFacts(target, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
-  return { dir: target, kit, facts: claims };
 }
 
 module.exports = { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName };

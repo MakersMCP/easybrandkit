@@ -45,6 +45,7 @@ It reads the home page and up to five pages from the site's menu and footer (pri
 
 ## When it goes wrong
 
+- A run that fails or is stopped leaves `brand/<name>` as it was: a kit made there earlier is still whole, and a new folder is not made. Fix the cause and run again into the same folder.
 - If BRAND.md lists no logo, or the colors look like a cookie wall or a loading screen, tell the user what you got instead of guessing. Slow sites can take `--timeout 240`.
 - If the site blocks headless browsers, ask the user for the logo file and the main colors.
 - Never present a color or a logo as the brand's own when it did not come from the kit or from the user.

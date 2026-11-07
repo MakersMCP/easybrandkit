@@ -56,6 +56,10 @@ function findChrome() {
   return "";
 }
 
+// The browsers this process has open, so that a run that is stopped can end
+// them at once instead of leaving them running.
+const open = new Set();
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -89,6 +93,8 @@ async function launch({ width, height }) {
   let exited = false;
   child.on("exit", () => (exited = true));
   child.on("error", () => (exited = true));
+  const entry = { child, profile };
+  open.add(entry);
   let base = "";
   // Chrome is asked to quit first: killed outright, its helper processes go
   // on writing to the profile for a while and the folder cannot be removed.
@@ -107,6 +113,8 @@ async function launch({ width, height }) {
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    open.delete(entry);
+    removeSingleton(profile);
     try {
       fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch {
@@ -129,6 +137,47 @@ async function launch({ width, height }) {
   }
   await close();
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
+}
+
+// Chrome keeps the socket that makes it one browser per profile in a folder
+// of its own in the temp folder, linked from the profile, and removes it
+// only when it quits. Killed, it leaves it: removed here, those two names
+// only.
+function removeSingleton(profile) {
+  try {
+    const folder = path.dirname(fs.readlinkSync(path.join(profile, "SingletonSocket")));
+    for (const name of ["SingletonSocket", "SingletonCookie"]) fs.rmSync(path.join(folder, name), { force: true });
+    fs.rmdirSync(folder);
+  } catch {
+    // None, or Chrome removed it as it quit.
+  }
+}
+
+// Every browser still open, killed at once, and its profile removed: for a
+// process that is being stopped and has no time to ask them to quit. It
+// never throws.
+function killBrowsers() {
+  for (const { child, profile } of open) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Gone already.
+    }
+    removeSingleton(profile);
+  }
+  // Chrome's helper processes can still write into the profile for a moment
+  // as they end: it is removed until it stays gone, half a second at most.
+  for (let round = 0; round < 5 && [...open].some(({ profile }) => fs.existsSync(profile)); round++) {
+    for (const { profile } of open) {
+      try {
+        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 2, retryDelay: 20 });
+      } catch {
+        // Tried again in the next round.
+      }
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  open.clear();
 }
 
 function connect(wsUrl) {
@@ -219,4 +268,4 @@ async function navigate(cdp, url) {
   }
 }
 
-module.exports = { findChrome, launch, connect, openPage, navigate };
+module.exports = { findChrome, launch, killBrowsers, connect, openPage, navigate };

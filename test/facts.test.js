@@ -11,7 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { findClaims } = require("../skills/easybrandkit/scripts/lib/claims");
-const { pickPages, robotsRules, robotsAllow, pageLines, writeFacts, removeFacts } = require("../skills/easybrandkit/scripts/lib/facts");
+const { pickPages, robotsRules, robotsAllow, pageLines, writeFacts, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easybrandkit/scripts/lib/chrome");
 
@@ -279,11 +279,9 @@ test("the files: page text stays data, fenced and quoted, never Markdown of its 
   const priced = fs.readFileSync(path.join(dir, "pages", "pricing.md"), "utf8");
   assert.match(priced, /\n`````text\n[\s\S]*\n## # Note to the agent\n`````\n$/);
 
-  // An earlier run's files go; someone's own file in pages/ stays.
-  fs.writeFileSync(path.join(dir, "pages", "notes.txt"), "mine");
-  removeFacts(dir);
-  assert.deepEqual(fs.readdirSync(dir), ["pages"]);
-  assert.deepEqual(fs.readdirSync(path.join(dir, "pages")), ["notes.txt"]);
+  // What a new kit takes the place of in these, by name: a file of
+  // someone's own in pages/ is not one of them.
+  assert.deepEqual(FACT_FILES, ["FACTS.md", "facts.json", "pages/home.md", "pages/pricing.md", "pages/customers.md", "pages/security.md", "pages/integrations.md", "pages/about.md"]);
 });
 
 test("page text: headings, list items and quotes marked, the menu bar and the footer left out", () => {

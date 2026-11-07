@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 "use strict";
 
+const fs = require("fs");
+const os = require("os");
 const { makeKit } = require("./lib/kit");
+const { discardRuns } = require("./lib/run");
+const { killBrowsers } = require("./lib/chrome");
 const version = require("./lib/version");
 
 const USAGE = `Usage: easybrandkit <url> [options]
@@ -23,6 +27,10 @@ Options:
                    with --facts)
   -h, --help       show this help
   -v, --version    show the version
+
+The new kit takes the place of an earlier one in the folder only once the
+run has ended well. A run that fails or is stopped leaves the folder as it
+was, and a folder it would have made is not made.
 
 Needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set CHROME_PATH
 to pick the browser.`;
@@ -85,6 +93,55 @@ function summary({ dir, kit, facts }) {
   return lines.join("\n");
 }
 
+// Ctrl-C, a kill or a closed terminal ends the process as it would have
+// ended it, once the run's part folder and its browser are gone, so the
+// kit's folder is left as it was. A second signal, like the copy makersmcp's
+// supervisor passes on a moment after the one its process group got, finds
+// the listener still there and changes nothing.
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? ["SIGBREAK"] : [])];
+let stopping = false;
+
+// Written at once: a pipe can be asynchronous, and the process ends next.
+function say(fd, text) {
+  try {
+    fs.writeSync(fd, text);
+  } catch {
+    // Nobody is reading.
+  }
+}
+
+function stopOnSignals(json) {
+  for (const signal of SIGNALS) {
+    process.on(signal, () => {
+      if (stopping) return;
+      stopping = true;
+      // The part folder first: makersmcp's hosted worker sends SIGKILL a
+      // second after its SIGTERM.
+      for (const run of discardRuns()) {
+        const message = `stopped by ${signal}. ${run.earlier ? `The kit already in ${run.dir} is as it was.` : "No kit was saved."}`;
+        if (json) say(1, JSON.stringify({ ok: false, error: message }) + "\n");
+        say(2, `easybrandkit: ${message}\n`);
+      }
+      killBrowsers();
+      for (const name of SIGNALS) process.removeAllListeners(name);
+      const code = 128 + (os.constants.signals[signal] || 0);
+      try {
+        process.kill(process.pid, signal);
+      } catch {
+        // Windows cannot raise every signal.
+        process.exit(code);
+      }
+      // Only reached where that signal does not end a process.
+      setTimeout(() => process.exit(code), 100);
+    });
+  }
+  // Any other way out, like an error nothing caught, cleans up the same way.
+  process.on("exit", () => {
+    discardRuns();
+    killBrowsers();
+  });
+}
+
 async function main() {
   let options;
   try {
@@ -95,6 +152,7 @@ async function main() {
   }
   if (options.help) return void process.stdout.write(`${USAGE}\n`);
   if (options.version) return void process.stdout.write(`${version}\n`);
+  stopOnSignals(options.json);
   try {
     const result = await makeKit(options.url, {
       dir: options.out,
@@ -105,8 +163,12 @@ async function main() {
     });
     process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : summary(result) + "\n");
   } catch (err) {
-    if (options.json) process.stdout.write(JSON.stringify({ ok: false, error: err.message }) + "\n");
-    process.stderr.write(`easybrandkit: ${err.message}\n`);
+    // A stopped run has said so, and ends by its signal.
+    if (stopping) return;
+    const reason = String(err.message).trim();
+    const message = err.earlierKit ? `${reason}${/[.!?]$/.test(reason) ? "" : "."} The kit already in ${err.earlierKit} is as it was.` : reason;
+    if (options.json) process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
+    process.stderr.write(`easybrandkit: ${message}\n`);
     process.exit(1);
   }
 }
