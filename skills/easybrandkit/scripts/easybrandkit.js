@@ -33,7 +33,9 @@ Options:
 The new kit takes the place of an earlier one in the folder only once the
 run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
 or a kill leaves the folder as it was, and a folder it would have made is
-not made.
+not made. A run killed outright, as kill -9, taskkill /F or a power cut do,
+can leave a hidden .easybrandkit-part- folder in the folder or next to it;
+the README says what it holds and when it goes.
 
 Needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set CHROME_PATH
 to pick the browser.`;
