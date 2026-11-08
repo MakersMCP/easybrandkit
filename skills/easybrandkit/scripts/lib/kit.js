@@ -203,21 +203,23 @@ function checkDir(dir, { facts = false, saving = false } = {}) {
     if (err.code === "EACCES" || err.code === "EPERM") throw new Error(`This user may not read ${dir} (${err.code}). Pick a folder you can write in with --out.`);
     throw err;
   }
-  if (names.length === 0) return null;
-  let old = readKit(target);
+  let old = names.length ? readKit(target) : null;
   if (!old && !saving) {
     // Another run may be putting its kit in place right now, with brand.json
-    // aside: this run reads the folder again when it saves. Or it was done
-    // between the two looks.
+    // or every file of the earlier kit aside: this run reads the folder
+    // again when it saves. Or it was done between the two looks.
     if (swapping(target)) return [...KIT_NAMES];
     old = readKit(target);
   }
   if (!old) {
-    // Another folder would leave that kit in pieces for good.
+    // A run killed while its files moved can leave the earlier kit aside,
+    // with some of its own files in the folder or none: another folder
+    // would leave that kit in pieces for good.
     const aside = earlierAside(target);
     if (aside) {
-      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shownFrom(dir, aside)}, with the files it had moved aside. Move them back into ${dir} and run again.`);
+      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shownFrom(dir, aside)}, with the files it had moved aside. Move them back into ${dir}, replacing any files of the same name there, which are that run's, and run again.`);
     }
+    if (names.length === 0) return null;
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
   }
   const pages = facts && fs.lstatSync(path.join(target, "pages"), { throwIfNoEntry: false });
