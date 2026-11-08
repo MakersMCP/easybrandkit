@@ -8,18 +8,32 @@
 // get in place. Only a run that ends well puts them there: the part folder
 // becomes the kit's folder, or the earlier kit's files are moved aside into
 // it, the new ones moved in, and the part folder removed with the earlier
-// kit in it. A run that fails, is refused or is stopped leaves the folder as
-// it was and adds nothing.
+// kit in it. Runs that put their kits into the same folder take turns, with
+// a lock file in it. A run that fails, is refused or is stopped leaves the
+// folder as it was and adds nothing.
 
 const crypto = require("crypto");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { sleep } = require("./time");
 
 const PART = /^\.easybrandkit-part-(\d+)-[0-9a-f]{8}$/;
+// The lock, and the marker a waiting run makes to take over a lock that a
+// run killed outright left.
+const LOCK = ".easybrandkit-swap";
+const TAKEOVER = `${LOCK}-takeover`;
+// The names a run makes in a kit's folder and removes again.
+const isRunName = (name) => PART.test(name) || name === LOCK || name === TAKEOVER;
 // A run killed outright (kill -9, a power cut) cannot remove its part
 // folder. A later run that ends well next to it removes it once its process
 // is gone and nothing in it has changed for this long.
 const STALE = 15 * 60 * 1000;
+// A run puts its files in place in a moment, so another one waits for its
+// lock this long at most. A lock older than LOCK_STALE was left by a run
+// killed outright, whatever process now has its pid.
+const LOCK_WAIT = 10_000;
+const LOCK_STALE = 2 * 60 * 1000;
 const BUSY = ["EPERM", "EACCES", "EBUSY"];
 
 // An error of saveRun, whose message says what the kit's folder holds.
@@ -134,33 +148,185 @@ function holdsFiles(at, depth = 2) {
   return entries.some((entry) => !entry.isDirectory() || (depth > 0 && holdsFiles(path.join(at, entry.name), depth - 1)));
 }
 
-// Puts the run's files in place. It is synchronous, so a stop signal is
-// handled before it or after it, never in the middle. earlierOf gives the
+function running(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+// The locks this process holds, by their token.
+const held = new Set();
+
+// The lock in a kit's folder, a file whose text names the run that holds
+// it: null when there is none. It is live while that run may be putting its
+// kit in: a run of this process holds it, or its process runs on this
+// machine, or, from another machine, it is not old. A lock with no text yet
+// is being made, unless it is a few seconds old.
+function readLock(file) {
+  const stat = lstat(file);
+  if (!stat) return null;
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    // Not readable: told by its age alone.
+  }
+  let holder = {};
+  try {
+    holder = JSON.parse(text) || {};
+  } catch {
+    // Being written.
+  }
+  const age = Date.now() - stat.mtimeMs;
+  let live;
+  if (held.has(holder.token)) live = true;
+  else if (!holder.token) live = age < 5_000;
+  else if (holder.host !== os.hostname()) live = age < LOCK_STALE;
+  // A lock with this process's pid that this process does not hold was left
+  // by an earlier process that had the same pid.
+  else live = Number.isInteger(holder.pid) && holder.pid > 0 && holder.pid !== process.pid && running(holder.pid) && age < LOCK_STALE;
+  return { text, mtimeMs: stat.mtimeMs, live };
+}
+
+// Whether a run is putting its kit in the folder right now.
+function swapping(folder) {
+  const lock = readLock(path.join(folder, LOCK));
+  return Boolean(lock && lock.live);
+}
+
+// The lock, made only when there is none: null when another run holds it.
+function takeLock(file) {
+  const token = crypto.randomBytes(4).toString("hex");
+  let fd;
+  try {
+    fd = fs.openSync(file, "wx");
+  } catch (err) {
+    if (err.code === "EEXIST") return null;
+    throw err;
+  }
+  try {
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, host: os.hostname(), token }));
+  } catch (err) {
+    fs.closeSync(fd);
+    fs.rmSync(file, { force: true });
+    throw err;
+  }
+  fs.closeSync(fd);
+  held.add(token);
+  return { file, token };
+}
+
+// Removes the lock while it is still this run's.
+function letGo(lock) {
+  held.delete(lock.token);
+  try {
+    if (JSON.parse(fs.readFileSync(lock.file, "utf8")).token === lock.token) fs.unlinkSync(lock.file);
+  } catch {
+    // Gone already.
+  }
+}
+
+// A lock left by a run killed outright is removed by one waiting run at a
+// time: the one that makes the marker removes the lock, and only while it
+// is still the one it found. The others find the marker there and wait, so
+// two of them never both remove a lock and go on.
+function takeOver(file, seen) {
+  const marker = path.join(path.dirname(file), TAKEOVER);
+  let fd;
+  try {
+    fd = fs.openSync(marker, "wx");
+  } catch {
+    // Another run is taking it over, or one killed while doing so left the
+    // marker, which goes once it is old.
+    try {
+      if (Date.now() - fs.lstatSync(marker).mtimeMs > LOCK_WAIT) fs.unlinkSync(marker);
+    } catch {
+      // Gone already.
+    }
+    return;
+  }
+  try {
+    const now = readLock(file);
+    if (now && !now.live && now.text === seen.text && now.mtimeMs === seen.mtimeMs) fs.unlinkSync(file);
+  } catch {
+    // Gone already, or taken by another run since.
+  } finally {
+    fs.closeSync(fd);
+    try {
+      fs.unlinkSync(marker);
+    } catch {
+      // Gone already.
+    }
+  }
+}
+
+// What stopped a file from moving, in words.
+function why(err) {
+  return err.syscall && BUSY.includes(err.code) ? `another program holds a file open, or the folder may not be changed (${err.code})` : err.message;
+}
+
+// Puts the run's files in place, once no other run is putting its kit in
+// the same folder. The moves themselves run at once, so a stop signal is
+// handled before them or after them, never in the middle; a run that is
+// stopped while it waits for the lock is not saved. earlierOf gives the
 // earlier kit's file names as the folder holds them at that moment, or
 // throws when the folder now holds something else. A rename that fails puts
 // back what had moved, and the error says what the folder holds.
-function saveRun(run, earlierOf) {
+async function saveRun(run, earlierOf) {
+  const { dir, target, work } = run;
+  const file = path.join(target, LOCK);
+  const asWas = () => (run.earlier ? "The kit already there is as it was." : "Nothing there was changed.");
+  for (let waited = 0; ; waited += 50) {
+    if (!runs.has(run)) throw new SaveError(`The new kit was not put in ${dir}: the run was stopped.`);
+    if (!lstat(target)) {
+      try {
+        rename(work, target);
+        runs.delete(run);
+        sweep(path.dirname(target));
+        return;
+      } catch (err) {
+        // Made meanwhile, by another run or by hand: the files go in one by one.
+        if (!lstat(target)) throw new SaveError(`The new kit could not be put in ${dir}: ${why(err)}. Nothing there was changed.`);
+      }
+    }
+    let lock = null;
+    try {
+      lock = takeLock(file);
+    } catch (err) {
+      // Removed meanwhile: put in whole, as above.
+      if (err.code === "ENOENT" && !lstat(target) && waited < LOCK_WAIT) continue;
+      throw new SaveError(`The new kit could not be put in ${dir}: ${why(err)}. ${asWas()}`);
+    }
+    if (lock) {
+      try {
+        let earlierNow;
+        try {
+          earlierNow = earlierOf();
+        } catch (err) {
+          throw new SaveError(err.message);
+        }
+        swap(run, earlierNow);
+      } finally {
+        letGo(lock);
+      }
+      return;
+    }
+    const holder = readLock(file);
+    if (holder && !holder.live) takeOver(file, holder);
+    else if (waited >= LOCK_WAIT) throw new SaveError(`The new kit was not put in ${dir}: another run is putting its kit there and has not finished. ${asWas()} Try again in a moment.`);
+    await sleep(50);
+  }
+}
+
+// The moves, under the lock.
+function swap(run, earlierNow) {
   const { dir, target, work } = run;
   // How a path in or next to the kit's folder is shown: from dir as given.
   const shown = (at) => path.join(path.dirname(dir), path.relative(path.dirname(target), at));
-  const why = (err) => (err.syscall && BUSY.includes(err.code) ? `another program holds a file open, or the folder may not be changed (${err.code})` : err.message);
-  if (!lstat(target)) {
-    try {
-      rename(work, target);
-      runs.delete(run);
-      sweep(path.dirname(target));
-      return;
-    } catch (err) {
-      // Made meanwhile, by another run or by hand: the files go in one by one.
-      if (!lstat(target)) throw new SaveError(`The new kit could not be put in ${dir}: ${why(err)}.`);
-    }
-  }
-  let earlierNow;
-  try {
-    earlierNow = earlierOf();
-  } catch (err) {
-    throw new SaveError(err.message);
-  }
+  const asWas = earlierNow.length ? "The kit already there is as it was." : "Nothing there was changed.";
   const aside = path.join(work, ".earlier");
   // Each move as [from, to, name, whether it moved a new file in].
   const moved = [];
@@ -175,7 +341,9 @@ function saveRun(run, earlierOf) {
   // holds a brand.json that does not match the files next to it.
   const last = (names) => [...names.filter((name) => name !== "brand.json"), ...names.filter((name) => name === "brand.json")];
   try {
-    fs.mkdirSync(path.join(aside, "pages"), { recursive: true });
+    // Not with recursive: a part folder that is gone is not made again.
+    fs.mkdirSync(aside);
+    fs.mkdirSync(path.join(aside, "pages"));
     for (const name of last(earlierNow).reverse()) {
       const at = lstat(path.join(target, name));
       // A folder under a kit file's name is not the kit's.
@@ -198,26 +366,24 @@ function saveRun(run, earlierOf) {
     }
   } catch (err) {
     const leftEarlier = [];
-    const stuckNew = [];
-    const back = new Set();
+    const leftNew = [];
     for (const [from, to, name, coming] of moved.reverse()) {
       try {
+        // Nothing is put back over a file that has taken the old place since.
+        if (lstat(from)) throw new Error(`${name} is taken`);
         rename(to, from);
-        if (!coming) back.add(name);
       } catch {
         if (coming) {
           // A new file that will not go back is removed where it is.
           remove(to);
-          if (lstat(to)) stuckNew.push(name);
+          if (lstat(to)) leftNew.push(name);
         } else {
           leftEarlier.push(name);
         }
       }
     }
-    // A file put back under the same name has replaced the new one.
-    const leftNew = stuckNew.filter((name) => !back.has(name));
     const said = [`The new kit could not be put in ${dir}: ${why(err)}.`];
-    if (!leftEarlier.length && !leftNew.length) said.push(earlierNow.length ? "The kit already there is as it was." : "Nothing there was changed.");
+    if (!leftEarlier.length && !leftNew.length) said.push(asWas);
     if (leftEarlier.length) {
       // What could not be put back stays, in a folder no run removes, or
       // else in this part folder, which the sweep then keeps.
@@ -252,15 +418,6 @@ function saveRun(run, earlierOf) {
   remove(work);
   sweep(target);
   sweep(path.dirname(target));
-}
-
-function running(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === "EPERM";
-  }
 }
 
 // The newest change in a folder, two levels down.
@@ -303,4 +460,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, STALE, SaveError, startRun, discardRun, discardRuns, saveRun, sweep };
+module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, startRun, discardRun, discardRuns, saveRun, sweep };

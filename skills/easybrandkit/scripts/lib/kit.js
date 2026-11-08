@@ -36,7 +36,7 @@ const { brandYml } = require("./brandyml");
 const { readFactPages, writeFacts, FACT_FILES } = require("./facts");
 const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, sleep } = require("./time");
-const { PART, SaveError, startRun, discardRun, saveRun } = require("./run");
+const { SaveError, isRunName, swapping, startRun, discardRun, saveRun } = require("./run");
 const version = require("./version");
 
 // Logos are read from the desktop layout: a narrow screen shows the mobile
@@ -97,15 +97,29 @@ function kitFiles(kit) {
   return files.filter((file) => typeof file === "string" && file).map((file) => path.basename(file)).filter((file) => !file.startsWith("."));
 }
 
+// The names every kit writes, whatever its brand.json lists.
+const KIT_NAMES = ["brand.json", "BRAND.md", "_brand.yml", ...FACT_FILES];
+
+function readKit(dir) {
+  try {
+    const kit = JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8"));
+    return kit && kit.version === 1 ? kit : null;
+  } catch {
+    return null;
+  }
+}
+
 // What the kit's folder holds, read before a run and again as its files go
 // in: nothing (null), when it is not there or empty, or an earlier
 // easybrandkit kit, whose file names come back: the files its brand.json
 // lists, by name only, and the fixed names a kit writes. A folder that holds
 // anything else is refused, so a run never mixes into or overwrites
 // someone's own files, and so is a path that is not a folder. A link to a
-// folder counts as that folder. The part folders of runs do not count, and
-// nothing is changed.
-function prepareDir(dir) {
+// folder counts as that folder. The part folders and the lock of runs do not
+// count, and nothing is changed. A folder whose brand.json is away while
+// another run puts its kit in counts as a kit (saving is false before a run,
+// when the folder is read again under the run's own lock).
+function prepareDir(dir, { saving = false } = {}) {
   const there = fs.statSync(dir, { throwIfNoEntry: false });
   if (!there) {
     let link = null;
@@ -117,17 +131,19 @@ function prepareDir(dir) {
     throw new Error(`${dir} is a link to ${link}, which is not there. Pick a folder with --out.`);
   }
   if (!there.isDirectory()) throw new Error(`${dir} is a file, not a folder. Pick a folder with --out.`);
-  if (fs.readdirSync(dir).filter((name) => !PART.test(name)).length === 0) return null;
-  let old = null;
-  try {
-    old = JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8"));
-  } catch {
-    // Not a kit.
+  if (fs.readdirSync(dir).filter((name) => !isRunName(name)).length === 0) return null;
+  let old = readKit(dir);
+  if (!old && !saving) {
+    // Another run may be putting its kit in place right now, with brand.json
+    // aside: this run reads the folder again when it saves. Or it was done
+    // between the two looks.
+    if (swapping(dir)) return [...KIT_NAMES];
+    old = readKit(dir);
   }
-  if (!old || old.version !== 1) {
+  if (!old) {
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
   }
-  return [...new Set([...kitFiles(old), "brand.json", "BRAND.md", "_brand.yml", ...FACT_FILES])];
+  return [...new Set([...kitFiles(old), ...KIT_NAMES])];
 }
 
 // The site's name: og:site_name, else the title up to its first separator
@@ -397,7 +413,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     const claims = facts && read ? writeFacts(work, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
     // The folder is read again as the files go in: it can have changed
     // while the site was read.
-    saveRun(run, () => prepareDir(target) || []);
+    await saveRun(run, () => prepareDir(target, { saving: true }) || []);
     return { dir: target, kit, facts: claims };
   } catch (err) {
     // For the CLI, which says that an earlier kit is as it was. saveRun's
