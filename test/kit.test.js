@@ -971,7 +971,7 @@ function processesIn(group) {
   return found;
 }
 
-test("a run stopped by SIGINT, SIGTERM or SIGHUP leaves the earlier kit as it was, says so, and leaves no browser running and nothing in the temp folder", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
+test("a run stopped by SIGINT, SIGQUIT, SIGTERM or SIGHUP leaves the earlier kit as it was, says so, and leaves no browser running and nothing in the temp folder", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
@@ -992,14 +992,18 @@ test("a run stopped by SIGINT, SIGTERM or SIGHUP leaves the earlier kit as it wa
   assert.deepEqual(tempLeft(), [], "a run that ends well");
   const good = filesOf(dir);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  // Ctrl-C reaches the whole process group, the browser too; a kill or a
-  // closed terminal can reach the kit alone. With --json the run says
-  // nothing as it works, so the signal comes once its part folder holds a
-  // logo. The last run's output has nobody reading it any more, as when the
-  // program that started it has gone: the stop still ends it by its signal.
-  for (const [signal, group, json, gone] of [["SIGINT", true, false, false], ["SIGTERM", false, false, false], ["SIGTERM", true, true, false], ["SIGHUP", false, false, false], ["SIGTERM", false, true, true]]) {
-    // A group of its own, as a terminal gives a command, which the browser joins.
-    const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  // Ctrl-C and Ctrl-\ reach the whole process group, the browser too; a
+  // kill or a closed terminal can reach the kit alone. With --json the run
+  // says nothing as it works, so the signal comes once its part folder holds
+  // a logo. The last run's output has nobody reading it any more, as when
+  // the program that started it has gone: the stop still ends it by its
+  // signal.
+  const stops = [["SIGINT", true, false, false], ["SIGQUIT", true, false, false], ["SIGTERM", false, false, false], ["SIGTERM", true, true, false], ["SIGHUP", false, false, false], ["SIGTERM", false, true, true]];
+  for (const [signal, group, json, gone] of stops) {
+    // A group of its own, as a terminal gives a command, which the browser
+    // joins. SIGQUIT ends a process with a core dump where the system writes
+    // them, into the folder it runs in: the test's own.
+    const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { env, cwd: parent, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     const closed = once(child, "close");
     groups.push(child.pid);
     let said = "";

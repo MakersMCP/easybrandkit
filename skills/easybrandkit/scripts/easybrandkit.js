@@ -96,12 +96,12 @@ function summary({ dir, kit, facts }) {
   return lines.join("\n");
 }
 
-// Ctrl-C, a kill or a closed terminal ends the process as it would have
-// ended it, once the run's part folder and its browser are gone, so the
+// Ctrl-C, Ctrl-\, a kill or a closed terminal ends the process as it would
+// have ended it, once the run's part folder and its browser are gone, so the
 // kit's folder is left as it was. A second signal, like the copy makersmcp's
 // supervisor passes on a moment after the one its process group got, finds
 // the listener still there and changes nothing.
-const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? ["SIGBREAK"] : [])];
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", ...(process.platform === "win32" ? ["SIGBREAK"] : ["SIGQUIT"])];
 let stopping = false;
 
 // Written at once: a pipe can be asynchronous, and the process ends next.
