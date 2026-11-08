@@ -929,6 +929,31 @@ test("the CLI says once that a new kit could not be put in place, and the kit th
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("a run that ends well exits 0 when nobody reads what it prints", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  // As when its output goes into a pipe whose reader has ended: the
+  // summary, and brand.json with --json, find the pipe closed once the kit
+  // is in place.
+  for (const json of [false, true]) {
+    const earlier = filesOf(dir).find((line) => line.startsWith("brand.json "));
+    const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.destroy();
+    let said = "";
+    child.stderr.on("data", (chunk) => (said += chunk));
+    const [code] = await once(child, "close");
+    assert.equal(code, 0, said);
+    assert.doesNotMatch(said, /EPIPE/);
+    assert.notEqual(filesOf(dir).find((line) => line.startsWith("brand.json ")), earlier, json ? "with --json" : "with the summary");
+  }
+});
+
 // The processes left in a process group, on Linux, zombies aside:
 // /proc/<pid>/stat holds the state and the group after the command's name.
 function processesIn(group) {

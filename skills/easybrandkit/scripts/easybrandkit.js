@@ -153,6 +153,10 @@ function stopOnSignals(json) {
 }
 
 async function main() {
+  // What is printed comes once the kit is in place: a reader that has gone,
+  // like a pipe into a command that reads none of it, does not turn a run
+  // that ended well into one that exits with an error.
+  process.stdout.on("error", () => {});
   let options;
   try {
     options = parse(process.argv.slice(2));
