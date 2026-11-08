@@ -742,7 +742,7 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   }
   assert.deepEqual(filesOf(dir), before);
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
-  assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails or is stopped leaves the folder as it\nwas, and a folder it would have made is not made\.\n/);
+  assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails, is refused, or is stopped with Ctrl-C\nor a kill leaves the folder as it was, and a folder it would have made is\nnot made\.\n/);
 });
 
 test("a folder this user may not write in is told plainly, without the part folder's name", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may write anywhere") }, (t) => {

@@ -31,8 +31,9 @@ Options:
   -v, --version    show the version
 
 The new kit takes the place of an earlier one in the folder only once the
-run has ended well. A run that fails or is stopped leaves the folder as it
-was, and a folder it would have made is not made.
+run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
+or a kill leaves the folder as it was, and a folder it would have made is
+not made.
 
 Needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set CHROME_PATH
 to pick the browser.`;
