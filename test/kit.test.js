@@ -370,8 +370,15 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
     const pidFile = path.join(parent, `${end}.pid`);
     if (linux) process.env.HELPER_PID = pidFile;
     const browser = await launch({ width: 800, height: 600 });
-    if (end === "closed") await browser.close();
-    else killBrowsers();
+    if (end === "closed") {
+      // It does not answer on the port it wrote, so it cannot be asked to
+      // quit: it is killed at once, not waited for.
+      const started = Date.now();
+      await browser.close();
+      assert.ok(Date.now() - started < 3_000, `closed in ${Date.now() - started} ms`);
+    } else {
+      killBrowsers();
+    }
     if (linux) {
       const helper = Number(fs.readFileSync(pidFile, "utf8"));
       t.after(() => {
@@ -383,6 +390,51 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
     assert.deepEqual(left, ["com.google.Chrome.chrome_chrome_url_fetcher_.before"], `a browser ${end}`);
   }
   assert.equal(fs.readdirSync(temp).filter((name) => name.startsWith("com.google.Chrome.busy")).length, 2);
+
+  // A browser that ends at once and leaves a helper running, which belongs
+  // to no one by then: only its command line, which names the profile, ties
+  // it to the browser.
+  if (linux) {
+    const quick = path.join(parent, "quick");
+    const pidFile = path.join(parent, "quick.pid");
+    fs.writeFileSync(quick, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\n'${process.execPath}' -e 'setTimeout(() => {}, 30000)' "$profile" &\necho $! > "${pidFile}"\n`, { mode: 0o755 });
+    process.env.CHROME_PATH = quick;
+    await assert.rejects(launch({ width: 800, height: 600 }), /^Error: quick did not start\./);
+    const helper = Number(fs.readFileSync(pidFile, "utf8"));
+    t.after(() => {
+      if (!ended(helper)) process.kill(helper, "SIGKILL");
+    });
+    assert.ok(ended(helper), "the helper of a browser that ended at once");
+    assert.deepEqual(fs.readdirSync(temp).filter((name) => !name.startsWith("com.google.Chrome.busy")), ["com.google.Chrome.chrome_chrome_url_fetcher_.before"]);
+  }
+});
+
+test("a browser that is slow to answer still runs; one that refuses its port or has ended does not", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  // A port that takes a connection and never answers, as a busy browser's.
+  const slow = http.createServer(() => {});
+  slow.listen(0, "127.0.0.1");
+  await once(slow, "listening");
+  const chrome = process.env.CHROME_PATH;
+  t.after(() => {
+    if (chrome === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = chrome;
+    slow.closeAllConnections();
+    slow.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const stand = path.join(parent, "chrome");
+  fs.writeFileSync(stand, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\nprintf '${slow.address().port}\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"\nexec sleep 30\n`, { mode: 0o755 });
+  process.env.CHROME_PATH = stand;
+  const browser = await launch({ width: 800, height: 600 });
+  const started = Date.now();
+  assert.equal(await browser.alive(), true, "slow to answer");
+  assert.ok(Date.now() - started >= 4_000, `answered after ${Date.now() - started} ms`);
+  slow.closeAllConnections();
+  await new Promise((resolve) => slow.close(resolve));
+  assert.equal(await browser.alive(), false, "its port refuses");
+  await browser.close();
+  assert.equal(await browser.alive(), false, "ended");
 });
 
 test("the CLI explains itself and refuses a missing address", () => {

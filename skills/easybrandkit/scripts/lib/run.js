@@ -568,4 +568,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
+module.exports = { PART, LOCK, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
