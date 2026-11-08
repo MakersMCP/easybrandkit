@@ -62,9 +62,11 @@ const open = new Set();
 
 // The folders browsers of Chrome's kind make in the temp folder, by the
 // name each one gives them: the one that holds the socket that makes a
-// browser one per profile, and those of its URL fetcher, which a browser
-// that ends while it fetches leaves empty.
+// browser one per profile, and those its component updater downloads and
+// unpacks into in the browser's first seconds. A browser that ends then
+// leaves those, empty or with what it was fetching.
 const TEMP_NAME = /^\.?(com\.google\.Chrome|org\.chromium\.Chromium|com\.microsoft\.Edge|com\.brave\.Browser)\./;
+const FETCHING = /(url_fetcher_|Unpacker_BeginUnzipping)\./;
 
 function tempNames(temp) {
   try {
@@ -74,16 +76,24 @@ function tempNames(temp) {
   }
 }
 
-// Once a browser has ended: the empty folders of this user's that came in
-// the temp folder while it ran. rmdir removes only an empty folder, so one
-// that another browser is using keeps its files.
-function removeTemps({ temp, before }) {
+// Once a browser has ended: the folders of this user's that came in the
+// temp folder while it ran, when they are empty, so one that another
+// browser is using, like the one that holds its socket, keeps its files. A
+// browser that did not quit when asked, because it was killed, crashed or
+// never answered, can leave the component updater's folders with what it
+// was fetching in them: those go with their files. Another browser that
+// fetched a component at that moment loses only that download; its pages
+// are not touched.
+function removeTemps({ temp, before }, killed) {
   const uid = process.getuid ? process.getuid() : null;
   for (const name of tempNames(temp)) {
     if (before.has(name)) continue;
+    const at = path.join(temp, name);
     try {
-      const stat = fs.lstatSync(path.join(temp, name));
-      if (stat.isDirectory() && (uid === null || stat.uid === uid)) fs.rmdirSync(path.join(temp, name));
+      const stat = fs.lstatSync(at);
+      if (!stat.isDirectory() || (uid !== null && stat.uid !== uid)) continue;
+      if (killed && FETCHING.test(name)) fs.rmSync(at, { recursive: true, force: true });
+      else fs.rmdirSync(at);
     } catch {
       // Not empty, or gone.
     }
@@ -237,6 +247,7 @@ async function launch({ width, height }) {
     // profile, are found also once it has ended, as one that could not
     // start has.
     const processes = processesOf(child);
+    let quit = false;
     if (base && !exited) {
       let asked = false;
       try {
@@ -248,6 +259,7 @@ async function launch({ width, height }) {
         // Not answering: it is killed below.
       }
       for (let i = 0; i < 50 && asked && !exited; i++) await sleep(100);
+      quit = asked && exited;
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
@@ -259,7 +271,7 @@ async function launch({ width, height }) {
     } catch {
       // Left for the system's temp clean-up.
     }
-    removeTemps(entry);
+    removeTemps(entry, !quit);
   };
   // Whether the browser still runs: one that was killed or crashed has
   // ended, or no longer takes a connection on its port. One that is slow to
@@ -338,7 +350,7 @@ function killBrowsers() {
     pause(100);
     if (!ending.some(({ profile }) => fs.existsSync(profile))) break;
   }
-  for (const entry of ending) removeTemps(entry);
+  for (const entry of ending) removeTemps(entry, true);
 }
 
 function connect(wsUrl) {
@@ -434,4 +446,4 @@ async function navigate(cdp, url) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, connect, openPage, navigate };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, openPage, navigate };

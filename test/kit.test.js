@@ -15,7 +15,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, checkDir, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
-const { findChrome, launch, killBrowsers } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 
@@ -363,8 +363,10 @@ function ended(pid) {
   }
 }
 
-// Stands in for Chrome: it makes a folder in the temp folder, as Chrome's
-// URL fetcher does, and one that holds a file. On Linux it also starts a
+// Stands in for Chrome: it makes the folders Chrome's component updater
+// downloads and unpacks into in its first seconds, each with a file in it,
+// as a browser killed then leaves them, and a folder of another kind that
+// holds a file, as another browser's could. On Linux it also starts a
 // helper that goes on writing into the profile for five seconds, as
 // Chrome's network service does as it ends: each write a process of its own
 // that names the profile and writes a moment after it starts, so that one
@@ -374,7 +376,8 @@ const STAND_IN = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
 done
-mkdir "$TMPDIR/com.google.Chrome.chrome_chrome_url_fetcher_.$$"
+mkdir "$TMPDIR/com.google.Chrome.chrome_chrome_url_fetcher_.$$" && echo x > "$TMPDIR/com.google.Chrome.chrome_chrome_url_fetcher_.$$/download"
+mkdir "$TMPDIR/com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.$$" && echo x > "$TMPDIR/com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.$$/config.binarypb"
 mkdir "$TMPDIR/com.google.Chrome.busy$$" && echo x > "$TMPDIR/com.google.Chrome.busy$$/file"
 if [ -n "$HELPER_PID" ]; then
   ( i=0; while [ $i -lt 100 ]; do sh -c 'sleep 0.05; mkdir -p "$1/Default"' write "$profile"; i=$((i + 1)); done ) &
@@ -400,9 +403,9 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
   fs.writeFileSync(chrome, STAND_IN, { mode: 0o755 });
   process.env.CHROME_PATH = chrome;
   process.env.TMPDIR = temp;
-  // A folder of the same kind that was there before stays, and so does one
-  // that holds a file.
-  fs.mkdirSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.before"));
+  // A folder of the same kind that was there before stays with its files,
+  // and so does one of another kind that holds a file.
+  writeFiles(temp, { "com.google.Chrome.chrome_chrome_url_fetcher_.before/download": "theirs" });
   const linux = process.platform === "linux";
   for (const end of ["closed", "killed"]) {
     const pidFile = path.join(parent, `${end}.pid`);
@@ -428,6 +431,7 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
     assert.deepEqual(left, ["com.google.Chrome.chrome_chrome_url_fetcher_.before"], `a browser ${end}`);
   }
   assert.equal(fs.readdirSync(temp).filter((name) => name.startsWith("com.google.Chrome.busy")).length, 2);
+  assert.equal(fs.readFileSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.before", "download"), "utf8"), "theirs");
 
   // A browser that ends at once and leaves a helper running, which belongs
   // to no one by then: only its command line, which names the profile, ties
@@ -445,6 +449,28 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
     assert.ok(ended(helper), "the helper of a browser that ended at once");
     assert.deepEqual(fs.readdirSync(temp).filter((name) => !name.startsWith("com.google.Chrome.busy")), ["com.google.Chrome.chrome_chrome_url_fetcher_.before"]);
   }
+});
+
+test("what Chrome's component updater was fetching goes once a browser is killed, and only what came while it ran", (t) => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-temp-"));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const fetched = ["com.google.Chrome.chrome_chrome_url_fetcher_.a1b2c3", "com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.d4e5f6"];
+  writeFiles(temp, {
+    [`${fetched[0]}/download`]: "x",
+    [`${fetched[1]}/config.binarypb`]: "x",
+    "com.google.Chrome.chrome_chrome_url_fetcher_.before/download": "theirs",
+    // The socket of another browser that is running.
+    "com.google.Chrome.g7h8i9/SingletonSocket": "x",
+  });
+  fs.mkdirSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.empty"));
+  const before = new Set(["com.google.Chrome.chrome_chrome_url_fetcher_.before"]);
+  // A browser that quit when asked has removed its own: what is left with
+  // files in it can be another browser's, at work.
+  removeTemps({ temp, before }, false);
+  assert.deepEqual(fs.readdirSync(temp).sort(), [...fetched, "com.google.Chrome.chrome_chrome_url_fetcher_.before", "com.google.Chrome.g7h8i9"].sort());
+  removeTemps({ temp, before }, true);
+  assert.deepEqual(fs.readdirSync(temp).sort(), ["com.google.Chrome.chrome_chrome_url_fetcher_.before", "com.google.Chrome.g7h8i9"]);
+  assert.equal(fs.readFileSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.before", "download"), "utf8"), "theirs");
 });
 
 test("a browser that is slow to answer still runs; one that refuses its port or has ended does not", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
