@@ -259,7 +259,12 @@ async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   const { errorText } = await cdp.send("Page.navigate", { url });
   if (errorText) throw new Error(`Could not open ${url}: ${errorText}`);
-  await Promise.race([loaded, sleep(Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))]);
+  // The timer goes once the page has loaded, so it does not keep the
+  // process up after the kit is done.
+  let timer;
+  const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
+  await Promise.race([loaded, late]);
+  clearTimeout(timer);
   try {
     const { currentIndex, entries } = await cdp.send("Page.getNavigationHistory");
     return (entries[currentIndex] || {}).url || url;

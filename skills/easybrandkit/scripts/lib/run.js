@@ -102,8 +102,10 @@ function notMade(dir, err) {
   return Object.assign(new Error(`${said || `No folder could be made in ${where} (${err.code || err.message})${so}.`} Pick a folder you can write in with --out.`), { code: err.code });
 }
 
-// The runs of this process that have not ended.
+// The runs of this process that have not ended, and the folders of those
+// that were saved.
 const runs = new Set();
+const saved = [];
 
 // dir is the kit's folder as given, a folder or nothing (prepareDir in
 // kit.js has refused anything else); earlier says whether it holds an
@@ -169,6 +171,15 @@ function discardRuns() {
   const stopped = [...runs].map((run) => ({ dir: run.dir, earlier: run.earlier }));
   for (const run of [...runs]) discardRun(run);
   return stopped;
+}
+
+// The folders this process has put a kit in, for what a run stopped after
+// that says.
+const savedRuns = () => [...saved];
+
+function ended(run) {
+  runs.delete(run);
+  saved.push({ dir: run.dir });
 }
 
 // A folder that holds a file, two levels down at most.
@@ -325,7 +336,7 @@ async function saveRun(run, earlierOf) {
     if (!lstat(target)) {
       try {
         rename(work, target);
-        runs.delete(run);
+        ended(run);
         sweep(path.dirname(target));
         return;
       } catch (err) {
@@ -454,7 +465,7 @@ function swap(run, earlierNow) {
     if (leftNew.length) said.push(`${leftNew.join(", ")} of the new kit could not be taken out of it again.`);
     throw new SaveError(said.join(" "));
   }
-  runs.delete(run);
+  ended(run);
   // pages/ with nothing left in it, from an earlier run with --facts. Only a
   // real folder: on Windows, rmdir removes a link to a folder.
   if (pagesFolder) {
@@ -517,4 +528,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, shownFrom, startRun, discardRun, discardRuns, saveRun, sweep };
+module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, shownFrom, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };

@@ -4,7 +4,7 @@
 const fs = require("fs");
 const os = require("os");
 const { makeKit } = require("./lib/kit");
-const { discardRuns } = require("./lib/run");
+const { discardRuns, savedRuns } = require("./lib/run");
 const { killBrowsers } = require("./lib/chrome");
 const version = require("./lib/version");
 
@@ -117,9 +117,16 @@ function stopOnSignals(json) {
       stopping = true;
       // The part folder first: makersmcp's hosted worker sends SIGKILL a
       // second after its SIGTERM.
-      for (const run of discardRuns()) {
-        const message = `stopped by ${signal}. ${run.earlier ? `The kit already in ${run.dir} is as it was.` : "No kit was saved."}`;
-        if (json) say(1, JSON.stringify({ ok: false, error: message }) + "\n");
+      const stopped = discardRuns();
+      const saved = savedRuns();
+      // A stop in the moment between the save and the end of the process
+      // keeps the new kit, whose summary has been printed already.
+      const after = !stopped.length && saved.length > 0;
+      const messages = stopped.length
+        ? stopped.map((run) => `stopped by ${signal}. ${run.earlier ? `The kit already in ${run.dir} is as it was.` : "No kit was saved."}`)
+        : [after ? `stopped by ${signal}, after the new kit was saved in ${saved[saved.length - 1].dir}.` : `stopped by ${signal}. No kit was saved.`];
+      for (const message of messages) {
+        if (json && !after) say(1, JSON.stringify({ ok: false, error: message }) + "\n");
         say(2, `easybrandkit: ${message}\n`);
       }
       killBrowsers();

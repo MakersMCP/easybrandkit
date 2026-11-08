@@ -131,6 +131,22 @@ function writeFiles(dir, files) {
   }
 }
 
+// The CLI's answer, and how long its process went on after it printed it.
+function runCli(args, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let printedAt = 0;
+    child.stdout.on("data", (chunk) => {
+      printedAt = Date.now();
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("close", (code) => resolve({ code, stdout, stderr, lingered: Date.now() - printedAt }));
+  });
+}
+
 // An earlier kit as a run leaves it, with facts and two files of the user's own.
 const EARLIER = {
   "brand.json": JSON.stringify({ version: 1, logos: [{ file: "logo-01.png", svg: "logo-01.svg" }, { file: "logo-02.png" }], screenshots: [{ file: "screen-01.png" }], card: { file: "card.png" } }),
@@ -638,7 +654,12 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
     for (const group of groups) for (const pid of processesIn(group)) process.kill(pid, "SIGKILL");
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  await makeKit(site.origin, { dir, stores: false });
+  const env = process.env;
+  // The kit, made by the CLI, whose process ends once it has printed its
+  // summary, not when a timer of the page's load runs out.
+  const made = await runCli([site.origin, "--out", dir, "--no-stores"], env);
+  assert.equal(made.code, 0, made.stderr);
+  assert.ok(made.lingered < 5_000, `the process ended ${made.lingered} ms after its summary`);
   const good = filesOf(dir);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   // Ctrl-C reaches the whole process group, the browser too; a kill can
@@ -646,7 +667,7 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
   // signal comes once its part folder holds a logo.
   for (const [signal, group, json] of [["SIGINT", true, false], ["SIGTERM", false, false], ["SIGTERM", true, true]]) {
     // A group of its own, as a terminal gives a command, which the browser joins.
-    const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     const closed = once(child, "close");
     groups.push(child.pid);
     let said = "";
@@ -666,4 +687,25 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
     await wait(1_000);
     assert.deepEqual(processesIn(child.pid), [], `no browser left running after ${signal}`);
   }
+
+  // A stop that comes once the kit is saved, while the process is still up
+  // (here a timer of the test's keeps it so), keeps the new kit and says so.
+  const hold = path.join(parent, "hold.js");
+  fs.writeFileSync(hold, "setTimeout(() => {}, 30000);\n");
+  const child = spawn(process.execPath, ["--require", hold, CLI, site.origin, "--out", dir, "--no-stores"], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  const closed = once(child, "close");
+  groups.push(child.pid);
+  let said = "";
+  let out = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  child.stdout.on("data", (chunk) => (out += chunk));
+  for (let waited = 0; waited < 60_000 && !out.includes("Saved the"); waited += 50) await wait(50);
+  assert.match(out, /^Saved the Acme brand kit to /);
+  process.kill(child.pid, "SIGTERM");
+  const [code, ended] = await closed;
+  assert.equal(ended, "SIGTERM", `exit ${code}`);
+  assert.equal(said.trim().split("\n").pop(), `easybrandkit: stopped by SIGTERM, after the new kit was saved in ${dir}.`);
+  const now = filesOf(dir);
+  assert.deepEqual(now.map((line) => line.split(" ")[0]), good.map((line) => line.split(" ")[0]));
+  assert.notEqual(now.find((line) => line.startsWith("brand.json ")), good.find((line) => line.startsWith("brand.json ")), "the new kit");
 });
