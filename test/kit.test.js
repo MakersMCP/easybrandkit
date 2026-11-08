@@ -970,8 +970,9 @@ test("a run stopped by SIGINT, SIGTERM or SIGHUP leaves the earlier kit as it wa
   // Ctrl-C reaches the whole process group, the browser too; a kill or a
   // closed terminal can reach the kit alone. With --json the run says
   // nothing as it works, so the signal comes once its part folder holds a
-  // logo.
-  for (const [signal, group, json] of [["SIGINT", true, false], ["SIGTERM", false, false], ["SIGTERM", true, true], ["SIGHUP", false, false]]) {
+  // logo. The last run's output has nobody reading it any more, as when the
+  // program that started it has gone: the stop still ends it by its signal.
+  for (const [signal, group, json, gone] of [["SIGINT", true, false, false], ["SIGTERM", false, false, false], ["SIGTERM", true, true, false], ["SIGHUP", false, false, false], ["SIGTERM", false, true, true]]) {
     // A group of its own, as a terminal gives a command, which the browser joins.
     const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     const closed = once(child, "close");
@@ -979,7 +980,8 @@ test("a run stopped by SIGINT, SIGTERM or SIGHUP leaves the earlier kit as it wa
     let said = "";
     let out = "";
     child.stderr.on("data", (chunk) => (said += chunk));
-    child.stdout.on("data", (chunk) => (out += chunk));
+    if (gone) child.stdout.destroy();
+    else child.stdout.on("data", (chunk) => (out += chunk));
     const working = () => (json ? fs.readdirSync(dir).some((name) => name.startsWith(".easybrandkit-part-") && fs.existsSync(path.join(dir, name, "logo-01.png"))) : said.includes("Taking the first screen"));
     for (let waited = 0; waited < 60_000 && !working(); waited += 50) await wait(50);
     assert.ok(working(), `the run got as far as the logos: ${said}`);
@@ -989,7 +991,7 @@ test("a run stopped by SIGINT, SIGTERM or SIGHUP leaves the earlier kit as it wa
     assert.deepEqual(filesOf(dir), good, signal);
     const message = `stopped by ${signal}. The kit already in ${dir} is as it was.`;
     assert.equal(said.trim().split("\n").pop(), `easybrandkit: ${message}`);
-    assert.equal(out, json ? `${JSON.stringify({ ok: false, error: message })}\n` : "");
+    assert.equal(out, json && !gone ? `${JSON.stringify({ ok: false, error: message })}\n` : "");
     assert.deepEqual(tempLeft(), [], `nothing left in the temp folder after ${signal}`);
     await wait(1_000);
     assert.deepEqual(processesIn(child.pid), [], `no browser left running after ${signal}`);

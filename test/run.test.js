@@ -605,6 +605,33 @@ test("a pages that is a link is never read or written through", async (t) => {
   assert.deepEqual(filesOf(mine), theirs);
 });
 
+test("a file named pages is the user's: a run without --facts keeps it, and one with --facts is refused before it reads the site", async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, { ...Object.fromEntries(Object.entries(EARLIER).filter(([name]) => !name.startsWith("pages/"))), pages: "mine" });
+  // The earlier kit's names hold pages/home.md and the other page texts,
+  // which are looked for below a file.
+  const run = startRun(dir, checkDir(dir));
+  writeFiles(run.work, FRESH);
+  await saveRun(run, earlierOf(dir));
+  discardRun(run);
+  assert.deepEqual(filesOf(dir), [
+    `BRAND.md ${hash("new")}`, `_brand.yml ${hash("new")}`, `brand.json ${hash(FRESH["brand.json"])}`, `card.png ${hash("new")}`, `logo-01.png ${hash("new")}`, `notes.txt ${hash("mine")}`, `pages ${hash("mine")}`,
+  ]);
+  assert.throws(
+    () => checkDir(dir, { facts: true }),
+    (err) => err.message === `${path.join(dir, "pages")} is a file, and --facts saves the text of each page it reads in a folder by that name. Move it away, or pick another folder with --out.` && err.earlierKit === dir,
+  );
+  // One that came there while the site was read stops the move, and the
+  // kit there stays as it was.
+  const before = filesOf(dir);
+  const second = startRun(dir, checkDir(dir));
+  writeFiles(second.work, { ...FRESH, "FACTS.md": "new", "pages/home.md": "page text" });
+  await assert.rejects(saveRun(second, earlierOf(dir)), (err) => err.message === `The new kit could not be put in ${dir}: pages there is a file, where the new kit has a folder of page texts. The kit already there is as it was.`);
+  discardRun(second);
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("the part folder of a run killed outright: left alone while it may be at work, removed once stale", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
