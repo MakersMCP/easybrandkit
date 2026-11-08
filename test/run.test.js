@@ -429,6 +429,43 @@ test("a run stopped while it waits for the lock is not saved, and the wait gives
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("a lock left by a run that has ended that cannot be removed ends the wait at once, and its error names it", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may write anywhere") }, async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  const lock = path.join(dir, LOCK);
+  const old = new Date(Date.now() - 10 * 60_000);
+  // A lock that is a folder, and a lock in a kit's folder that has become
+  // read-only since the run started.
+  for (const [how, code] of [["a folder", /EISDIR|EPERM/], ["read-only", /EACCES/]]) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    writeFiles(dir, kitOf("earlier", ["logo-01.png"]));
+    if (how === "a folder") fs.mkdirSync(lock);
+    else fs.writeFileSync(lock, JSON.stringify({ pid: endedPid(), host: os.hostname(), token: "0a1b2c3d" }));
+    fs.utimesSync(lock, old, old);
+    const before = filesOf(dir);
+    const run = startRun(dir, prepareDir(dir));
+    writeFiles(run.work, kitOf("new", ["logo-01.png"]));
+    if (how === "read-only") fs.chmodSync(dir, 0o555);
+    const started = Date.now();
+    let timer;
+    // On the code before, the wait went on for good.
+    const guard = new Promise((resolve) => (timer = setTimeout(() => resolve(new Error(`still waiting after ${Date.now() - started} ms`)), 15_000)));
+    let outcome;
+    try {
+      outcome = await Promise.race([saveRun(run, earlierOf(dir)).then(() => new Error("saved"), (err) => err), guard]);
+    } finally {
+      clearTimeout(timer);
+      fs.chmodSync(dir, 0o755);
+      discardRun(run);
+    }
+    assert.ok(outcome instanceof SaveError, `${how}: ${outcome.message}`);
+    const said = /^The new kit was not put in (.+): (.+) is a lock left by a run that has ended, and it could not be removed \((\w+)\)\. Remove it and run again\. The kit already there is as it was\.$/.exec(outcome.message);
+    assert.ok(said && said[1] === dir && said[2] === lock && code.test(said[3]), `${how}: ${outcome.message}`);
+    assert.ok(Date.now() - started < 2_000, `${how}: refused after ${Date.now() - started} ms`);
+    assert.deepEqual(filesOf(dir), before, how);
+  }
+});
+
 test("a pages that is a link is never read or written through", async (t) => {
   const parent = tempParent(t);
   const mine = path.join(parent, "site-content", "pages");

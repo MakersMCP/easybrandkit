@@ -16,7 +16,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { sleep } = require("./time");
+const { sleep, timeLeft } = require("./time");
 
 const PART = /^\.easybrandkit-part-(\d+)-[0-9a-f]{8}$/;
 // The lock, and the marker a waiting run makes to take over a lock that a
@@ -304,27 +304,33 @@ function letGo(lock) {
 // A lock left by a run killed outright is removed by one waiting run at a
 // time: the one that makes the marker removes the lock, and only while it
 // is still the one it found. The others find the marker there and wait, so
-// two of them never both remove a lock and go on.
+// two of them never both remove a lock and go on. What stopped the lock or
+// an old marker from being removed comes back, as an error whose left names
+// the file; null when nothing did.
 function takeOver(file, seen) {
   const marker = path.join(path.dirname(file), TAKEOVER);
+  const stuck = (err, at) => (err.code === "ENOENT" ? null : Object.assign(err, { left: at }));
   let fd;
   try {
     fd = fs.openSync(marker, "wx");
-  } catch {
+  } catch (err) {
+    // No marker can be made: the lock stays.
+    if (err.code !== "EEXIST") return stuck(err, file);
     // Another run is taking it over, or one killed while doing so left the
     // marker, which goes once it is old.
     try {
       if (Date.now() - fs.lstatSync(marker).mtimeMs > LOCK_WAIT) fs.unlinkSync(marker);
-    } catch {
-      // Gone already.
+    } catch (err) {
+      return stuck(err, marker);
     }
-    return;
+    return null;
   }
   try {
     const now = readLock(file);
     if (now && !now.live && now.text === seen.text && now.mtimeMs === seen.mtimeMs) fs.unlinkSync(file);
-  } catch {
-    // Gone already, or taken by another run since.
+    return null;
+  } catch (err) {
+    return stuck(err, file);
   } finally {
     fs.closeSync(fd);
     try {
@@ -353,7 +359,10 @@ function why(err) {
 // stopped while it waits for the lock is not saved. earlierOf gives the
 // earlier kit's file names as the folder holds them at that moment, or
 // throws when the folder now holds something else. A rename that fails puts
-// back what had moved, and the error says what the folder holds.
+// back what had moved, and the error says what the folder holds. The wait
+// for the lock ends after LOCK_WAIT whatever holds it, and at once for a
+// lock left by a run killed outright that cannot be removed, or for a live
+// one once the run's time is up.
 async function saveRun(run, earlierOf) {
   const { dir, target, work } = run;
   const file = path.join(target, LOCK);
@@ -394,8 +403,14 @@ async function saveRun(run, earlierOf) {
       return;
     }
     const holder = readLock(file);
-    if (holder && !holder.live) takeOver(file, holder);
-    else if (waited >= LOCK_WAIT) throw new SaveError(`The new kit was not put in ${dir}: another run is putting its kit there and has not finished. ${asWas()} Try again in a moment.`);
+    const stuck = holder && !holder.live ? takeOver(file, holder) : null;
+    // Only Windows lets go of a file a moment later, once a virus scanner
+    // has read it.
+    const lasting = stuck && !(process.platform === "win32" && BUSY.includes(stuck.code));
+    if (lasting || waited >= LOCK_WAIT || (holder && holder.live && timeLeft() <= 0)) {
+      if (stuck) throw new SaveError(`The new kit was not put in ${dir}: ${shownFrom(dir, stuck.left)} is a lock left by a run that has ended, and it could not be removed (${stuck.code}). Remove it and run again. ${asWas()}`);
+      throw new SaveError(`The new kit was not put in ${dir}: another run is putting its kit there and has not finished. ${asWas()} Try again in a moment.`);
+    }
     await sleep(50);
   }
 }
