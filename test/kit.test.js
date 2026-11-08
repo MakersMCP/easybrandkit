@@ -302,9 +302,11 @@ function ended(pid) {
 
 // Stands in for Chrome: it makes a folder in the temp folder, as Chrome's
 // URL fetcher does, and one that holds a file. On Linux it also starts a
-// helper that goes on writing into the profile for five seconds, as Chrome's
-// network service does as it ends; elsewhere a browser's helpers cannot be
-// told.
+// helper that goes on writing into the profile for five seconds, as
+// Chrome's network service does as it ends: each write a process of its own
+// that names the profile and writes a moment after it starts, so that one
+// started as the helper is killed writes after the profile is removed
+// unless it is found too. Elsewhere a browser's helpers cannot be told.
 const STAND_IN = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
@@ -312,7 +314,7 @@ done
 mkdir "$TMPDIR/com.google.Chrome.chrome_chrome_url_fetcher_.$$"
 mkdir "$TMPDIR/com.google.Chrome.busy$$" && echo x > "$TMPDIR/com.google.Chrome.busy$$/file"
 if [ -n "$HELPER_PID" ]; then
-  ( i=0; while [ $i -lt 250 ]; do mkdir -p "$profile/Default"; sleep 0.02; i=$((i + 1)); done ) &
+  ( i=0; while [ $i -lt 100 ]; do sh -c 'sleep 0.05; mkdir -p "$1/Default"' write "$profile"; i=$((i + 1)); done ) &
   echo $! > "$HELPER_PID"
 fi
 printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
