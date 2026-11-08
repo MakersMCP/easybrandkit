@@ -102,6 +102,33 @@ function notMade(dir, err) {
   return Object.assign(new Error(`${said || `No folder could be made in ${where} (${err.code || err.message})${so}.`} Pick a folder you can write in with --out.`), { code: err.code });
 }
 
+// Whether at is folder or a path inside it.
+function within(at, folder) {
+  const rel = path.relative(folder, at);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+// An error of a run that did not end well, as the user is told it: never
+// with the part folder's name, which is gone by then, and a full disk told
+// plainly, as the kit's disk or as the temp folder's, where the browser
+// keeps its profile. An error that names no path comes from a write, and a
+// run writes only into its part folder.
+function toldPlainly(err, run) {
+  if (err.code === "ENOSPC" || err.code === "EDQUOT") {
+    const at = typeof err.path === "string" ? path.resolve(err.path) : "";
+    if (!at || within(at, run.work) || within(at, run.target)) {
+      return Object.assign(new Error(`The disk has no room left for the new kit (${err.code}).`), { code: err.code });
+    }
+    const temp = path.resolve(os.tmpdir());
+    if (within(at, temp)) {
+      const full = err.code === "ENOSPC" ? `The disk that holds the temp folder, ${temp}, is full (ENOSPC).` : `This user has no room left on the disk that holds the temp folder, ${temp} (EDQUOT).`;
+      return Object.assign(new Error(`${full} Free some space on it, or set ${process.platform === "win32" ? "TEMP" : "TMPDIR"} to a folder on another disk.`), { code: err.code });
+    }
+  }
+  if (run.work && String(err.message).includes(run.work)) err.message = String(err.message).split(run.work).join(run.target);
+  return err;
+}
+
 // The runs of this process that have not ended, and the folders of those
 // that were saved.
 const runs = new Set();
@@ -528,4 +555,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, shownFrom, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
+module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };

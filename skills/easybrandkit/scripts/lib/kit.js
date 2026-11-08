@@ -36,7 +36,7 @@ const { brandYml } = require("./brandyml");
 const { readFactPages, writeFacts, FACT_FILES } = require("./facts");
 const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, sleep } = require("./time");
-const { SaveError, isRunName, swapping, shownFrom, startRun, discardRun, saveRun } = require("./run");
+const { SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, saveRun } = require("./run");
 const version = require("./version");
 
 // Logos are read from the desktop layout: a narrow screen shows the mobile
@@ -468,9 +468,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     return { dir: target, kit, facts: claims };
   } catch (err) {
     if (err instanceof SaveError || !(err instanceof Error)) throw err;
-    // A full disk is told plainly, and no other error names the part folder.
-    const plain = err.code === "ENOSPC" || err.code === "EDQUOT" ? Object.assign(new Error(`The disk has no room left for the new kit (${err.code}).`), { code: err.code }) : err;
-    if (plain === err && String(err.message).includes(work)) err.message = String(err.message).split(work).join(path.resolve(target));
+    const plain = toldPlainly(err, run);
     // For the CLI, which says that an earlier kit is as it was. saveRun's
     // own errors say what the folder holds.
     if (run.earlier) plain.earlierKit = target;

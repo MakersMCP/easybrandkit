@@ -265,6 +265,31 @@ test("a run that fails leaves its folder as it was: an earlier kit stays whole, 
   assert.deepEqual(fs.readdirSync(parent), ["kit"]);
 });
 
+test("a temp folder with no room left for the browser's profile is told as the temp folder's, not the kit's", async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  // A browser is found, any file will do, and its profile cannot be made.
+  const chrome = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = process.execPath;
+  t.after(() => {
+    if (chrome === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = chrome;
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const mkdtemp = fs.mkdtempSync;
+  t.mock.method(fs, "mkdtempSync", function (prefix, ...rest) {
+    if (path.basename(String(prefix)) === "easybrandkit-chrome-") {
+      throw Object.assign(new Error(`ENOSPC: no space left on device, mkdtemp '${prefix}XXXXXX'`), { code: "ENOSPC", errno: -28, syscall: "mkdtemp", path: `${prefix}XXXXXX` });
+    }
+    return mkdtemp.call(this, prefix, ...rest);
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const said = `The disk that holds the temp folder, ${path.resolve(os.tmpdir())}, is full (ENOSPC). Free some space on it, or set ${process.platform === "win32" ? "TEMP" : "TMPDIR"} to a folder on another disk.`;
+  await assert.rejects(makeKit("https://acme.example/", { dir, stores: false }), (err) => err.message === said && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("the skill folder carries its own version, the same as the package's", () => {
   assert.equal(require("../skills/easybrandkit/scripts/lib/version"), require("../package.json").version);
 });

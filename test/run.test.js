@@ -13,7 +13,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
-const { startRun, discardRun, discardRuns, saveRun, SaveError, STALE, LOCK } = require("../skills/easybrandkit/scripts/lib/run");
+const { startRun, discardRun, discardRuns, saveRun, toldPlainly, SaveError, STALE, LOCK } = require("../skills/easybrandkit/scripts/lib/run");
 const { prepareDir } = require("../skills/easybrandkit/scripts/lib/kit");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
@@ -489,6 +489,32 @@ test("the part folder of a run killed outright: left alone while it may be at wo
   assert.equal(fs.existsSync(fresh), true, "changed a moment ago");
   assert.equal(fs.existsSync(live), true, "its process runs");
   assert.equal(fs.existsSync(path.join(swapping, ".earlier", "brand.json")), true, "it holds an earlier kit");
+});
+
+test("an error never names the part folder, and a full disk is told as the kit's or as the temp folder's", (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const run = startRun(dir, prepareDir(dir));
+  t.after(() => discardRun(run));
+  const failed = (code, at) => Object.assign(new Error(`${code}: it failed, open '${at}'`), { code, syscall: "open", path: at });
+  // A file the run could not write in its part folder is named in the kit's.
+  assert.equal(toldPlainly(failed("EIO", path.join(run.work, "BRAND.md")), run).message, `EIO: it failed, open '${path.join(dir, "BRAND.md")}'`);
+  const temp = path.resolve(os.tmpdir());
+  const variable = process.platform === "win32" ? "TEMP" : "TMPDIR";
+  for (const code of ["ENOSPC", "EDQUOT"]) {
+    // A write, which names no path, and a file in the part folder: the kit's disk.
+    const kitDisk = `The disk has no room left for the new kit (${code}).`;
+    assert.equal(toldPlainly(Object.assign(new Error(`${code}: no space left on device, write`), { code, syscall: "write" }), run).message, kitDisk);
+    assert.equal(toldPlainly(failed(code, path.join(run.work, "logo-01.png")), run).message, kitDisk);
+    // The browser's profile in the temp folder, which here holds the kit's
+    // folder too.
+    const full = code === "ENOSPC" ? `The disk that holds the temp folder, ${temp}, is full (ENOSPC).` : `This user has no room left on the disk that holds the temp folder, ${temp} (EDQUOT).`;
+    assert.equal(toldPlainly(failed(code, path.join(os.tmpdir(), "easybrandkit-chrome-XXXXXX")), run).message, `${full} Free some space on it, or set ${variable} to a folder on another disk.`);
+  }
+  // Anywhere else, the error is told as it is.
+  const other = failed("ENOSPC", path.join(path.parse(temp).root, "easybrandkit-elsewhere", "file"));
+  assert.equal(toldPlainly(other, run), other);
 });
 
 test("the CLI says what a failed run leaves, on the error's own line, and --help says it too", (t) => {
