@@ -109,14 +109,27 @@ function readKit(dir) {
   }
 }
 
-// lstat, with a folder this user may not look into told plainly.
+const mayNotOpen = (dir, at, code) => new Error(`This user may not open ${shownFrom(dir, at)} (${code}). Pick a folder you can write in with --out.`);
+
+// lstat, with a folder this user may not look into told plainly: the first
+// one up the path whose own entry this user can see.
 function look(at, dir) {
   try {
     return fs.lstatSync(at, { throwIfNoEntry: false });
   } catch (err) {
     if (err.code === "ENOTDIR") return undefined;
-    if (err.code === "EACCES" || err.code === "EPERM") throw new Error(`This user may not open ${shownFrom(dir, path.dirname(at))} (${err.code}). Pick a folder you can write in with --out.`);
-    throw err;
+    if (err.code !== "EACCES" && err.code !== "EPERM") throw err;
+    let shut = path.dirname(at);
+    for (;;) {
+      try {
+        fs.lstatSync(shut);
+        break;
+      } catch {
+        if (path.dirname(shut) === shut) break;
+        shut = path.dirname(shut);
+      }
+    }
+    throw mayNotOpen(dir, shut, err.code);
   }
 }
 
@@ -153,6 +166,14 @@ function prepareDir(dir, { facts = false, saving = false } = {}) {
       break;
     }
     if (path.dirname(at) === at) return null;
+  }
+  // A folder this user may list but not open: nothing in it can be read or
+  // moved. Windows has no such folder.
+  try {
+    fs.accessSync(target, fs.constants.X_OK);
+  } catch (err) {
+    if (err.code === "EACCES" || err.code === "EPERM") throw mayNotOpen(dir, target, err.code);
+    throw err;
   }
   let names;
   try {

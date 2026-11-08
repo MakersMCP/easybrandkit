@@ -616,6 +616,14 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
     assert.equal(link.status, 1);
     assert.equal(link.stderr, `easybrandkit: ${out} is a link to ${path.join(parent, "nowhere", "real")}, which is not there. Pick a folder with --out.\n`);
   }
+  // Two links that lead to each other.
+  if (process.platform !== "win32") {
+    fs.symlinkSync("loop-b", path.join(parent, "loop-a"));
+    fs.symlinkSync("loop-a", path.join(parent, "loop-b"));
+    const loop = cli("--out", path.join(parent, "loop-a"));
+    assert.equal(loop.status, 1);
+    assert.equal(loop.stderr, `easybrandkit: ${path.join(parent, "loop-a")} is a link that does not lead to a folder. Pick a folder with --out.\n`);
+  }
   assert.deepEqual(filesOf(dir), before);
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails or is stopped leaves the folder as it\nwas, and a folder it would have made is not made\.\n/);
@@ -645,6 +653,38 @@ test("a folder this user may not write in is told plainly, without the part fold
     fs.chmodSync(dir, 0o755);
     fs.chmodSync(shut, 0o755);
   }
+});
+
+test("a folder this user may not open or read is told plainly, and so is one below it", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may read anywhere") }, (t) => {
+  const parent = tempParent(t);
+  // A kit's folder this user may list but not open, one it may open but not
+  // list, and one with a folder below it.
+  const kit = path.join(parent, "kit");
+  const unread = path.join(parent, "unread");
+  const shut = path.join(parent, "shut");
+  writeFiles(kit, EARLIER);
+  writeFiles(unread, EARLIER);
+  writeFiles(shut, { "inner/notes.txt": "mine" });
+  const before = [kit, unread, shut].map((dir) => filesOf(dir));
+  const modes = [[kit, 0o600], [unread, 0o300], [shut, 0o600]];
+  for (const [dir, mode] of modes) fs.chmodSync(dir, mode);
+  try {
+    const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
+    const cli = (out) => spawnSync(process.execPath, [CLI, "acme.example", "--out", out], { encoding: "utf8", env });
+    const pick = "Pick a folder you can write in with --out.";
+    for (const [out, said] of [
+      [kit, `This user may not open ${kit} (EACCES). ${pick}`],
+      [unread, `This user may not read ${unread} (EACCES). ${pick}`],
+      [path.join(shut, "inner", "kit"), `This user may not open ${shut} (EACCES). ${pick}`],
+    ]) {
+      const run = cli(out);
+      assert.equal(run.status, 1, out);
+      assert.equal(run.stderr, `easybrandkit: ${said}\n`);
+    }
+  } finally {
+    for (const [dir] of modes) fs.chmodSync(dir, 0o755);
+  }
+  assert.deepEqual([kit, unread, shut].map((dir) => filesOf(dir)), before);
 });
 
 // Whether a process has ended, a zombie too.
