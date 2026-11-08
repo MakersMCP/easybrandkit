@@ -145,7 +145,7 @@ function look(at, dir) {
 // since the kit does not write through it. A folder whose brand.json is
 // away while another run puts its kit in counts as a kit (saving is false
 // before a run, when the folder is read again under the run's own lock).
-function prepareDir(dir, { facts = false, saving = false } = {}) {
+function checkDir(dir, { facts = false, saving = false } = {}) {
   const target = path.resolve(dir);
   for (let at = target; ; at = path.dirname(at)) {
     const stat = look(at, dir);
@@ -199,6 +199,33 @@ function prepareDir(dir, { facts = false, saving = false } = {}) {
     throw Object.assign(new Error(`${path.join(dir, "pages")} is ${pages.isSymbolicLink() ? "a link" : "a file"}, and --facts saves the text of each page it reads in a folder by that name. Move it away, or pick another folder with --out.`), { earlierKit: dir });
   }
   return [...new Set([...kitFiles(old), ...KIT_NAMES])];
+}
+
+// The kit's folder made ready for a kit written straight into it, as runs
+// did up to 0.4.0: made when it is not there, refused as checkDir refuses
+// it, and an earlier kit's own files removed, while the user's files stay.
+// makeKit no longer calls it, since a run that then failed lost the earlier
+// kit; it is kept for code that writes a kit itself. A folder under a kit
+// file's name is not the kit's, and a pages that is not a folder is not
+// looked into.
+function prepareDir(dir) {
+  const names = checkDir(dir);
+  fs.mkdirSync(dir, { recursive: true });
+  if (!names) return;
+  const pages = fs.lstatSync(path.join(dir, "pages"), { throwIfNoEntry: false });
+  const pagesFolder = Boolean(pages && pages.isDirectory());
+  for (const name of names) {
+    if (name.startsWith("pages/") && !pagesFolder) continue;
+    const at = fs.lstatSync(path.join(dir, name), { throwIfNoEntry: false });
+    if (at && !at.isDirectory()) fs.rmSync(path.join(dir, name), { force: true });
+  }
+  if (pagesFolder) {
+    try {
+      fs.rmdirSync(path.join(dir, "pages"));
+    } catch {
+      // Holding files that are not the kit's.
+    }
+  }
 }
 
 // The site's name: og:site_name, else the title up to its first separator
@@ -415,7 +442,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
   // The files are made in the run's part folder, work, and go in place only
   // once everything has been read and written.
-  const earlier = prepareDir(target, { facts });
+  const earlier = checkDir(target, { facts });
   let run;
   try {
     run = startRun(target, earlier);
@@ -485,7 +512,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     const claims = facts && read ? writeFacts(work, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
     // The folder is read again as the files go in: it can have changed
     // while the site was read.
-    await saveRun(run, () => prepareDir(target, { saving: true }) || []);
+    await saveRun(run, () => checkDir(target, { saving: true }) || []);
     return { dir: target, kit, facts: claims };
   } catch (err) {
     if (err instanceof SaveError || !(err instanceof Error)) throw err;
@@ -499,4 +526,4 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   }
 }
 
-module.exports = { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName };
+module.exports = { makeKit, normalizeUrl, homePageOf, siteOfListing, checkDir, prepareDir, brandName };

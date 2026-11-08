@@ -14,7 +14,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
 const { startRun, discardRun, discardRuns, saveRun, toldPlainly, SaveError, STALE, LOCK, LOCK_STALE } = require("../skills/easybrandkit/scripts/lib/run");
-const { prepareDir } = require("../skills/easybrandkit/scripts/lib/kit");
+const { checkDir } = require("../skills/easybrandkit/scripts/lib/kit");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -79,7 +79,7 @@ const tempParent = (t) => {
   return parent;
 };
 
-const earlierOf = (dir) => () => prepareDir(dir, { saving: true }) || [];
+const earlierOf = (dir) => () => checkDir(dir, { saving: true }) || [];
 
 // The pid of a process that has ended, and a process that runs until the
 // test ends.
@@ -95,7 +95,7 @@ const posixOnly = process.platform === "win32" && "POSIX modes and signals";
 test("a new folder: the part folder sits next to it and becomes it when the run ends well", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "new", "acme");
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   assert.equal(path.dirname(run.work), path.join(parent, "new"));
   assert.match(path.basename(run.work), /^\.easybrandkit-part-\d+-[0-9a-f]{8}$/);
   assert.equal(fs.existsSync(dir), false, "nothing at the kit's folder while the run works");
@@ -116,11 +116,11 @@ test("a part folder gets the mode any folder made there gets, so a default ACL i
   assert.equal(want, 0o755);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
-  const inside = startRun(dir, prepareDir(dir));
+  const inside = startRun(dir, checkDir(dir));
   assert.equal(mode(inside.work), want, "inside a kit's folder that is there");
   discardRun(inside);
   const fresh = path.join(parent, "fresh");
-  const run = startRun(fresh, prepareDir(fresh));
+  const run = startRun(fresh, checkDir(fresh));
   assert.equal(mode(run.work), want, "next to the folder a run makes");
   writeFiles(run.work, FRESH);
   await saveRun(run, earlierOf(fresh));
@@ -136,7 +136,7 @@ test("a run that does not end well removes its part folder and the folders it ma
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
-  const second = startRun(dir, prepareDir(dir));
+  const second = startRun(dir, checkDir(dir));
   assert.equal(path.dirname(second.work), dir, "inside a folder that is there");
   writeFiles(second.work, FRESH);
   discardRun(second);
@@ -148,7 +148,7 @@ test("ended well over an earlier kit: its files go, the new ones come, the user'
   const dir = path.join(parent, "kit");
   // A file of the user's under a name the new kit writes is replaced.
   writeFiles(dir, { ...EARLIER, "screen-01.png": "mine" });
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, { ...FRESH, "screen-01.png": "new", "FACTS.md": "new", "pages/pricing.md": "new" });
   await saveRun(run, earlierOf(dir));
   discardRun(run);
@@ -157,7 +157,7 @@ test("ended well over an earlier kit: its files go, the new ones come, the user'
     `logo-01.png ${hash("new")}`, `notes.txt ${hash("mine")}`, "pages/", `pages/mine.txt ${hash("mine")}`, `pages/pricing.md ${hash("new")}`, `screen-01.png ${hash("new")}`,
   ]);
   // A pages/ the earlier facts leave empty goes; one with the user's files stays.
-  const again = startRun(dir, prepareDir(dir));
+  const again = startRun(dir, checkDir(dir));
   writeFiles(again.work, FRESH);
   fs.rmSync(path.join(dir, "pages", "mine.txt"));
   await saveRun(again, earlierOf(dir));
@@ -172,7 +172,7 @@ test("a move that cannot finish puts back what it moved, and its error says why 
   // A folder of the user's under a name the new kit writes.
   fs.mkdirSync(path.join(dir, "screen-01.png"));
   const before = filesOf(dir);
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, { ...FRESH, "screen-01.png": "new" });
   await assert.rejects(
     saveRun(run, earlierOf(dir)),
@@ -185,7 +185,7 @@ test("a move that cannot finish puts back what it moved, and its error says why 
   // that another program holds open, so only there is that the reason given.
   fs.rmdirSync(path.join(dir, "screen-01.png"));
   const kept = filesOf(dir);
-  const second = startRun(dir, prepareDir(dir));
+  const second = startRun(dir, checkDir(dir));
   writeFiles(second.work, FRESH);
   const rename = fs.renameSync;
   t.mock.method(fs, "renameSync", function (from, to) {
@@ -215,7 +215,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
     }
     return rename.call(this, from, to);
   });
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, { ...FRESH, "screen-01.png": "new" });
   let kept = "";
   await assert.rejects(saveRun(run, earlierOf(dir)), (err) => {
@@ -234,7 +234,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
   rename(path.join(kept, "BRAND.md"), path.join(dir, "BRAND.md"));
   fs.rmSync(kept, { recursive: true });
   folderMoves = false;
-  const second = startRun(dir, prepareDir(dir));
+  const second = startRun(dir, checkDir(dir));
   writeFiles(second.work, { ...FRESH, "screen-01.png": "new" });
   const aside = path.join(dir, path.basename(second.work), ".earlier");
   await assert.rejects(saveRun(second, earlierOf(dir)), (err) => err.message.endsWith(` Some files of the earlier kit could not be put back; they are in ${aside}.`));
@@ -246,7 +246,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
   mock.mock.restore();
   const other = path.join(parent, "other");
   writeFiles(other, EARLIER);
-  const third = startRun(other, prepareDir(other));
+  const third = startRun(other, checkDir(other));
   writeFiles(third.work, FRESH);
   t.mock.method(fs, "renameSync", function (from, to) {
     if (from === path.join(third.work, "brand.json")) {
@@ -270,7 +270,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
   // both files stay.
   const fourthDir = path.join(parent, "fourth");
   writeFiles(fourthDir, EARLIER);
-  const fourth = startRun(fourthDir, prepareDir(fourthDir));
+  const fourth = startRun(fourthDir, checkDir(fourthDir));
   writeFiles(fourth.work, FRESH);
   t.mock.method(fs, "renameSync", function (from, to) {
     rename.call(this, from, to);
@@ -301,7 +301,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
   const cwd = process.cwd();
   process.chdir(fifthDir);
   try {
-    const fifth = startRun(".", prepareDir("."));
+    const fifth = startRun(".", checkDir("."));
     writeFiles(fifth.work, { ...FRESH, "screen-01.png": "new" });
     let keptFifth = "";
     await assert.rejects(saveRun(fifth, earlierOf(".")), (err) => {
@@ -319,7 +319,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
 test("a folder made while the run worked: a kit there is read again and replaced, other files are refused", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "acme");
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, FRESH);
   // Another run saves a kit there meanwhile, with a logo this one does not have.
   const other = { version: 1, logos: [{ file: "logo-01.png" }, { file: "logo-02.png" }] };
@@ -330,7 +330,7 @@ test("a folder made while the run worked: a kit there is read again and replaced
     `BRAND.md ${hash("new")}`, `_brand.yml ${hash("new")}`, `brand.json ${hash(FRESH["brand.json"])}`, `card.png ${hash("new")}`, `logo-01.png ${hash("new")}`, `notes.txt ${hash("mine")}`,
   ]);
   const elsewhere = path.join(parent, "other");
-  const second = startRun(elsewhere, prepareDir(elsewhere));
+  const second = startRun(elsewhere, checkDir(elsewhere));
   writeFiles(second.work, FRESH);
   writeFiles(elsewhere, { "notes.txt": "mine" });
   await assert.rejects(saveRun(second, earlierOf(elsewhere)), (err) => err instanceof SaveError && /other is not empty and holds no earlier brand kit/.test(err.message));
@@ -339,7 +339,7 @@ test("a folder made while the run worked: a kit there is read again and replaced
   // Made between the look and the move, which then finds it there (EPERM on
   // Windows, ENOTEMPTY elsewhere).
   const late = path.join(parent, "late");
-  const third = startRun(late, prepareDir(late));
+  const third = startRun(late, checkDir(late));
   writeFiles(third.work, FRESH);
   const rename = fs.renameSync;
   t.mock.method(fs, "renameSync", function (from, to) {
@@ -359,8 +359,8 @@ test("two runs that put their kits in one folder at the same moment take turns",
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
   writeFiles(dir, { ...kitOf("earlier", ["logo-01.png", "logo-02.png"]), "notes.txt": "mine" });
-  const a = startRun(dir, prepareDir(dir));
-  const b = startRun(dir, prepareDir(dir));
+  const a = startRun(dir, checkDir(dir));
+  const b = startRun(dir, checkDir(dir));
   writeFiles(a.work, kitOf("A", ["logo-01.png", "logo-02.png", "logo-03.png"]));
   writeFiles(b.work, kitOf("B", ["logo-01.png"]));
   // B starts to save in the middle of A's moves, right after A has moved
@@ -383,7 +383,7 @@ test("two runs that put their kits in one folder at the same moment take turns",
     }
     if (!second && String(to).endsWith(`${path.sep}.earlier${path.sep}brand.json`)) {
       try {
-        seen = prepareDir(dir);
+        seen = checkDir(dir);
       } catch (err) {
         seen = err;
       }
@@ -410,14 +410,14 @@ test("a lock that a run killed outright left is taken over, and a live one is wa
   // folder is refused, as its earlier kit is not whole.
   fs.renameSync(path.join(dir, "brand.json"), path.join(parent, "brand.json"));
   fs.writeFileSync(lock, lockOf(endedPid()));
-  assert.throws(() => prepareDir(dir), /kit is not empty and holds no earlier brand kit/);
+  assert.throws(() => checkDir(dir), /kit is not empty and holds no earlier brand kit/);
   // While a run that is alive holds the lock, the same folder is a kit
   // being put in place, and its names are read again when the run saves.
   fs.writeFileSync(lock, lockOf(livePid(t)));
-  assert.ok(prepareDir(dir).includes("brand.json"));
+  assert.ok(checkDir(dir).includes("brand.json"));
   fs.renameSync(path.join(parent, "brand.json"), path.join(dir, "brand.json"));
   // The live lock is waited for until it goes.
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, kitOf("new", ["logo-01.png"]));
   const started = Date.now();
   setTimeout(() => fs.unlinkSync(lock), 400);
@@ -429,7 +429,7 @@ test("a lock that a run killed outright left is taken over, and a live one is wa
   // process's pid that no run of this process holds.
   for (const pid of [endedPid(), process.pid]) {
     fs.writeFileSync(lock, lockOf(pid));
-    const next = startRun(dir, prepareDir(dir));
+    const next = startRun(dir, checkDir(dir));
     writeFiles(next.work, kitOf(`after ${pid}`, ["logo-01.png"]));
     await saveRun(next, earlierOf(dir));
     discardRun(next);
@@ -445,7 +445,7 @@ test("a run stopped while it waits for the lock is not saved, and the wait gives
   const before = filesOf(dir);
   // A lock that a run that is alive holds.
   fs.writeFileSync(path.join(dir, LOCK), JSON.stringify({ pid: livePid(t), host: os.hostname(), token: "0a1b2c3d" }));
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, kitOf("new", ["logo-01.png"]));
   const started = Date.now();
   const saving = saveRun(run, earlierOf(dir));
@@ -464,8 +464,8 @@ test("of two runs that find a lock left by a run that has ended, one removes it,
   writeFiles(dir, kitOf("earlier", ["logo-01.png"]));
   const lock = path.join(dir, LOCK);
   fs.writeFileSync(lock, JSON.stringify({ pid: endedPid(), host: os.hostname(), token: "0a1b2c3d" }));
-  const a = startRun(dir, prepareDir(dir));
-  const b = startRun(dir, prepareDir(dir));
+  const a = startRun(dir, checkDir(dir));
+  const b = startRun(dir, checkDir(dir));
   writeFiles(a.work, kitOf("A", ["logo-01.png"]));
   writeFiles(b.work, kitOf("B", ["logo-01.png"]));
   // A third run takes the lock as soon as it is gone, and holds it.
@@ -500,7 +500,7 @@ test("a run lets go of its own lock only: one that took its place stays", async 
   const dir = path.join(parent, "kit");
   writeFiles(dir, kitOf("earlier", ["logo-01.png"]));
   const lock = path.join(dir, LOCK);
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, kitOf("new", ["logo-01.png"]));
   // Another run's lock comes in its place as the last file moves in.
   const theirs = JSON.stringify({ pid: livePid(t), host: os.hostname(), token: "c0ffee00" });
@@ -530,9 +530,9 @@ test("a lock is live while its process runs or, from another machine, for two mi
   for (const [holder, which] of [[{ pid: 4242, host: "another-machine.example" }, "another machine's"], [{ pid, host: os.hostname() }, "a running process's"]]) {
     fs.writeFileSync(lock, JSON.stringify({ ...holder, token: "0a1b2c3d" }));
     aged(60_000);
-    assert.ok(prepareDir(dir).includes("brand.json"), `${which} lock, a minute old`);
+    assert.ok(checkDir(dir).includes("brand.json"), `${which} lock, a minute old`);
     aged(LOCK_STALE + 60_000);
-    assert.throws(() => prepareDir(dir), /kit is not empty and holds no earlier brand kit/, `${which} lock, older than two minutes`);
+    assert.throws(() => checkDir(dir), /kit is not empty and holds no earlier brand kit/, `${which} lock, older than two minutes`);
   }
 });
 
@@ -550,7 +550,7 @@ test("a lock left by a run that has ended that cannot be removed ends the wait a
     else fs.writeFileSync(lock, JSON.stringify({ pid: endedPid(), host: os.hostname(), token: "0a1b2c3d" }));
     fs.utimesSync(lock, old, old);
     const before = filesOf(dir);
-    const run = startRun(dir, prepareDir(dir));
+    const run = startRun(dir, checkDir(dir));
     writeFiles(run.work, kitOf("new", ["logo-01.png"]));
     if (how === "read-only") fs.chmodSync(dir, 0o555);
     const started = Date.now();
@@ -583,7 +583,7 @@ test("a pages that is a link is never read or written through", async (t) => {
   const theirs = filesOf(mine);
   // A run without --facts: the earlier kit's facts go, the files behind the
   // link stay, and so does the link.
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, FRESH);
   await saveRun(run, earlierOf(dir));
   discardRun(run);
@@ -593,11 +593,11 @@ test("a pages that is a link is never read or written through", async (t) => {
   // With --facts the folder is refused before the site is read, and a kit
   // with page texts is not put in through the link.
   assert.throws(
-    () => prepareDir(dir, { facts: true }),
+    () => checkDir(dir, { facts: true }),
     (err) => err.message === `${path.join(dir, "pages")} is a link, and --facts saves the text of each page it reads in a folder by that name. Move it away, or pick another folder with --out.` && err.earlierKit === dir,
   );
   const before = filesOf(dir);
-  const second = startRun(dir, prepareDir(dir));
+  const second = startRun(dir, checkDir(dir));
   writeFiles(second.work, { ...FRESH, "FACTS.md": "new", "pages/home.md": "page text" });
   await assert.rejects(saveRun(second, earlierOf(dir)), (err) => err.message === `The new kit could not be put in ${dir}: pages there is a link, where the new kit has a folder of page texts. The kit already there is as it was.`);
   discardRun(second);
@@ -623,8 +623,8 @@ test("the part folder of a run killed outright: left alone while it may be at wo
   for (const at of [dead, live, swapping, beside]) {
     for (const file of ["logo-01.png", ".earlier/brand.json", ".earlier", ""]) if (fs.existsSync(path.join(at, file))) fs.utimesSync(path.join(at, file), old, old);
   }
-  assert.ok(prepareDir(dir).includes("brand.json"), "part folders do not count");
-  const run = startRun(dir, prepareDir(dir));
+  assert.ok(checkDir(dir).includes("brand.json"), "part folders do not count");
+  const run = startRun(dir, checkDir(dir));
   writeFiles(run.work, FRESH);
   await saveRun(run, earlierOf(dir));
   discardRun(run);
@@ -639,7 +639,7 @@ test("the part folder of a run killed outright: left alone while it may be at wo
   const besideNew = path.join(elsewhere, `.easybrandkit-part-${gone}-0a1b2c42`);
   writeFiles(besideNew, { "logo-01.png": "half" });
   for (const file of ["logo-01.png", ""]) fs.utimesSync(path.join(besideNew, file), old, old);
-  const made = startRun(path.join(elsewhere, "acme"), prepareDir(path.join(elsewhere, "acme")));
+  const made = startRun(path.join(elsewhere, "acme"), checkDir(path.join(elsewhere, "acme")));
   writeFiles(made.work, FRESH);
   await saveRun(made, earlierOf(path.join(elsewhere, "acme")));
   discardRun(made);
@@ -650,7 +650,7 @@ test("an error never names the part folder, and a full disk is told as the kit's
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
-  const run = startRun(dir, prepareDir(dir));
+  const run = startRun(dir, checkDir(dir));
   t.after(() => discardRun(run));
   const failed = (code, at) => Object.assign(new Error(`${code}: it failed, open '${at}'`), { code, syscall: "open", path: at });
   // A file the run could not write in its part folder is named in the kit's.

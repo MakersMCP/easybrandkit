@@ -134,7 +134,7 @@ function toldPlainly(err, run) {
 const runs = new Set();
 const saved = [];
 
-// dir is the kit's folder as given, a folder or nothing (prepareDir in
+// dir is the kit's folder as given, a folder or nothing (checkDir in
 // kit.js has refused anything else); earlier says whether it holds an
 // earlier kit, for what a stopped run says.
 function startRun(dir, earlier) {

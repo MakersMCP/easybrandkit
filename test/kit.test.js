@@ -14,7 +14,7 @@ const zlib = require("node:zlib");
 const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
-const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
+const { makeKit, normalizeUrl, homePageOf, siteOfListing, checkDir, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome, launch, killBrowsers } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
@@ -214,10 +214,10 @@ test("never writes into a folder that holds someone else's files, and reads an e
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-dir-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const dir = path.join(parent, "kit");
-  assert.equal(prepareDir(dir), null, "not there");
+  assert.equal(checkDir(dir), null, "not there");
   fs.mkdirSync(dir);
   fs.writeFileSync(path.join(dir, "notes.txt"), "mine");
-  assert.throws(() => prepareDir(dir), /kit is not empty and holds no earlier brand kit/);
+  assert.throws(() => checkDir(dir), /kit is not empty and holds no earlier brand kit/);
   assert.equal(fs.readFileSync(path.join(dir, "notes.txt"), "utf8"), "mine");
   // An earlier kit's files, by file name only, are what a new kit takes the
   // place of; reading them changes nothing.
@@ -225,25 +225,63 @@ test("never writes into a folder that holds someone else's files, and reads an e
   fs.writeFileSync(path.join(dir, "logo-01.png"), "old");
   fs.writeFileSync(path.join(dir, "_brand.yml"), "meta:\n  name: Old\n");
   fs.writeFileSync(path.join(dir, "brand.json"), JSON.stringify({ version: 1, logos: [{ file: "../../escape.png" }, { file: "logo-01.png" }, { file: ".git" }, { file: ".." }] }));
-  const files = prepareDir(dir);
+  const files = checkDir(dir);
   assert.deepEqual(files.slice(0, 5), ["escape.png", "logo-01.png", "brand.json", "BRAND.md", "_brand.yml"]);
   assert.ok(files.includes("FACTS.md") && files.includes("pages/home.md") && !files.includes(".git") && !files.includes(".."), files.join(" "));
   assert.deepEqual(fs.readdirSync(dir).sort(), ["_brand.yml", "brand.json", "logo-01.png"]);
   // A link to the kit's folder is that folder, and the run works inside it.
   fs.symlinkSync(dir, path.join(parent, "link"), "junction");
-  assert.deepEqual(prepareDir(path.join(parent, "link")), files);
+  assert.deepEqual(checkDir(path.join(parent, "link")), files);
   const run = startRun(path.join(parent, "link"), files);
   assert.equal(path.dirname(fs.realpathSync(run.work)), fs.realpathSync(dir));
   discardRun(run);
   assert.deepEqual(fs.readdirSync(dir).sort(), ["_brand.yml", "brand.json", "logo-01.png"]);
   // A file, or a link to nothing, is no folder.
-  assert.throws(() => prepareDir(path.join(dir, "logo-01.png")), /logo-01\.png is a file, not a folder\. Pick a folder with --out\.$/);
+  assert.throws(() => checkDir(path.join(dir, "logo-01.png")), /logo-01\.png is a file, not a folder\. Pick a folder with --out\.$/);
   fs.symlinkSync(path.join(parent, "gone"), path.join(parent, "dangling"), "junction");
-  assert.throws(() => prepareDir(path.join(parent, "dangling")), /dangling is a link to .*gone, which is not there\. Pick a folder with --out\.$/);
+  assert.throws(() => checkDir(path.join(parent, "dangling")), /dangling is a link to .*gone, which is not there\. Pick a folder with --out\.$/);
   // The part folder of a run that was killed outright counts for nothing.
   const empty = path.join(parent, "empty");
   fs.mkdirSync(path.join(empty, ".easybrandkit-part-1-0a1b2c3d"), { recursive: true });
-  assert.equal(prepareDir(empty), null);
+  assert.equal(checkDir(empty), null);
+});
+
+test("prepareDir still readies a folder for a kit written straight into it, as runs did up to 0.4.0", (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-dir-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // Made when it is not there, with the folders above it.
+  const fresh = path.join(parent, "new", "acme");
+  prepareDir(fresh);
+  assert.deepEqual(fs.readdirSync(fresh), []);
+  // An earlier kit's own files go, those its brand.json lists and the fixed
+  // names, and the user's files stay.
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  prepareDir(dir);
+  assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), ["notes.txt", "pages/", "pages/mine.txt"]);
+  const listed = path.join(parent, "listed");
+  writeFiles(listed, {
+    "brand.json": JSON.stringify({ version: 1, logos: [{ file: "logo-01.png", svg: "logo-01.svg" }], screenshots: [{ file: "screen-01.png" }], card: { file: "card.png" }, stores: [{ type: "appstore", assets: [{ file: "appstore-icon.png" }, { file: "appstore-shot-01.jpg" }] }] }),
+    ...Object.fromEntries(["BRAND.md", "_brand.yml", "logo-01.png", "logo-01.svg", "screen-01.png", "card.png", "appstore-icon.png", "appstore-shot-01.jpg", "our-notes.md"].map((name) => [name, "x"])),
+  });
+  prepareDir(listed);
+  assert.deepEqual(fs.readdirSync(listed), ["our-notes.md"]);
+  // A folder under a kit file's name is not the kit's, and a pages that is a
+  // link is not looked into.
+  const mine = path.join(parent, "mine");
+  writeFiles(mine, { "home.md": "mine" });
+  const odd = path.join(parent, "odd");
+  writeFiles(odd, { "brand.json": JSON.stringify({ version: 1, card: { file: "card.png" } }), "BRAND.md": "old", "card.png/keep.txt": "mine" });
+  fs.symlinkSync(mine, path.join(odd, "pages"), "junction");
+  prepareDir(odd);
+  assert.deepEqual(fs.readdirSync(odd).sort(), ["card.png", "pages"]);
+  assert.deepEqual(fs.readdirSync(mine), ["home.md"]);
+  assert.equal(fs.readFileSync(path.join(odd, "card.png", "keep.txt"), "utf8"), "mine");
+  // A folder that holds someone else's files is refused as it is.
+  const theirs = path.join(parent, "theirs");
+  writeFiles(theirs, { "notes.txt": "mine" });
+  assert.throws(() => prepareDir(theirs), /theirs is not empty and holds no earlier brand kit/);
+  assert.deepEqual(fs.readdirSync(theirs), ["notes.txt"]);
 });
 
 test("a run that fails leaves its folder as it was: an earlier kit stays whole, and a folder it would have made is not left", async (t) => {
