@@ -794,6 +794,40 @@ test("a run killed outright once the earlier kit is aside leaves a folder the ne
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8")).tag, "next");
 });
 
+test("a part folder this user may list but not look into stays, and does not fail a run whose kit is in place", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may look anywhere") }, async (t) => {
+  const parent = tempParent(t);
+  const gone = endedPid();
+  const old = new Date(Date.now() - STALE - 60_000);
+  // Left by a run killed outright, by another user whose umask lets this one
+  // list it but not open it, or made so since.
+  const shut = [];
+  const leave = (folder) => {
+    const at = path.join(folder, `.easybrandkit-part-${gone}-0a1b2c3d`);
+    writeFiles(at, { "logo-01.png": "half" });
+    for (const file of [path.join(at, "logo-01.png"), at]) fs.utimesSync(file, old, old);
+    fs.chmodSync(at, 0o644);
+    shut.push(at);
+    return at;
+  };
+  // Inside a kit's folder, and next to a folder a run makes.
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, kitOf("earlier", ["logo-01.png"]));
+  const fresh = path.join(parent, "fresh", "acme");
+  const cases = [[dir, leave(dir)], [fresh, leave(path.dirname(fresh))]];
+  try {
+    for (const [at, kept] of cases) {
+      const run = startRun(at, checkDir(at));
+      writeFiles(run.work, kitOf("new", ["logo-01.png"]));
+      await saveRun(run, earlierOf(at));
+      discardRun(run);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(at, "brand.json"), "utf8")).tag, "new", at);
+      assert.ok(fs.existsSync(kept), `${kept} stays`);
+    }
+  } finally {
+    for (const at of shut) fs.chmodSync(at, 0o755);
+  }
+});
+
 test("an error never names the part folder, and a full disk is told as the kit's or as the temp folder's", (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");

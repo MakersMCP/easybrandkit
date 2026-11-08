@@ -376,14 +376,20 @@ async function saveRun(run, earlierOf) {
   for (let waited = 0; ; waited += 50) {
     if (!runs.has(run)) throw new SaveError(`The new kit was not put in ${dir}: the run was stopped.`);
     if (!lstat(target)) {
+      let made = false;
       try {
         rename(work, target);
-        ended(run);
-        sweep(path.dirname(target));
-        return;
+        made = true;
       } catch (err) {
         // Made meanwhile, by another run or by hand: the files go in one by one.
         if (!lstat(target)) throw new SaveError(`The new kit could not be put in ${dir}: ${why(Object.assign(err, { moving: "its folder" }))}. Nothing there was changed.`);
+      }
+      // Only the move itself can fail the save: what comes after it is
+      // never taken for a folder made meanwhile.
+      if (made) {
+        ended(run);
+        sweep(path.dirname(target));
+        return;
       }
     }
     let lock = null;
@@ -534,11 +540,19 @@ function swap(run, earlierNow) {
   sweep(path.dirname(target));
 }
 
-// The newest change in a folder, two levels down.
+// The newest change in a folder, two levels down. A folder this user may
+// list but not look into counts as changed just now, so it is kept: its
+// files could not be removed anyway.
 function touched(folder) {
   let newest = 0;
   const look = (at, depth) => {
-    const s = lstat(at);
+    let s;
+    try {
+      s = lstat(at);
+    } catch {
+      newest = Date.now();
+      return;
+    }
     if (!s) return;
     newest = Math.max(newest, s.mtimeMs);
     if (depth > 0 && s.isDirectory()) {
@@ -556,7 +570,9 @@ function touched(folder) {
 }
 
 // The part folders of runs killed outright, in folder. One whose .earlier
-// holds files is kept: those are an earlier kit that was not put back.
+// holds files is kept: those are an earlier kit that was not put back. It
+// runs once a kit is in place, so it never throws: a folder it cannot look
+// at stays.
 function sweep(folder) {
   let names = [];
   try {
@@ -568,9 +584,13 @@ function sweep(folder) {
     const part = PART.exec(name);
     if (!part) continue;
     const at = path.join(folder, name);
-    if ([...runs].some((run) => run.work === at)) continue;
-    if (running(Number(part[1])) || Date.now() - touched(at) < STALE || holdsFiles(path.join(at, ".earlier"))) continue;
-    remove(at);
+    try {
+      if ([...runs].some((run) => run.work === at)) continue;
+      if (running(Number(part[1])) || Date.now() - touched(at) < STALE || holdsFiles(path.join(at, ".earlier"))) continue;
+      remove(at);
+    } catch {
+      // Kept.
+    }
   }
 }
 
