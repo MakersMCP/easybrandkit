@@ -36,7 +36,7 @@ const { brandYml } = require("./brandyml");
 const { readFactPages, writeFacts, FACT_FILES } = require("./facts");
 const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, sleep } = require("./time");
-const { SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, saveRun } = require("./run");
+const { PART, KEPT, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, saveRun } = require("./run");
 const version = require("./version");
 
 // Logos are read from the desktop layout: a narrow screen shows the mobile
@@ -109,6 +109,25 @@ function readKit(dir) {
   }
 }
 
+// Where the brand.json of an earlier kit waits when a run did not finish
+// putting its own kit in the folder: in the .earlier of that run's part
+// folder, when the run was killed while its files moved, or in the folder
+// its error named, when the moves could not be undone. Only those in the
+// kit's folder are looked at: one next to it could be another folder's.
+function earlierAside(target) {
+  let names = [];
+  try {
+    names = fs.readdirSync(target).sort();
+  } catch {
+    return "";
+  }
+  for (const name of names) {
+    const at = PART.test(name) ? path.join(target, name, ".earlier") : KEPT.test(name) ? path.join(target, name) : "";
+    if (at && readKit(at)) return at;
+  }
+  return "";
+}
+
 const mayNotOpen = (dir, at, code) => new Error(`This user may not open ${shownFrom(dir, at)} (${code}). Pick a folder you can write in with --out.`);
 
 // lstat, with a folder this user may not look into told plainly: the first
@@ -139,12 +158,14 @@ function look(at, dir) {
 // lists, by name only, and the fixed names a kit writes. A folder that holds
 // anything else is refused, so a run never mixes into or overwrites
 // someone's own files, and so is a path that is not a folder or below a
-// file. A link to a folder counts as that folder, and a link to nothing is
-// refused. The part folders and the lock of runs do not count, and nothing
-// is changed. With facts, a pages there that is not a folder is refused,
-// since the kit does not write through it. A folder whose brand.json is
-// away while another run puts its kit in counts as a kit (saving is false
-// before a run, when the folder is read again under the run's own lock).
+// file; the refusal of a folder whose earlier kit a run left in pieces says
+// where its brand.json is. A link to a folder counts as that folder, and a
+// link to nothing is refused. The part folders and the lock of runs do not
+// count, and nothing is changed. With facts, a pages there that is not a
+// folder is refused, since the kit does not write through it. A folder
+// whose brand.json is away while another run puts its kit in counts as a
+// kit (saving is false before a run, when the folder is read again under
+// the run's own lock).
 function checkDir(dir, { facts = false, saving = false } = {}) {
   const target = path.resolve(dir);
   for (let at = target; ; at = path.dirname(at)) {
@@ -192,6 +213,11 @@ function checkDir(dir, { facts = false, saving = false } = {}) {
     old = readKit(target);
   }
   if (!old) {
+    // Another folder would leave that kit in pieces for good.
+    const aside = earlierAside(target);
+    if (aside) {
+      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shownFrom(dir, aside)}, with the files it had moved aside. Move them back into ${dir} and run again.`);
+    }
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
   }
   const pages = facts && fs.lstatSync(path.join(target, "pages"), { throwIfNoEntry: false });

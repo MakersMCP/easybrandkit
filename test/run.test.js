@@ -673,6 +673,53 @@ test("the part folder of a run killed outright: left alone while it may be at wo
   assert.deepEqual(fs.readdirSync(elsewhere), ["acme"], "stale, next to a folder a run made");
 });
 
+test("a folder that a run killed while its files moved left without brand.json is refused with where the earlier kit's brand.json is", (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  // As kill -9 at the third move leaves it: the earlier brand.json,
+  // _brand.yml and BRAND.md aside in the part folder's .earlier, the new
+  // kit still in the part folder, and the lock.
+  const gone = endedPid();
+  const part = path.join(dir, `.easybrandkit-part-${gone}-0a1b2c3d`);
+  const aside = path.join(part, ".earlier");
+  writeFiles(part, FRESH);
+  fs.mkdirSync(path.join(aside, "pages"), { recursive: true });
+  for (const name of ["brand.json", "_brand.yml", "BRAND.md"]) fs.renameSync(path.join(dir, name), path.join(aside, name));
+  fs.writeFileSync(path.join(dir, LOCK), JSON.stringify({ pid: gone, host: os.hostname(), token: "0a1b2c3d" }));
+  const before = filesOf(dir);
+  const said = (shown, at) => `${shown} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${at}, with the files it had moved aside. Move them back into ${shown} and run again.`;
+  assert.throws(() => checkDir(dir), (err) => err.message === said(dir, aside));
+  // Named from where the run is, when the folder was given so.
+  const cwd = process.cwd();
+  process.chdir(parent);
+  try {
+    assert.throws(() => checkDir("kit"), (err) => err.message === said("kit", path.join("kit", path.basename(part), ".earlier")));
+  } finally {
+    process.chdir(cwd);
+  }
+  // The CLI says so before it starts a browser, and changes nothing.
+  const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
+  const cli = spawnSync(process.execPath, [CLI, "acme.example", "--out", dir], { encoding: "utf8", env });
+  assert.equal(cli.status, 1);
+  assert.equal(cli.stderr, `easybrandkit: ${said(dir, aside)}\n`);
+  assert.deepEqual(filesOf(dir), before);
+  // Moved back, they make the folder a kit again.
+  for (const name of ["brand.json", "_brand.yml", "BRAND.md"]) fs.renameSync(path.join(aside, name), path.join(dir, name));
+  assert.ok(checkDir(dir).includes("brand.json"));
+
+  // The folder a move that could not be undone named in its error.
+  const kept = path.join(parent, "kept");
+  const keptFolder = path.join(kept, `easybrandkit-kept-${gone}-0a1b2c3d`);
+  writeFiles(kept, { "logo-01.png": "old", [`${path.basename(keptFolder)}/brand.json`]: EARLIER["brand.json"], [`${path.basename(keptFolder)}/BRAND.md`]: "old" });
+  assert.throws(() => checkDir(kept), (err) => err.message === said(kept, keptFolder));
+  // A part folder whose .earlier holds no kit, or a kit's brand.json in a
+  // folder that is no run's, does not count.
+  const other = path.join(parent, "other");
+  writeFiles(other, { "notes.txt": "mine", [`.easybrandkit-part-${gone}-0a1b2c3d/.earlier/notes.txt`]: "half", "backup/brand.json": EARLIER["brand.json"] });
+  assert.throws(() => checkDir(other), (err) => err.message === `${other} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
+});
+
 test("an error never names the part folder, and a full disk is told as the kit's or as the temp folder's", (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");

@@ -19,6 +19,9 @@ const path = require("path");
 const { sleep, timeLeft } = require("./time");
 
 const PART = /^\.easybrandkit-part-(\d+)-[0-9a-f]{8}$/;
+// The folder that keeps an earlier kit's files that a move that failed could
+// not put back, which no run removes.
+const KEPT = /^easybrandkit-kept-\d+-[0-9a-f]{8}$/;
 // The lock, and the marker a waiting run makes to take over a lock that a
 // run killed outright left.
 const LOCK = ".easybrandkit-swap";
@@ -571,4 +574,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, LOCK, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
+module.exports = { PART, KEPT, LOCK, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
