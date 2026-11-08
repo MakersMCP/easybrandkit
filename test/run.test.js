@@ -20,13 +20,15 @@ const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit
 
 const hash = (body) => crypto.createHash("sha1").update(body).digest("hex").slice(0, 8);
 
-// Every file and folder in dir, hidden ones too, each file with a hash.
+// Every file, folder and link in dir, hidden ones too, each file with a hash.
 function filesOf(dir) {
   const found = [];
   const walk = (at, rel) => {
     for (const entry of fs.readdirSync(at, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       const name = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
+      if (entry.isSymbolicLink()) {
+        found.push(`${name} -> ${fs.readlinkSync(path.join(at, entry.name))}`);
+      } else if (entry.isDirectory()) {
         found.push(`${name}/`);
         walk(path.join(at, entry.name), name);
       } else {
@@ -385,6 +387,38 @@ test("a run stopped while it waits for the lock is not saved, and the wait gives
   fs.unlinkSync(path.join(dir, LOCK));
   await assert.rejects(saving, (err) => err instanceof SaveError);
   assert.deepEqual(filesOf(dir), before);
+});
+
+test("a pages that is a link is never read or written through", async (t) => {
+  const parent = tempParent(t);
+  const mine = path.join(parent, "site-content", "pages");
+  writeFiles(mine, { "home.md": "mine", "about.md": "mine", "blog.md": "mine" });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, { "brand.json": JSON.stringify({ version: 1 }), "BRAND.md": "old", "FACTS.md": "old", "facts.json": "old" });
+  fs.symlinkSync(mine, path.join(dir, "pages"), "junction");
+  const theirs = filesOf(mine);
+  // A run without --facts: the earlier kit's facts go, the files behind the
+  // link stay, and so does the link.
+  const run = startRun(dir, prepareDir(dir));
+  writeFiles(run.work, FRESH);
+  await saveRun(run, earlierOf(dir));
+  discardRun(run);
+  assert.deepEqual(filesOf(mine), theirs);
+  assert.equal(fs.lstatSync(path.join(dir, "pages")).isSymbolicLink(), true);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "pages"]);
+  // With --facts the folder is refused before the site is read, and a kit
+  // with page texts is not put in through the link.
+  assert.throws(
+    () => prepareDir(dir, { facts: true }),
+    (err) => err.message === `${path.join(dir, "pages")} is a link, and --facts saves the text of each page it reads in a folder by that name. Move it away, or pick another folder with --out.` && err.earlierKit === dir,
+  );
+  const before = filesOf(dir);
+  const second = startRun(dir, prepareDir(dir));
+  writeFiles(second.work, { ...FRESH, "FACTS.md": "new", "pages/home.md": "page text" });
+  await assert.rejects(saveRun(second, earlierOf(dir)), (err) => err.message === `The new kit could not be put in ${dir}: pages there is a link, where the new kit has a folder of page texts. The kit already there is as it was.`);
+  discardRun(second);
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(filesOf(mine), theirs);
 });
 
 test("the part folder of a run killed outright: left alone while it may be at work, removed once stale", async (t) => {

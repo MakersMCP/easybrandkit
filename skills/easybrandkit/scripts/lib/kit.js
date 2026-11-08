@@ -116,10 +116,12 @@ function readKit(dir) {
 // anything else is refused, so a run never mixes into or overwrites
 // someone's own files, and so is a path that is not a folder. A link to a
 // folder counts as that folder. The part folders and the lock of runs do not
-// count, and nothing is changed. A folder whose brand.json is away while
-// another run puts its kit in counts as a kit (saving is false before a run,
-// when the folder is read again under the run's own lock).
-function prepareDir(dir, { saving = false } = {}) {
+// count, and nothing is changed. With facts, a pages there that is not a
+// folder is refused, since the kit does not write through it. A folder whose
+// brand.json is away while another run puts its kit in counts as a kit
+// (saving is false before a run, when the folder is read again under the
+// run's own lock).
+function prepareDir(dir, { facts = false, saving = false } = {}) {
   const there = fs.statSync(dir, { throwIfNoEntry: false });
   if (!there) {
     let link = null;
@@ -142,6 +144,10 @@ function prepareDir(dir, { saving = false } = {}) {
   }
   if (!old) {
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
+  }
+  const pages = facts && fs.lstatSync(path.join(dir, "pages"), { throwIfNoEntry: false });
+  if (pages && !pages.isDirectory()) {
+    throw Object.assign(new Error(`${path.join(dir, "pages")} is ${pages.isSymbolicLink() ? "a link" : "a file"}, and --facts saves the text of each page it reads in a folder by that name. Move it away, or pick another folder with --out.`), { earlierKit: dir });
   }
   return [...new Set([...kitFiles(old), ...KIT_NAMES])];
 }
@@ -352,7 +358,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
   // The files are made in the run's part folder, work, and go in place only
   // once everything has been read and written.
-  const run = startRun(target, prepareDir(target));
+  const run = startRun(target, prepareDir(target, { facts }));
   const work = run.work;
   try {
     let given = null;

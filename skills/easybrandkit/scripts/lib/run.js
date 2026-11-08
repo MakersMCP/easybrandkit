@@ -327,6 +327,15 @@ function swap(run, earlierNow) {
   // How a path in or next to the kit's folder is shown: from dir as given.
   const shown = (at) => path.join(path.dirname(dir), path.relative(path.dirname(target), at));
   const asWas = earlierNow.length ? "The kit already there is as it was." : "Nothing there was changed.";
+  const newNames = fs.readdirSync(work).filter((name) => name !== ".earlier");
+  // pages/ is moved in and out only as a folder of the kit's folder: a link
+  // there, say to a folder of the user's elsewhere, is never read or written
+  // through, and the earlier kit's page texts are not looked for in it.
+  const pagesThere = lstat(path.join(target, "pages"));
+  const pagesFolder = Boolean(pagesThere && pagesThere.isDirectory());
+  if (newNames.includes("pages") && pagesThere && !pagesFolder) {
+    throw new SaveError(`The new kit could not be put in ${dir}: pages there is ${pagesThere.isSymbolicLink() ? "a link" : "a file"}, where the new kit has a folder of page texts. ${asWas}`);
+  }
   const aside = path.join(work, ".earlier");
   // Each move as [from, to, name, whether it moved a new file in].
   const moved = [];
@@ -345,6 +354,7 @@ function swap(run, earlierNow) {
     fs.mkdirSync(aside);
     fs.mkdirSync(path.join(aside, "pages"));
     for (const name of last(earlierNow).reverse()) {
+      if (name.startsWith("pages/") && !pagesFolder) continue;
       const at = lstat(path.join(target, name));
       // A folder under a kit file's name is not the kit's.
       if (at && !at.isDirectory()) move(path.join(target, name), path.join(aside, name), name, false);
@@ -357,10 +367,9 @@ function swap(run, earlierNow) {
       if (at) move(path.join(target, name), path.join(aside, name), name, false);
       move(path.join(work, name), path.join(target, name), name, true);
     };
-    for (const name of last(fs.readdirSync(work).filter((name) => name !== ".earlier"))) {
+    for (const name of last(newNames)) {
       if (name !== "pages") moveIn(name);
-      else if (!lstat(path.join(target, "pages"))) move(path.join(work, "pages"), path.join(target, "pages"), "pages", true);
-      else if (!fs.statSync(path.join(target, "pages")).isDirectory()) throw new Error("pages is a file there, where the new kit has a folder");
+      else if (!pagesThere) move(path.join(work, "pages"), path.join(target, "pages"), "pages", true);
       // A pages/ that is there keeps the files of the user's in it.
       else for (const page of fs.readdirSync(path.join(work, "pages"))) moveIn(`pages/${page}`);
     }
@@ -401,11 +410,14 @@ function swap(run, earlierNow) {
     throw new SaveError(said.join(" "));
   }
   runs.delete(run);
-  // pages/ with nothing left in it, from an earlier run with --facts.
-  try {
-    fs.rmdirSync(path.join(target, "pages"));
-  } catch {
-    // Not there, or holding files.
+  // pages/ with nothing left in it, from an earlier run with --facts. Only a
+  // real folder: on Windows, rmdir removes a link to a folder.
+  if (pagesFolder) {
+    try {
+      fs.rmdirSync(path.join(target, "pages"));
+    } catch {
+      // Holding files.
+    }
   }
   // The earlier kit is to go now: under another name first, since the sweep
   // keeps a part folder whose .earlier holds files, and this one can be left
