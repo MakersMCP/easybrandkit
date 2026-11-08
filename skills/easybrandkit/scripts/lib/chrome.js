@@ -60,6 +60,106 @@ function findChrome() {
 // them at once instead of leaving them running.
 const open = new Set();
 
+// The folders browsers of Chrome's kind make in the temp folder, by the
+// name each one gives them: the one that holds the socket that makes a
+// browser one per profile, and those of its URL fetcher, which a browser
+// that ends while it fetches leaves empty.
+const TEMP_NAME = /^\.?(com\.google\.Chrome|org\.chromium\.Chromium|com\.microsoft\.Edge|com\.brave\.Browser)\./;
+
+function tempNames(temp) {
+  try {
+    return new Set(fs.readdirSync(temp).filter((name) => TEMP_NAME.test(name)));
+  } catch {
+    return new Set();
+  }
+}
+
+// Once a browser has ended: the empty folders of this user's that came in
+// the temp folder while it ran. rmdir removes only an empty folder, so one
+// that another browser is using keeps its files.
+function removeTemps({ temp, before }) {
+  const uid = process.getuid ? process.getuid() : null;
+  for (const name of tempNames(temp)) {
+    if (before.has(name)) continue;
+    try {
+      const stat = fs.lstatSync(path.join(temp, name));
+      if (stat.isDirectory() && (uid === null || stat.uid === uid)) fs.rmdirSync(path.join(temp, name));
+    } catch {
+      // Not empty, or gone.
+    }
+  }
+}
+
+// When a process started, on Linux, from /proc/<pid>/stat, so that a pid
+// that has come round again on another process is not taken for it: null
+// once it has ended (a zombie has ended too).
+function startOf(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[0] === "Z" || fields[0] === "X" ? null : fields[19];
+  } catch {
+    return null;
+  }
+}
+
+// A browser's processes on Linux, the browser first: those that descend
+// from it, and those whose command line names its profile, as Chrome's
+// helpers do, which are found that way also once the browser has ended and
+// they belong to no one. Chrome's network service writes into the profile
+// as it ends, so the profile can be removed for good only once they are all
+// gone. Other systems give none.
+function processesOf(child, profile) {
+  if (process.platform !== "linux" || !child.pid) return [];
+  const tag = path.basename(profile);
+  const parentOf = new Map();
+  const named = [];
+  let names = [];
+  try {
+    names = fs.readdirSync("/proc");
+  } catch {
+    return [];
+  }
+  for (const name of names) {
+    const pid = Number(name);
+    if (!/^\d+$/.test(name) || pid === process.pid) continue;
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const [state, ppid] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (state === "Z" || state === "X") continue;
+      parentOf.set(pid, Number(ppid));
+      if (fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(tag)) named.push(pid);
+    } catch {
+      // Gone already.
+    }
+  }
+  const found = new Set([child.pid]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [pid, ppid] of parentOf) {
+      if (!found.has(pid) && found.has(ppid)) {
+        found.add(pid);
+        grew = true;
+      }
+    }
+  }
+  for (const pid of named) found.add(pid);
+  return [...found].map((pid) => ({ pid, start: startOf(pid) })).filter(({ start }) => start !== null);
+}
+
+// Each of them that still runs, killed.
+function killAll(processes) {
+  for (const { pid, start } of processes) {
+    if (startOf(pid) !== start) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  }
+}
+const allGone = (processes) => processes.every(({ pid, start }) => startOf(pid) !== start);
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -68,7 +168,9 @@ async function launch({ width, height }) {
   if (!binary) {
     throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
   }
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-chrome-"));
+  const temp = os.tmpdir();
+  const before = tempNames(temp);
+  const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
   const child = spawn(
     binary,
     [
@@ -93,26 +195,34 @@ async function launch({ width, height }) {
   let exited = false;
   child.on("exit", () => (exited = true));
   child.on("error", () => (exited = true));
-  const entry = { child, profile };
+  const entry = { child, profile, temp, before };
   open.add(entry);
   let base = "";
   // Chrome is asked to quit first: killed outright, its helper processes go
-  // on writing to the profile for a while and the folder cannot be removed.
-  // A profile that still cannot be removed is left in the temp folder; the
+  // on writing to the profile for a while. Those still there once it has
+  // quit are killed, and the profile is removed once they are gone. A
+  // profile that still cannot be removed is left in the temp folder; the
   // kit is not lost over it.
   const close = async () => {
+    // Its helpers name the profile, so they are found even when the browser
+    // itself has ended, as one that could not start has.
+    const processes = processesOf(child, profile);
     if (base && !exited) {
+      let asked = false;
       try {
         const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
         const browser = await connect(webSocketDebuggerUrl);
+        asked = true;
         await browser.send("Browser.close", {}, 3_000).catch(() => {});
       } catch {
         // Not answering: it is killed below.
       }
-      for (let i = 0; i < 50 && !exited; i++) await sleep(100);
+      for (let i = 0; i < 50 && asked && !exited; i++) await sleep(100);
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    killAll(processes);
+    for (let i = 0; i < 50 && !allGone(processes); i++) await sleep(20);
     open.delete(entry);
     removeSingleton(profile);
     try {
@@ -120,6 +230,7 @@ async function launch({ width, height }) {
     } catch {
       // Left for the system's temp clean-up.
     }
+    removeTemps(entry);
   };
   // Chrome writes the port it picked to DevToolsActivePort in the profile.
   const portFile = path.join(profile, "DevToolsActivePort");
@@ -153,31 +264,42 @@ function removeSingleton(profile) {
   }
 }
 
-// Every browser still open, killed at once, and its profile removed: for a
-// process that is being stopped and has no time to ask them to quit. It
-// never throws.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// Every browser still open, killed at once with its helpers, and its
+// profile and temp folders removed: for a process that is being stopped
+// and has no time to ask them to quit. It never throws.
 function killBrowsers() {
-  for (const { child, profile } of open) {
+  const ending = [...open];
+  open.clear();
+  for (const entry of ending) {
+    entry.processes = processesOf(entry.child, entry.profile);
     try {
-      child.kill("SIGKILL");
+      entry.child.kill("SIGKILL");
     } catch {
       // Gone already.
     }
-    removeSingleton(profile);
+    killAll(entry.processes);
   }
-  // Chrome's helper processes can still write into the profile for a moment
-  // as they end: it is removed until it stays gone, half a second at most.
-  for (let round = 0; round < 5 && [...open].some(({ profile }) => fs.existsSync(profile)); round++) {
-    for (const { profile } of open) {
+  // Until they are gone, a second at most.
+  for (let waited = 0; waited < 1_000 && !ending.every(({ processes }) => allGone(processes)); waited += 20) pause(20);
+  for (const { profile } of ending) removeSingleton(profile);
+  // Once its processes are gone, nothing writes into a profile again. Where
+  // they cannot be told, helpers can still write into it for a moment as
+  // they end: it is removed until it stays gone, half a second at most.
+  for (let round = 0; round < 5; round++) {
+    for (const { profile } of ending) {
       try {
         fs.rmSync(profile, { recursive: true, force: true, maxRetries: 2, retryDelay: 20 });
       } catch {
         // Tried again in the next round.
       }
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    if (ending.every(({ processes }) => processes.length && allGone(processes))) break;
+    pause(100);
+    if (!ending.some(({ profile }) => fs.existsSync(profile))) break;
   }
-  open.clear();
+  for (const entry of ending) removeTemps(entry);
 }
 
 function connect(wsUrl) {

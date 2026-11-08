@@ -15,7 +15,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
-const { findChrome } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, killBrowsers } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 
@@ -129,6 +129,20 @@ function writeFiles(dir, files) {
     fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
     fs.writeFileSync(path.join(dir, file), body);
   }
+}
+
+// A temp folder of the test's own, for what the browser leaves there, short
+// enough for the socket Chrome keeps in it (a socket path holds 108 bytes on
+// Linux and 104 elsewhere): null, and the temp files not checked, when the
+// system's temp folder is too deep for one.
+function ownTemp(t) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "t"));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  if (path.join(temp, "com.google.Chrome.XXXXXX", "SingletonSocket").length > (process.platform === "linux" ? 107 : 103)) {
+    t.diagnostic(`${temp} is too deep for Chrome's socket, so what the browser leaves in the temp folder is not checked`);
+    return null;
+  }
+  return temp;
 }
 
 // The CLI's answer, and how long its process went on after it printed it.
@@ -266,6 +280,82 @@ test("a cut's ground comes from its pixels: one color, or a picture", () => {
   assert.equal(groundOf(edge, 4).solid, false);
   assert.deepEqual(groundOf(edge, 4, { top: true, right: true, bottom: true, left: false }), { hex: "#ffffff", solid: true });
   assert.equal(groundOf(Buffer.from("not a png"), 4), null);
+});
+
+// Whether a process has ended, a zombie too.
+function ended(pid) {
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      return /^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2));
+    } catch {
+      return true;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+// Stands in for Chrome: it makes a folder in the temp folder, as Chrome's
+// URL fetcher does, and one that holds a file. On Linux it also starts a
+// helper that goes on writing into the profile for five seconds, as Chrome's
+// network service does as it ends; elsewhere a browser's helpers cannot be
+// told.
+const STAND_IN = `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
+done
+mkdir "$TMPDIR/com.google.Chrome.chrome_chrome_url_fetcher_.$$"
+mkdir "$TMPDIR/com.google.Chrome.busy$$" && echo x > "$TMPDIR/com.google.Chrome.busy$$/file"
+if [ -n "$HELPER_PID" ]; then
+  ( i=0; while [ $i -lt 250 ]; do mkdir -p "$profile/Default"; sleep 0.02; i=$((i + 1)); done ) &
+  echo $! > "$HELPER_PID"
+fi
+printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
+exec sleep 30
+`;
+
+test("a browser that ends takes its helpers with it and leaves nothing of its own in the temp folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR, HELPER_PID: process.env.HELPER_PID };
+  t.after(() => {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, STAND_IN, { mode: 0o755 });
+  process.env.CHROME_PATH = chrome;
+  process.env.TMPDIR = temp;
+  // A folder of the same kind that was there before stays, and so does one
+  // that holds a file.
+  fs.mkdirSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.before"));
+  const linux = process.platform === "linux";
+  for (const end of ["closed", "killed"]) {
+    const pidFile = path.join(parent, `${end}.pid`);
+    if (linux) process.env.HELPER_PID = pidFile;
+    const browser = await launch({ width: 800, height: 600 });
+    if (end === "closed") await browser.close();
+    else killBrowsers();
+    if (linux) {
+      const helper = Number(fs.readFileSync(pidFile, "utf8"));
+      t.after(() => {
+        if (!ended(helper)) process.kill(helper, "SIGKILL");
+      });
+      assert.ok(ended(helper), `the helper of a browser ${end}`);
+    }
+    const left = fs.readdirSync(temp).filter((name) => !name.startsWith("com.google.Chrome.busy"));
+    assert.deepEqual(left, ["com.google.Chrome.chrome_chrome_url_fetcher_.before"], `a browser ${end}`);
+  }
+  assert.equal(fs.readdirSync(temp).filter((name) => name.startsWith("com.google.Chrome.busy")).length, 2);
 });
 
 test("the CLI explains itself and refuses a missing address", () => {
@@ -558,20 +648,31 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   const bot = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(BOT_CHECK));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
+  // The browser's profile and the folders Chrome makes in the temp folder go
+  // too, whether the run fails or ends well.
+  const temp = ownTemp(t);
+  const system = process.env.TMPDIR;
+  if (temp) process.env.TMPDIR = temp;
+  const tempLeft = () => (temp ? fs.readdirSync(temp) : []);
   t.after(() => {
+    if (system === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = system;
     site.server.close();
     bot.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
   const first = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(first.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  assert.deepEqual(tempLeft(), [], "a run that ends well");
   writeFiles(dir, { "notes.txt": "mine", "FACTS.md": "# Acme facts\n", "pages/home.md": "home", "pages/mine.txt": "mine" });
   const good = filesOf(dir);
 
   await assert.rejects(makeKit("http://127.0.0.1:9/", { dir, stores: false }), /ERR_UNSAFE_PORT/);
   assert.deepEqual(filesOf(dir), good, "a page that does not open");
+  assert.deepEqual(tempLeft(), [], "a page that does not open");
   await assert.rejects(makeKit(bot.origin, { dir, stores: false }), /answered with a bot check/);
   assert.deepEqual(filesOf(dir), good, "a bot check");
+  assert.deepEqual(tempLeft(), [], "a bot check");
   // A disk that fills up as the kit is written, after the page was read.
   const write = fs.writeFileSync;
   const full = t.mock.method(fs, "writeFileSync", function (file, ...rest) {
@@ -581,6 +682,7 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The disk has no room left for the new kit (ENOSPC)." && err.earlierKit === dir);
   full.mock.restore();
   assert.deepEqual(filesOf(dir), good, "a full disk");
+  assert.deepEqual(tempLeft(), [], "a full disk");
 
   // Ended well: the new kit, with one logo now, in place of the earlier one;
   // the earlier facts go, the user's files stay, and no part folder is left.
@@ -600,6 +702,7 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), names);
   const green = readPng(path.join(dir, "logo-01.png"));
   assert.deepEqual(green.pixel(green.width >> 1, green.height >> 1), [0, 128, 0], "the logo read through the link");
+  assert.deepEqual(tempLeft(), [], "runs that end well");
 });
 
 test("the CLI says once that a new kit could not be put in place, and the kit there stays as it was", { skip: noBrowser }, async (t) => {
@@ -644,7 +747,7 @@ function processesIn(group) {
   return found;
 }
 
-test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says so, and leaves no browser running", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
+test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says so, and leaves no browser running and nothing in the temp folder", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
@@ -654,12 +757,15 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
     for (const group of groups) for (const pid of processesIn(group)) process.kill(pid, "SIGKILL");
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  const env = process.env;
+  const temp = ownTemp(t);
+  const env = { ...process.env, ...(temp ? { TMPDIR: temp } : {}) };
+  const tempLeft = () => (temp ? fs.readdirSync(temp) : []);
   // The kit, made by the CLI, whose process ends once it has printed its
   // summary, not when a timer of the page's load runs out.
   const made = await runCli([site.origin, "--out", dir, "--no-stores"], env);
   assert.equal(made.code, 0, made.stderr);
   assert.ok(made.lingered < 5_000, `the process ended ${made.lingered} ms after its summary`);
+  assert.deepEqual(tempLeft(), [], "a run that ends well");
   const good = filesOf(dir);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   // Ctrl-C reaches the whole process group, the browser too; a kill can
@@ -684,6 +790,7 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
     const message = `stopped by ${signal}. The kit already in ${dir} is as it was.`;
     assert.equal(said.trim().split("\n").pop(), `easybrandkit: ${message}`);
     assert.equal(out, json ? `${JSON.stringify({ ok: false, error: message })}\n` : "");
+    assert.deepEqual(tempLeft(), [], `nothing left in the temp folder after ${signal}`);
     await wait(1_000);
     assert.deepEqual(processesIn(child.pid), [], `no browser left running after ${signal}`);
   }
@@ -708,4 +815,5 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
   const now = filesOf(dir);
   assert.deepEqual(now.map((line) => line.split(" ")[0]), good.map((line) => line.split(" ")[0]));
   assert.notEqual(now.find((line) => line.startsWith("brand.json ")), good.find((line) => line.startsWith("brand.json ")), "the new kit");
+  assert.deepEqual(tempLeft(), [], "nothing left in the temp folder after a late stop");
 });
