@@ -705,6 +705,29 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   assert.deepEqual(tempLeft(), [], "runs that end well");
 });
 
+test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, { "brand.json": JSON.stringify({ version: 1, logos: [{ file: "logo-01.png" }] }), "BRAND.md": "one", "_brand.yml": "one", "logo-01.png": "one" });
+  // Another run's kit, with a second logo, takes the earlier one's place
+  // while this run reads the site.
+  let swapped = false;
+  const site = await serve((req, res) => {
+    if (!swapped) {
+      swapped = true;
+      writeFiles(dir, { "brand.json": JSON.stringify({ version: 1, logos: [{ file: "logo-01.png" }, { file: "logo-02.png" }] }), "logo-02.png": "two" });
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  await makeKit(site.origin, { dir, stores: false });
+  assert.equal(swapped, true);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "screen-01.png"]);
+});
+
 test("the CLI says once that a new kit could not be put in place, and the kit there stays as it was", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
@@ -747,7 +770,7 @@ function processesIn(group) {
   return found;
 }
 
-test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says so, and leaves no browser running and nothing in the temp folder", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
+test("a run stopped by SIGINT, SIGTERM or SIGHUP leaves the earlier kit as it was, says so, and leaves no browser running and nothing in the temp folder", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
@@ -768,10 +791,11 @@ test("a run stopped by SIGINT or SIGTERM leaves the earlier kit as it was, says 
   assert.deepEqual(tempLeft(), [], "a run that ends well");
   const good = filesOf(dir);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  // Ctrl-C reaches the whole process group, the browser too; a kill can
-  // reach the kit alone. With --json the run says nothing as it works, so the
-  // signal comes once its part folder holds a logo.
-  for (const [signal, group, json] of [["SIGINT", true, false], ["SIGTERM", false, false], ["SIGTERM", true, true]]) {
+  // Ctrl-C reaches the whole process group, the browser too; a kill or a
+  // closed terminal can reach the kit alone. With --json the run says
+  // nothing as it works, so the signal comes once its part folder holds a
+  // logo.
+  for (const [signal, group, json] of [["SIGINT", true, false], ["SIGTERM", false, false], ["SIGTERM", true, true], ["SIGHUP", false, false]]) {
     // A group of its own, as a terminal gives a command, which the browser joins.
     const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", ...(json ? ["--json"] : [])], { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     const closed = once(child, "close");

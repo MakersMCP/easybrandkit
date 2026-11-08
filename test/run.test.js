@@ -106,6 +106,27 @@ test("a new folder: the part folder sits next to it and becomes it when the run 
   assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png"]);
 });
 
+test("a part folder gets the mode any folder made there gets, so a default ACL is not masked", { skip: posixOnly }, async (t) => {
+  const parent = tempParent(t);
+  const umask = process.umask(0o022);
+  t.after(() => process.umask(umask));
+  const mode = (at) => fs.statSync(at).mode & 0o7777;
+  fs.mkdirSync(path.join(parent, "plain"));
+  const want = mode(path.join(parent, "plain"));
+  assert.equal(want, 0o755);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const inside = startRun(dir, prepareDir(dir));
+  assert.equal(mode(inside.work), want, "inside a kit's folder that is there");
+  discardRun(inside);
+  const fresh = path.join(parent, "fresh");
+  const run = startRun(fresh, prepareDir(fresh));
+  assert.equal(mode(run.work), want, "next to the folder a run makes");
+  writeFiles(run.work, FRESH);
+  await saveRun(run, earlierOf(fresh));
+  assert.equal(mode(fresh), want, "the kit's folder it becomes");
+});
+
 test("a run that does not end well removes its part folder and the folders it made", (t) => {
   const parent = tempParent(t);
   const run = startRun(path.join(parent, "new", "brand", "acme"), null);
@@ -532,4 +553,58 @@ test("a folder this user may not write in is told plainly, without the part fold
     fs.chmodSync(dir, 0o755);
     fs.chmodSync(shut, 0o755);
   }
+});
+
+// Whether a process has ended, a zombie too.
+function ended(pid) {
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      return /^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2));
+    } catch {
+      return true;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+test("an error that nothing catches still leaves the folder as it was and ends the browser", { skip: posixOnly }, async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // A browser that never answers, and an error thrown from a timer once the
+  // run's part folder is there.
+  const chrome = path.join(parent, "chrome");
+  const pidFile = path.join(parent, "chrome.pid");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 30\n`, { mode: 0o755 });
+  const boom = path.join(parent, "boom.js");
+  fs.writeFileSync(
+    boom,
+    [
+      'const fs = require("fs");',
+      "const mkdir = fs.mkdirSync;",
+      "fs.mkdirSync = function (at, ...rest) {",
+      "  const made = mkdir.call(this, at, ...rest);",
+      '  if (/\\.easybrandkit-part-/.test(String(at))) setTimeout(() => { throw new Error("thrown from a timer"); }, 500);',
+      "  return made;",
+      "};",
+      "",
+    ].join("\n"),
+  );
+  const child = spawn(process.execPath, ["--require", boom, CLI, "acme.example", "--out", dir], { env: { ...process.env, CHROME_PATH: chrome }, stdio: ["ignore", "ignore", "pipe"] });
+  let said = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  const [code] = await once(child, "close");
+  assert.equal(code, 1, said);
+  assert.match(said, /Error: thrown from a timer/);
+  assert.deepEqual(filesOf(dir), before);
+  const pid = Number(fs.readFileSync(pidFile, "utf8"));
+  for (let waited = 0; waited < 2_000 && !ended(pid); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(ended(pid), "the browser was ended");
 });
