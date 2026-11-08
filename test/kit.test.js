@@ -451,6 +451,93 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
   }
 });
 
+// Stands in for Chrome and the crash handler it starts apart from itself:
+// the handler is no child of the browser's and its command line does not
+// name the profile, and a helper names it as Chrome's helpers do, in a
+// command line rewritten with its arguments apart by spaces. A handler
+// already running can be named instead of a new one.
+const WITH_CRASH_HANDLER = `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
+done
+if [ -z "$HANDLER_GIVEN" ]; then
+  ( "$HANDLER_BIN" -e 'setTimeout(() => {}, 30000)' & echo $! > "$HANDLER_PID" )
+else
+  echo "$HANDLER_GIVEN" > "$HANDLER_PID"
+fi
+"$NODE_BIN" -e 'process.title = process.argv.join(" "); require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 30000)' -- "$profile/helper.pid" "--crashpad-handler-pid=$(cat "$HANDLER_PID")" "--user-data-dir=$profile" &
+while [ ! -s "$profile/helper.pid" ]; do sleep 0.01; done
+printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
+exec sleep 30
+`;
+
+test("a browser's crash handler goes with it, also once its helpers have ended, and no other process it names does", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  const names = ["CHROME_PATH", "TMPDIR", "NODE_BIN", "HANDLER_BIN", "HANDLER_PID", "HANDLER_GIVEN"];
+  const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const started = [];
+  t.after(() => {
+    for (const pid of started) if (!ended(pid)) process.kill(pid, "SIGKILL");
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, WITH_CRASH_HANDLER, { mode: 0o755 });
+  const handlerBin = path.join(parent, "chrome_crashpad_handler");
+  fs.symlinkSync(process.execPath, handlerBin);
+  fs.symlinkSync(process.execPath, path.join(parent, "something_else"));
+  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, NODE_BIN: process.execPath, HANDLER_PID: path.join(parent, "handler.pid") });
+  const wait = async (pid) => {
+    for (let waited = 0; waited < 2_000 && !ended(pid); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    return ended(pid);
+  };
+  const helperOf = () => {
+    const profile = fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"));
+    return Number(fs.readFileSync(path.join(temp, profile, "helper.pid"), "utf8"));
+  };
+  // A browser asked to quit, one stopped, and one stopped once its helpers
+  // have ended, as a crash or Ctrl-\ can end them: its handler is the one it
+  // started.
+  for (const end of ["closed", "killed", "killed after its helpers"]) {
+    process.env.HANDLER_BIN = handlerBin;
+    delete process.env.HANDLER_GIVEN;
+    const browser = await launch({ width: 800, height: 600 });
+    const handler = Number(fs.readFileSync(process.env.HANDLER_PID, "utf8"));
+    const helper = helperOf();
+    started.push(handler, helper);
+    assert.equal(ended(handler), false);
+    if (end === "closed") await browser.close();
+    else {
+      if (end !== "killed") {
+        process.kill(helper, "SIGKILL");
+        assert.ok(await wait(helper));
+      }
+      killBrowsers();
+    }
+    assert.ok(await wait(handler), `the crash handler of a browser ${end}`);
+  }
+  // A process that is no crash handler, or one that ran before the browser,
+  // as the user's own browser's handler does, is not the browser's to end.
+  const before = spawn(handlerBin, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  started.push(before.pid);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  for (const [bin, given] of [[path.join(parent, "something_else"), ""], [handlerBin, String(before.pid)]]) {
+    process.env.HANDLER_BIN = bin;
+    if (given) process.env.HANDLER_GIVEN = given;
+    await launch({ width: 800, height: 600 });
+    const named = Number(fs.readFileSync(process.env.HANDLER_PID, "utf8"));
+    started.push(named, helperOf());
+    killBrowsers();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(ended(named), false, given ? "a handler that ran before the browser" : "a process that is no crash handler");
+  }
+});
+
 test("what Chrome's component updater was fetching goes once a browser has ended, and only what came while it ran", (t) => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-temp-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));

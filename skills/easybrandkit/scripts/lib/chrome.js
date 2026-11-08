@@ -158,6 +158,49 @@ function processesOf(child) {
   return [...found].map((pid) => ({ pid, start: startOf(pid) })).filter(({ start }) => start !== null);
 }
 
+// The crash handler a browser's processes name, on Linux, which Chrome starts
+// apart from them: it is no child of theirs, and its command line does not
+// name the profile. Ctrl-\ reaches the browser's helpers too, each of them
+// asks it for a crash report, and it takes hold of each one to write it. A
+// helper killed while it is held stays until the handler lets go of it,
+// which it can fail to do for good. So it goes with them: the one named,
+// only when it is a crash handler by the name /proc gives it (the first 15
+// characters of its program's name, chrome_crashpad or msedge_crashpad)
+// and it started with them or after them. Chrome rewrites a helper's
+// command line with spaces between its arguments. null when none is named.
+function crashHandlerOf(processes) {
+  if (process.platform !== "linux" || !processes.length) return null;
+  const oldest = Math.min(...processes.map(({ start }) => Number(start)));
+  for (const { pid } of processes) {
+    let line = "";
+    try {
+      line = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    } catch {
+      continue;
+    }
+    const named = /(?:^|[\0 ])--crashpad-handler-pid=(\d+)(?=[\0 ]|$)/.exec(line);
+    if (!named) continue;
+    // 0 where Chrome runs without one.
+    const handler = Number(named[1]);
+    if (handler <= 1 || handler === process.pid) return null;
+    try {
+      if (!/crashpad/.test(fs.readFileSync(`/proc/${handler}/comm`, "utf8"))) return null;
+    } catch {
+      return null;
+    }
+    const start = startOf(handler);
+    return start === null || Number(start) < oldest ? null : { pid: handler, start };
+  }
+  return null;
+}
+
+// A browser's processes and its crash handler, known from its launch or
+// named by them now.
+function withCrashHandler(entry, processes) {
+  const handler = entry.crashHandler || crashHandlerOf(processes);
+  return handler && !processes.some(({ pid }) => pid === handler.pid) ? [...processes, handler] : processes;
+}
+
 // Each of them that still runs, killed.
 function killAll(processes) {
   for (const { pid, start } of processes) {
@@ -243,10 +286,10 @@ async function launch({ width, height }) {
   // profile that still cannot be removed is left in the temp folder; the
   // kit is not lost over it.
   const close = async () => {
-    // The browser's processes as they are now; its helpers, which name the
-    // profile, are found also once it has ended, as one that could not
-    // start has.
-    const processes = processesOf(child);
+    // The browser's processes as they are now, with its crash handler; its
+    // helpers, which name the profile, are found also once it has ended, as
+    // one that could not start has.
+    const processes = withCrashHandler(entry, processesOf(child));
     if (base && !exited) {
       let asked = false;
       try {
@@ -290,6 +333,9 @@ async function launch({ width, height }) {
       const port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
       if (/^\d+$/.test(port)) {
         base = `http://127.0.0.1:${port}`;
+        // Known from the start: by the time the browser is stopped, its
+        // helpers can have ended.
+        entry.crashHandler = crashHandlerOf(processesOf(child));
         return { base, close, alive };
       }
     } catch {
@@ -315,14 +361,14 @@ function removeSingleton(profile) {
   }
 }
 
-// Every browser still open, killed at once with its helpers, and its
-// profile and temp folders removed: for a process that is being stopped
-// and has no time to ask them to quit. It never throws.
+// Every browser still open, killed at once with its helpers and its crash
+// handler, and its profile and temp folders removed: for a process that is
+// being stopped and has no time to ask them to quit. It never throws.
 function killBrowsers() {
   const ending = [...open];
   open.clear();
   for (const entry of ending) {
-    entry.processes = processesOf(entry.child);
+    entry.processes = withCrashHandler(entry, processesOf(entry.child));
     try {
       entry.child.kill("SIGKILL");
     } catch {
