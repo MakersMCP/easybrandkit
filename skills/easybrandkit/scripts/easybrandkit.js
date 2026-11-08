@@ -18,7 +18,9 @@ Shiny. With --facts it also lists what the site claims about itself, each
 claim with its page: FACTS.md, facts.json and the text of each page read.
 
 Options:
-  --out <dir>      where to save (default: ./easybrandkit-<host>)
+  --out <dir>      where to save (default: ./easybrandkit-<host>, the host
+                   without www or a port; ./easybrandkit-appstore-<id> and
+                   ./easybrandkit-googleplay-<id> for store listings)
   --facts          also read the site's own claims from its home, pricing,
                    customers, security, integrations and about pages
   --no-stores      skip app store listings and social profiles
