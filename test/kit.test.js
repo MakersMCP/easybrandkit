@@ -707,6 +707,39 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   assert.deepEqual(tempLeft(), [], "runs that end well");
 });
 
+test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // The card puts the first screen on itself, read from the run's part folder.
+  const read = fs.readFileSync;
+  const drawing = (file) => /\.easybrandkit-part-/.test(String(file)) && path.basename(String(file)) === "screen-01.png";
+  const killed = t.mock.method(fs, "readFileSync", function (file, ...rest) {
+    if (drawing(file)) killBrowsers();
+    return read.call(this, file, ...rest);
+  });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again." && err.earlierKit === dir);
+  killed.mock.restore();
+  assert.deepEqual(filesOf(dir), before);
+
+  // While the browser runs, the kit is saved without its card, and says so.
+  t.mock.method(fs, "readFileSync", function (file, ...rest) {
+    if (drawing(file)) throw new Error("the first screen could not be read.");
+    return read.call(this, file, ...rest);
+  });
+  const { kit } = await makeKit(site.origin, { dir, stores: false });
+  assert.equal(kit.card, null);
+  assert.deepEqual(kit.notes, ["The card could not be drawn: the first screen could not be read."]);
+  assert.equal(fs.existsSync(path.join(dir, "card.png")), false);
+  assert.match(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8"), /\n## Notes\n\n- The card could not be drawn: the first screen could not be read\.\n$/);
+});
+
 test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");

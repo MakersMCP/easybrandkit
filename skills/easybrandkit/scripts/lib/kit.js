@@ -268,11 +268,19 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     const name = brandName(found.siteName, found.title, pageUrl);
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");
-    const card = await renderCard(chrome.base, { url: pageUrl, name, colors, fonts: found.brand.fonts, logos, screenshots }, dir).catch(() => null);
+    let cardError = "the browser gave back an empty picture";
+    const card = await renderCard(chrome.base, { url: pageUrl, name, colors, fonts: found.brand.fonts, logos, screenshots }, dir).catch((err) => {
+      cardError = String(err.message || err);
+      return null;
+    });
     // The claims last, from the page as the kit leaves it and the pages it
     // links to: the kit is made the same way with or without them.
     const factPages = facts ? await readFactPages(cdp, pageUrl, log).catch((err) => ({ pages: [], skipped: [{ role: "home", url: pageUrl, reason: String(err.message || err) }] })) : null;
-    return { pageUrl, found, name, colors, text, logos, screenshots, card, factPages };
+    // A browser that was killed or crashed on the way has left the kit
+    // without its card or its claims: the run fails, so that an earlier kit
+    // in the folder stays as it was.
+    if (!(await chrome.alive())) throw new Error("The browser was closed or crashed before the kit was done, so no kit was made. Try again.");
+    return { pageUrl, found, name, colors, text, logos, screenshots, card, cardError: card ? "" : cardError, factPages };
   } finally {
     if (cdp) cdp.close();
     await chrome.close();
@@ -420,6 +428,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (page) read = await readPage(page, work, log, appName, facts);
     const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
     if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
+    if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
     if (facts && !read) notes.push("No facts were read: the listing names no website.");
     const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : []) : [];
     const sources = [...(given ? [given] : []), ...others];

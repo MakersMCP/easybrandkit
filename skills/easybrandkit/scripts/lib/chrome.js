@@ -261,6 +261,18 @@ async function launch({ width, height }) {
     }
     removeTemps(entry);
   };
+  // Whether the browser still runs: one that was killed or crashed has
+  // ended, or no longer takes a connection on its port. One that is slow to
+  // answer, on a busy machine, still runs.
+  const alive = async () => {
+    if (exited) return false;
+    try {
+      await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(5_000) })).arrayBuffer();
+      return !exited;
+    } catch (err) {
+      return !exited && err.name === "TimeoutError";
+    }
+  };
   // Chrome writes the port it picked to DevToolsActivePort in the profile.
   const portFile = path.join(profile, "DevToolsActivePort");
   for (let waited = 0; waited < 20_000 && !exited; waited += 100) {
@@ -268,7 +280,7 @@ async function launch({ width, height }) {
       const port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
       if (/^\d+$/.test(port)) {
         base = `http://127.0.0.1:${port}`;
-        return { base, close };
+        return { base, close, alive };
       }
     } catch {
       // Not written yet.
