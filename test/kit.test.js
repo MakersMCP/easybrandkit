@@ -562,7 +562,7 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
     if (path.basename(String(file)) === "brand.json") throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
     return write.call(this, file, ...rest);
   });
-  await assert.rejects(makeKit(site.origin, { dir, stores: false }), /ENOSPC/);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The disk has no room left for the new kit (ENOSPC)." && err.earlierKit === dir);
   full.mock.restore();
   assert.deepEqual(filesOf(dir), good, "a full disk");
 

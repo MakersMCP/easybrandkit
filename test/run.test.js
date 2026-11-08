@@ -90,6 +90,8 @@ function livePid(t) {
   return child.pid;
 }
 
+const posixOnly = process.platform === "win32" && "POSIX modes and signals";
+
 test("a new folder: the part folder sits next to it and becomes it when the run ends well", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "new", "acme");
@@ -142,7 +144,7 @@ test("ended well over an earlier kit: its files go, the new ones come, the user'
   assert.deepEqual(fs.readdirSync(dir).sort(), ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "notes.txt", "screen-01.png"]);
 });
 
-test("a move that cannot finish puts back what it moved, and its error says so once", async (t) => {
+test("a move that cannot finish puts back what it moved, and its error says why once", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -158,6 +160,23 @@ test("a move that cannot finish puts back what it moved, and its error says so o
   discardRun(run);
   assert.deepEqual(filesOf(dir), before);
 
+  // A file the system will not let go of. Only Windows refuses to move a file
+  // that another program holds open, so only there is that the reason given.
+  fs.rmdirSync(path.join(dir, "screen-01.png"));
+  const kept = filesOf(dir);
+  const second = startRun(dir, prepareDir(dir));
+  writeFiles(second.work, FRESH);
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", function (from, to) {
+    if (from === path.join(second.work, "card.png")) {
+      throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: "EPERM", syscall: "rename" });
+    }
+    return rename.call(this, from, to);
+  });
+  const reason = process.platform === "win32" ? "a file there is open in another program, or may not be moved (EPERM)" : "a file there may not be moved, or the folder may not be changed (EPERM)";
+  await assert.rejects(saveRun(second, earlierOf(dir)), (err) => err.message === `The new kit could not be put in ${dir}: ${reason}. The kit already there is as it was.`);
+  discardRun(second);
+  assert.deepEqual(filesOf(dir), kept);
 });
 
 test("an earlier file that cannot be put back stays where the error says, and nothing is put back over a file that took its place", async (t) => {
@@ -218,7 +237,7 @@ test("an earlier file that cannot be put back stays where the error says, and no
   let keptThird = "";
   await assert.rejects(saveRun(third, earlierOf(other)), (err) => {
     keptThird = (/ they are in (.+)\.$/.exec(err.message) || [])[1];
-    return err.message.startsWith(`The new kit could not be put in ${other}: EIO: i/o error`) && err.message.includes(" Some files of the earlier kit could not be put back;");
+    return err.message.startsWith(`The new kit could not be put in ${other}: brand.json could not be moved (EIO). Some files of the earlier kit could not be put back;`);
   });
   discardRun(third);
   assert.equal(fs.readFileSync(path.join(other, "logo-02.png"), "utf8"), "theirs");
@@ -470,9 +489,47 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   assert.equal(fresh.status, 1);
   assert.equal(fresh.stderr, "easybrandkit: No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.\n");
   assert.deepEqual(fs.readdirSync(parent), ["kit"]);
-  const file = cli("--out", path.join(dir, "notes.txt"));
-  assert.equal(file.status, 1);
-  assert.equal(file.stderr, `easybrandkit: ${path.join(dir, "notes.txt")} is a file, not a folder. Pick a folder with --out.\n`);
+  // A file, a folder below a file, and a link to nothing, also written with
+  // a slash at its end, are no folders.
+  const notes = path.join(dir, "notes.txt");
+  for (const out of [notes, path.join(notes, "kit"), path.join(notes, "kit", "deeper")]) {
+    const file = cli("--out", out);
+    assert.equal(file.status, 1);
+    assert.equal(file.stderr, `easybrandkit: ${notes} is a file, not a folder. Pick a folder with --out.\n`);
+  }
+  fs.symlinkSync(path.join(parent, "nowhere", "real"), path.join(parent, "dangling"), "junction");
+  for (const out of [path.join(parent, "dangling"), `${path.join(parent, "dangling")}${path.sep}`]) {
+    const link = cli("--out", out);
+    assert.equal(link.status, 1);
+    assert.equal(link.stderr, `easybrandkit: ${out} is a link to ${path.join(parent, "nowhere", "real")}, which is not there. Pick a folder with --out.\n`);
+  }
+  assert.deepEqual(filesOf(dir), before);
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails or is stopped leaves the folder as it\nwas, and a folder it would have made is not made\.\n/);
+});
+
+test("a folder this user may not write in is told plainly, without the part folder's name", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may write anywhere") }, (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  const shut = path.join(parent, "shut");
+  writeFiles(dir, EARLIER);
+  fs.mkdirSync(shut);
+  const before = filesOf(dir);
+  fs.chmodSync(dir, 0o555);
+  fs.chmodSync(shut, 0o555);
+  try {
+    const env = { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") };
+    const cli = (out) => spawnSync(process.execPath, [CLI, "acme.example", "--out", out], { encoding: "utf8", env });
+    const kit = cli(dir);
+    assert.equal(kit.status, 1);
+    assert.equal(kit.stderr, `easybrandkit: This user may not write in ${dir} (EACCES). Pick a folder you can write in with --out. The kit already in ${dir} is as it was.\n`);
+    const made = cli(path.join(shut, "a", "kit"));
+    assert.equal(made.status, 1);
+    assert.equal(made.stderr, `easybrandkit: This user may not write in ${shut} (EACCES), so ${path.join(shut, "a", "kit")} cannot be made there. Pick a folder you can write in with --out.\n`);
+    assert.deepEqual(filesOf(dir), before);
+    assert.deepEqual(fs.readdirSync(shut), []);
+  } finally {
+    fs.chmodSync(dir, 0o755);
+    fs.chmodSync(shut, 0o755);
+  }
 });

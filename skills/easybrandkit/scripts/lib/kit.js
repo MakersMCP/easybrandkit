@@ -36,7 +36,7 @@ const { brandYml } = require("./brandyml");
 const { readFactPages, writeFacts, FACT_FILES } = require("./facts");
 const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, sleep } = require("./time");
-const { SaveError, isRunName, swapping, startRun, discardRun, saveRun } = require("./run");
+const { SaveError, isRunName, swapping, shownFrom, startRun, discardRun, saveRun } = require("./run");
 const version = require("./version");
 
 // Logos are read from the desktop layout: a narrow screen shows the mobile
@@ -109,43 +109,71 @@ function readKit(dir) {
   }
 }
 
+// lstat, with a folder this user may not look into told plainly.
+function look(at, dir) {
+  try {
+    return fs.lstatSync(at, { throwIfNoEntry: false });
+  } catch (err) {
+    if (err.code === "ENOTDIR") return undefined;
+    if (err.code === "EACCES" || err.code === "EPERM") throw new Error(`This user may not open ${shownFrom(dir, path.dirname(at))} (${err.code}). Pick a folder you can write in with --out.`);
+    throw err;
+  }
+}
+
 // What the kit's folder holds, read before a run and again as its files go
 // in: nothing (null), when it is not there or empty, or an earlier
 // easybrandkit kit, whose file names come back: the files its brand.json
 // lists, by name only, and the fixed names a kit writes. A folder that holds
 // anything else is refused, so a run never mixes into or overwrites
-// someone's own files, and so is a path that is not a folder. A link to a
-// folder counts as that folder. The part folders and the lock of runs do not
-// count, and nothing is changed. With facts, a pages there that is not a
-// folder is refused, since the kit does not write through it. A folder whose
-// brand.json is away while another run puts its kit in counts as a kit
-// (saving is false before a run, when the folder is read again under the
-// run's own lock).
+// someone's own files, and so is a path that is not a folder or below a
+// file. A link to a folder counts as that folder, and a link to nothing is
+// refused. The part folders and the lock of runs do not count, and nothing
+// is changed. With facts, a pages there that is not a folder is refused,
+// since the kit does not write through it. A folder whose brand.json is
+// away while another run puts its kit in counts as a kit (saving is false
+// before a run, when the folder is read again under the run's own lock).
 function prepareDir(dir, { facts = false, saving = false } = {}) {
-  const there = fs.statSync(dir, { throwIfNoEntry: false });
-  if (!there) {
-    let link = null;
-    try {
-      link = fs.readlinkSync(dir);
-    } catch {
-      return null;
+  const target = path.resolve(dir);
+  for (let at = target; ; at = path.dirname(at)) {
+    const stat = look(at, dir);
+    if (stat) {
+      let real = stat;
+      if (stat.isSymbolicLink()) {
+        try {
+          real = fs.statSync(at);
+        } catch (err) {
+          if (err.code === "ENOENT" || err.code === "ENOTDIR") throw new Error(`${shownFrom(dir, at)} is a link to ${fs.readlinkSync(at)}, which is not there. Pick a folder with --out.`);
+          if (err.code === "ELOOP") throw new Error(`${shownFrom(dir, at)} is a link that does not lead to a folder. Pick a folder with --out.`);
+          throw err;
+        }
+      }
+      if (!real.isDirectory()) throw new Error(`${shownFrom(dir, at)} is a file, not a folder. Pick a folder with --out.`);
+      // A folder up the path: the run makes the rest.
+      if (at !== target) return null;
+      break;
     }
-    throw new Error(`${dir} is a link to ${link}, which is not there. Pick a folder with --out.`);
+    if (path.dirname(at) === at) return null;
   }
-  if (!there.isDirectory()) throw new Error(`${dir} is a file, not a folder. Pick a folder with --out.`);
-  if (fs.readdirSync(dir).filter((name) => !isRunName(name)).length === 0) return null;
-  let old = readKit(dir);
+  let names;
+  try {
+    names = fs.readdirSync(target).filter((name) => !isRunName(name));
+  } catch (err) {
+    if (err.code === "EACCES" || err.code === "EPERM") throw new Error(`This user may not read ${dir} (${err.code}). Pick a folder you can write in with --out.`);
+    throw err;
+  }
+  if (names.length === 0) return null;
+  let old = readKit(target);
   if (!old && !saving) {
     // Another run may be putting its kit in place right now, with brand.json
     // aside: this run reads the folder again when it saves. Or it was done
     // between the two looks.
-    if (swapping(dir)) return [...KIT_NAMES];
-    old = readKit(dir);
+    if (swapping(target)) return [...KIT_NAMES];
+    old = readKit(target);
   }
   if (!old) {
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
   }
-  const pages = facts && fs.lstatSync(path.join(dir, "pages"), { throwIfNoEntry: false });
+  const pages = facts && fs.lstatSync(path.join(target, "pages"), { throwIfNoEntry: false });
   if (pages && !pages.isDirectory()) {
     throw Object.assign(new Error(`${path.join(dir, "pages")} is ${pages.isSymbolicLink() ? "a link" : "a file"}, and --facts saves the text of each page it reads in a folder by that name. Move it away, or pick another folder with --out.`), { earlierKit: dir });
   }
@@ -358,7 +386,15 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
   // The files are made in the run's part folder, work, and go in place only
   // once everything has been read and written.
-  const run = startRun(target, prepareDir(target, { facts }));
+  const earlier = prepareDir(target, { facts });
+  let run;
+  try {
+    run = startRun(target, earlier);
+  } catch (err) {
+    // For the CLI, which says that an earlier kit is as it was.
+    if (earlier) err.earlierKit = target;
+    throw err;
+  }
   const work = run.work;
   try {
     let given = null;
@@ -422,10 +458,14 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     await saveRun(run, () => prepareDir(target, { saving: true }) || []);
     return { dir: target, kit, facts: claims };
   } catch (err) {
+    if (err instanceof SaveError || !(err instanceof Error)) throw err;
+    // A full disk is told plainly, and no other error names the part folder.
+    const plain = err.code === "ENOSPC" || err.code === "EDQUOT" ? Object.assign(new Error(`The disk has no room left for the new kit (${err.code}).`), { code: err.code }) : err;
+    if (plain === err && String(err.message).includes(work)) err.message = String(err.message).split(work).join(path.resolve(target));
     // For the CLI, which says that an earlier kit is as it was. saveRun's
     // own errors say what the folder holds.
-    if (run.earlier && !(err instanceof SaveError)) err.earlierKit = target;
-    throw err;
+    if (run.earlier) plain.earlierKit = target;
+    throw plain;
   } finally {
     discardRun(run);
   }

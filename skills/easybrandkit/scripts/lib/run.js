@@ -73,6 +73,35 @@ function remove(at) {
   }
 }
 
+// How a path in or above the kit's folder is shown: as the user gave the
+// folder, relative when they gave it so.
+function shownFrom(dir, at) {
+  if (at === path.resolve(dir)) return dir;
+  return path.isAbsolute(dir) ? at : path.relative(process.cwd(), at) || ".";
+}
+
+// The first folder up from at that is there.
+function firstThere(at) {
+  while (!lstat(at) && path.dirname(at) !== at) at = path.dirname(at);
+  return at;
+}
+
+// Why a folder for the new kit could not be made, told with the folder it
+// could not be made in, never with the part folder's name.
+function notMade(dir, err) {
+  const at = firstThere(path.dirname(path.resolve(err.path || dir)));
+  const where = shownFrom(dir, at);
+  const so = at === path.resolve(dir) ? "" : `, so ${dir} cannot be made there`;
+  const said = {
+    EACCES: `This user may not write in ${where} (EACCES)${so}.`,
+    EPERM: `${where} may not be written in (EPERM)${so}.`,
+    EROFS: `${where} is on a disk that cannot be written (EROFS)${so}.`,
+    ENOSPC: `The disk that holds ${where} is full (ENOSPC)${so}.`,
+    EDQUOT: `This user has no room left on the disk that holds ${where} (EDQUOT)${so}.`,
+  }[err.code];
+  return Object.assign(new Error(`${said || `No folder could be made in ${where} (${err.code || err.message})${so}.`} Pick a folder you can write in with --out.`), { code: err.code });
+}
+
 // The runs of this process that have not ended.
 const runs = new Set();
 
@@ -86,7 +115,12 @@ function startRun(dir, earlier) {
   const home = there ? target : path.dirname(target);
   // The folders made for the part folder, removed again when the run does
   // not end well.
-  const made = there ? undefined : fs.mkdirSync(home, { recursive: true });
+  let made;
+  try {
+    made = there ? undefined : fs.mkdirSync(home, { recursive: true });
+  } catch (err) {
+    throw notMade(dir, err);
+  }
   const run = { dir, target, home, made: made && path.resolve(made), work: "", earlier: Boolean(earlier && earlier.length) };
   try {
     for (;;) {
@@ -101,7 +135,7 @@ function startRun(dir, earlier) {
     }
   } catch (err) {
     removeMade(run);
-    throw err;
+    throw notMade(dir, err);
   }
   runs.add(run);
   return run;
@@ -263,9 +297,16 @@ function takeOver(file, seen) {
   }
 }
 
-// What stopped a file from moving, in words.
+// What stopped a file from moving, in words, without the part folder's
+// name. Only Windows refuses to move a file that another program holds
+// open.
 function why(err) {
-  return err.syscall && BUSY.includes(err.code) ? `another program holds a file open, or the folder may not be changed (${err.code})` : err.message;
+  if (!err.syscall) return err.message;
+  if (BUSY.includes(err.code)) {
+    return process.platform === "win32" ? `a file there is open in another program, or may not be moved (${err.code})` : `a file there may not be moved, or the folder may not be changed (${err.code})`;
+  }
+  if (err.code === "ENOENT") return "the folder is not there any more";
+  return `${err.moving || "a file"} could not be moved (${err.code})`;
 }
 
 // Puts the run's files in place, once no other run is putting its kit in
@@ -289,7 +330,7 @@ async function saveRun(run, earlierOf) {
         return;
       } catch (err) {
         // Made meanwhile, by another run or by hand: the files go in one by one.
-        if (!lstat(target)) throw new SaveError(`The new kit could not be put in ${dir}: ${why(err)}. Nothing there was changed.`);
+        if (!lstat(target)) throw new SaveError(`The new kit could not be put in ${dir}: ${why(Object.assign(err, { moving: "its folder" }))}. Nothing there was changed.`);
       }
     }
     let lock = null;
@@ -343,7 +384,11 @@ function swap(run, earlierNow) {
     // rename(2) would replace a file without a word: a file is replaced only
     // by moveIn, which moves it aside first.
     if (lstat(to)) throw new Error(`${name} came there while the new kit was put in`);
-    rename(from, to);
+    try {
+      rename(from, to);
+    } catch (err) {
+      throw Object.assign(err, { moving: name });
+    }
     moved.push([from, to, name, coming]);
   };
   // brand.json goes aside first and comes in last, so the folder never
@@ -472,4 +517,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, startRun, discardRun, discardRuns, saveRun, sweep };
+module.exports = { PART, LOCK, STALE, SaveError, isRunName, swapping, shownFrom, startRun, discardRun, discardRuns, saveRun, sweep };
