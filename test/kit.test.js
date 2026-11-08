@@ -451,7 +451,7 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
   }
 });
 
-test("what Chrome's component updater was fetching goes once a browser is killed, and only what came while it ran", (t) => {
+test("what Chrome's component updater was fetching goes once a browser has ended, and only what came while it ran", (t) => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-temp-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const fetched = ["com.google.Chrome.chrome_chrome_url_fetcher_.a1b2c3", "com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.d4e5f6"];
@@ -464,13 +464,28 @@ test("what Chrome's component updater was fetching goes once a browser is killed
   });
   fs.mkdirSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.empty"));
   const before = new Set(["com.google.Chrome.chrome_chrome_url_fetcher_.before"]);
-  // A browser that quit when asked has removed its own: what is left with
-  // files in it can be another browser's, at work.
-  removeTemps({ temp, before }, false);
-  assert.deepEqual(fs.readdirSync(temp).sort(), [...fetched, "com.google.Chrome.chrome_chrome_url_fetcher_.before", "com.google.Chrome.g7h8i9"].sort());
-  removeTemps({ temp, before }, true);
+  removeTemps({ temp, before });
   assert.deepEqual(fs.readdirSync(temp).sort(), ["com.google.Chrome.chrome_chrome_url_fetcher_.before", "com.google.Chrome.g7h8i9"]);
   assert.equal(fs.readFileSync(path.join(temp, "com.google.Chrome.chrome_chrome_url_fetcher_.before", "download"), "utf8"), "theirs");
+  assert.deepEqual(fs.readdirSync(path.join(temp, "com.google.Chrome.g7h8i9")), ["SingletonSocket"]);
+});
+
+test("a browser that quits when asked leaves nothing of its component updater's in the temp folder", { skip: noBrowser }, async (t) => {
+  const temp = ownTemp(t);
+  if (!temp) return;
+  const system = process.env.TMPDIR;
+  process.env.TMPDIR = temp;
+  t.after(() => {
+    if (system === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = system;
+  });
+  const browser = await launch({ width: 800, height: 600 });
+  // What the component updater leaves when the browser quits in the middle
+  // of a download, as Chrome does now and then.
+  writeFiles(temp, { "com.google.Chrome.chrome_chrome_url_fetcher_.k1l2m3/decoded_xz": "x" });
+  assert.equal(await browser.alive(), true);
+  await browser.close();
+  assert.deepEqual(fs.readdirSync(temp), []);
 });
 
 test("a browser that is slow to answer still runs; one that refuses its port or has ended does not", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {

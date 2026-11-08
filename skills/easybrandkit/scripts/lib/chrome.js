@@ -77,14 +77,14 @@ function tempNames(temp) {
 }
 
 // Once a browser has ended: the folders of this user's that came in the
-// temp folder while it ran, when they are empty, so one that another
-// browser is using, like the one that holds its socket, keeps its files. A
-// browser that did not quit when asked, because it was killed, crashed or
-// never answered, can leave the component updater's folders with what it
-// was fetching in them: those go with their files. Another browser that
-// fetched a component at that moment loses only that download; its pages
-// are not touched.
-function removeTemps({ temp, before }, killed) {
+// temp folder while it ran. A browser that ends while its component updater
+// fetches or unpacks something leaves those folders with what is in them,
+// whether it was killed or quit when asked, so they go with their files.
+// Any other folder goes only when it is empty, so one that another browser
+// is using, like the one that holds its socket, keeps its files. Another
+// browser that fetched a component at that moment loses only that
+// download; its pages are not touched.
+function removeTemps({ temp, before }) {
   const uid = process.getuid ? process.getuid() : null;
   for (const name of tempNames(temp)) {
     if (before.has(name)) continue;
@@ -92,7 +92,7 @@ function removeTemps({ temp, before }, killed) {
     try {
       const stat = fs.lstatSync(at);
       if (!stat.isDirectory() || (uid !== null && stat.uid !== uid)) continue;
-      if (killed && FETCHING.test(name)) fs.rmSync(at, { recursive: true, force: true });
+      if (FETCHING.test(name)) fs.rmSync(at, { recursive: true, force: true });
       else fs.rmdirSync(at);
     } catch {
       // Not empty, or gone.
@@ -247,7 +247,6 @@ async function launch({ width, height }) {
     // profile, are found also once it has ended, as one that could not
     // start has.
     const processes = processesOf(child);
-    let quit = false;
     if (base && !exited) {
       let asked = false;
       try {
@@ -259,7 +258,6 @@ async function launch({ width, height }) {
         // Not answering: it is killed below.
       }
       for (let i = 0; i < 50 && asked && !exited; i++) await sleep(100);
-      quit = asked && exited;
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
@@ -271,7 +269,7 @@ async function launch({ width, height }) {
     } catch {
       // Left for the system's temp clean-up.
     }
-    removeTemps(entry, !quit);
+    removeTemps(entry);
   };
   // Whether the browser still runs: one that was killed or crashed has
   // ended, or no longer takes a connection on its port. One that is slow to
@@ -350,7 +348,7 @@ function killBrowsers() {
     pause(100);
     if (!ending.some(({ profile }) => fs.existsSync(profile))) break;
   }
-  for (const entry of ending) removeTemps(entry, true);
+  for (const entry of ending) removeTemps(entry);
 }
 
 function connect(wsUrl) {
