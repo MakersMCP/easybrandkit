@@ -418,8 +418,6 @@ async function saveRun(run, earlierOf) {
 // The moves, under the lock.
 function swap(run, earlierNow) {
   const { dir, target, work } = run;
-  // How a path in or next to the kit's folder is shown: from dir as given.
-  const shown = (at) => path.join(path.dirname(dir), path.relative(path.dirname(target), at));
   const asWas = earlierNow.length ? "The kit already there is as it was." : "Nothing there was changed.";
   const newNames = fs.readdirSync(work).filter((name) => name !== ".earlier");
   // pages/ is moved in and out only as a folder of the kit's folder: a link
@@ -502,7 +500,7 @@ function swap(run, earlierNow) {
         keptAt = aside;
         runs.delete(run);
       }
-      said.push(`Some files of the earlier kit could not be put back; they are in ${shown(keptAt)}.`);
+      said.push(`Some files of the earlier kit could not be put back; they are in ${shownFrom(dir, keptAt)}.`);
     }
     if (leftNew.length) said.push(`${leftNew.join(", ")} of the new kit could not be taken out of it again.`);
     throw new SaveError(said.join(" "));

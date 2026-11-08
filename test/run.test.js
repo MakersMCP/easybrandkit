@@ -285,6 +285,35 @@ test("an earlier file that cannot be put back stays where the error says, and no
   assert.equal(fs.readFileSync(path.join(fourthDir, "BRAND.md"), "utf8"), "theirs");
   assert.equal(fs.readFileSync(path.join(keptFourth, "BRAND.md"), "utf8"), "old");
   assert.equal(fs.readFileSync(path.join(fourthDir, "brand.json"), "utf8"), EARLIER["brand.json"], "the rest is back");
+
+  // The folder is named as the user gave the kit's folder: given as "."
+  // from inside it, from there.
+  t.mock.restoreAll();
+  t.mock.method(fs, "renameSync", function (from, to) {
+    if (String(from).endsWith(`${path.sep}.earlier${path.sep}BRAND.md`)) {
+      throw Object.assign(new Error(`EIO: i/o error, rename '${from}' -> '${to}'`), { code: "EIO", syscall: "rename" });
+    }
+    return rename.call(this, from, to);
+  });
+  const fifthDir = path.join(parent, "fifth");
+  writeFiles(fifthDir, EARLIER);
+  fs.mkdirSync(path.join(fifthDir, "screen-01.png"));
+  const cwd = process.cwd();
+  process.chdir(fifthDir);
+  try {
+    const fifth = startRun(".", prepareDir("."));
+    writeFiles(fifth.work, { ...FRESH, "screen-01.png": "new" });
+    let keptFifth = "";
+    await assert.rejects(saveRun(fifth, earlierOf(".")), (err) => {
+      keptFifth = (/ they are in (.+)\.$/.exec(err.message) || [])[1];
+      return err.message.startsWith("The new kit could not be put in .: screen-01.png is a folder there, where the new kit has a file. Some files of the earlier kit could not be put back;");
+    });
+    discardRun(fifth);
+    assert.match(keptFifth, /^easybrandkit-kept-\d+-[0-9a-f]{8}$/);
+    assert.equal(fs.readFileSync(path.join(keptFifth, "BRAND.md"), "utf8"), "old", "the folder the error names, from where the run was");
+  } finally {
+    process.chdir(cwd);
+  }
 });
 
 test("a folder made while the run worked: a kit there is read again and replaced, other files are refused", async (t) => {
