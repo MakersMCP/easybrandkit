@@ -343,13 +343,16 @@ function takeOver(file, seen) {
 
 // What stopped a file from moving, in words, without the part folder's
 // name. Only Windows refuses to move a file that another program holds
-// open.
+// open. A full disk stops the lock, or the folder the earlier kit's files go
+// aside into, from being made, or a name from being added to a folder.
 function why(err) {
   if (!err.syscall) return err.message;
   if (BUSY.includes(err.code)) {
     return process.platform === "win32" ? `a file there is open in another program, or may not be moved (${err.code})` : `a file there may not be moved, or the folder may not be changed (${err.code})`;
   }
   if (err.code === "ENOENT") return "the folder is not there any more";
+  if (err.code === "ENOSPC") return "the disk is full (ENOSPC)";
+  if (err.code === "EDQUOT") return "this user has no room left on the disk (EDQUOT)";
   return `${err.moving || "a file"} could not be moved (${err.code})`;
 }
 

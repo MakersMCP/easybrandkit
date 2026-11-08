@@ -699,6 +699,45 @@ test("an error never names the part folder, and a full disk is told as the kit's
   assert.equal(toldPlainly(other, run), other);
 });
 
+test("a disk that fills up as the new kit goes in is told as full, not as a file that could not be moved", async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const full = (code, syscall, at) => Object.assign(new Error(`${code}: no space left on device, ${syscall} '${at}'`), { code, syscall, path: at });
+  const said = { ENOSPC: "the disk is full (ENOSPC)", EDQUOT: "this user has no room left on the disk (EDQUOT)" };
+  for (const code of ["ENOSPC", "EDQUOT"]) {
+    // No room for the lock, or for the folder the earlier kit's files go
+    // aside into: nothing has moved yet.
+    for (const [method, syscall, name] of [["openSync", "open", LOCK], ["mkdirSync", "mkdir", ".earlier"]]) {
+      const real = fs[method];
+      const mock = t.mock.method(fs, method, function (at, ...rest) {
+        if (path.basename(String(at)) === name) throw full(code, syscall, at);
+        return real.call(this, at, ...rest);
+      });
+      const run = startRun(dir, checkDir(dir));
+      writeFiles(run.work, FRESH);
+      await assert.rejects(saveRun(run, earlierOf(dir)), (err) => err instanceof SaveError && err.message === `The new kit could not be put in ${dir}: ${said[code]}. The kit already there is as it was.`);
+      mock.mock.restore();
+      discardRun(run);
+      assert.deepEqual(filesOf(dir), before, `${code}: ${name}`);
+    }
+    // No room for a new folder's name in the folder above it.
+    const fresh = path.join(parent, `new-${code}`);
+    const run = startRun(fresh, checkDir(fresh));
+    writeFiles(run.work, FRESH);
+    const rename = fs.renameSync;
+    const mock = t.mock.method(fs, "renameSync", function (from, to) {
+      if (to === fresh) throw full(code, "rename", from);
+      return rename.call(this, from, to);
+    });
+    await assert.rejects(saveRun(run, earlierOf(fresh)), (err) => err instanceof SaveError && err.message === `The new kit could not be put in ${fresh}: ${said[code]}. Nothing there was changed.`);
+    mock.mock.restore();
+    discardRun(run);
+  }
+  assert.deepEqual(fs.readdirSync(parent), ["kit"]);
+});
+
 test("the CLI says what a failed run leaves, on the error's own line, and --help says it too", (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
