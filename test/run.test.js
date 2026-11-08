@@ -939,6 +939,23 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails, is refused, or is stopped with Ctrl-C\nor a kill leaves the folder as it was, and a folder it would have made is\nnot made\. A run killed outright, as kill -9, taskkill \/F or a power cut do,\ncan leave a hidden \.easybrandkit-part- folder in the folder or next to it;\nthe README says what it holds and when it goes\.\n/);
 });
 
+test("output that cannot be written makes the CLI exit 1 and say so, while a reader that has gone does not", { skip: !fs.existsSync("/dev/full") && "no /dev/full" }, async (t) => {
+  const full = fs.openSync("/dev/full", "w");
+  t.after(() => fs.closeSync(full));
+  for (const [arg, what] of [["--version", "The version"], ["--help", "The help"]]) {
+    const run = spawnSync(process.execPath, [CLI, arg], { encoding: "utf8", stdio: ["ignore", full, "pipe"] });
+    assert.equal(run.status, 1, arg);
+    assert.equal(run.stderr, `easybrandkit: ${what} could not be printed (ENOSPC).\n`);
+  }
+  const child = spawn(process.execPath, [CLI, "--help"], { stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout.destroy();
+  let said = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  const [code] = await once(child, "close");
+  assert.equal(code, 0, said);
+  assert.equal(said, "");
+});
+
 test("a folder this user may not write in is told plainly, without the part folder's name", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may write anywhere") }, (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");

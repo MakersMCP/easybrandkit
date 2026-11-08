@@ -154,11 +154,25 @@ function stopOnSignals(json) {
   });
 }
 
+// What is being printed, and the folder of a kit that was saved, for what an
+// error on stdout says.
+let printing = "the output";
+let savedIn = "";
+
 async function main() {
   // What is printed comes once the kit is in place: a reader that has gone,
   // like a pipe into a command that reads none of it, does not turn a run
-  // that ended well into one that exits with an error.
-  process.stdout.on("error", () => {});
+  // that ended well into one that exits with an error. Output lost for
+  // another reason, like a full disk, makes the run exit 1 and say so.
+  process.stdout.on("error", (err) => {
+    if (err.code === "EPIPE") return;
+    process.exitCode = 1;
+    const lost = `${printing} could not be printed (${err.code || err.message})`;
+    say(2, `easybrandkit: ${savedIn ? `Saved the kit to ${savedIn}, but ${lost}` : lost.charAt(0).toUpperCase() + lost.slice(1)}.\n`);
+  });
+  // A progress line nobody reads, or that cannot be written, does not stop
+  // the run: what came of it is in its exit status.
+  process.stderr.on("error", () => {});
   let options;
   try {
     options = parse(process.argv.slice(2));
@@ -166,6 +180,7 @@ async function main() {
     process.stderr.write(`easybrandkit: ${err.message}\n\n${USAGE}\n`);
     process.exit(2);
   }
+  printing = options.help ? "the help" : options.version ? "the version" : options.json ? "brand.json" : "the summary";
   if (options.help) return void process.stdout.write(`${USAGE}\n`);
   if (options.version) return void process.stdout.write(`${version}\n`);
   stopOnSignals(options.json);
@@ -177,6 +192,7 @@ async function main() {
       timeLimit: options.timeout * 1000,
       log: options.json ? () => {} : (line) => process.stderr.write(`${line}...\n`),
     });
+    savedIn = result.dir;
     process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : summary(result) + "\n");
   } catch (err) {
     // A stopped run has said so, and ends by its signal.
