@@ -102,8 +102,9 @@ function summary({ dir, kit, facts }) {
       [facts.ratings.length, "rating"],
       [facts.faqs.length, "question"],
     ].filter(([n]) => n).map(([n, word]) => `${n} ${word}${n === 1 ? "" : "s"}`);
-    lines.push(`  Facts   ${list(counts)}, from ${facts.pages.length} page${facts.pages.length === 1 ? "" : "s"}`);
+    lines.push(`  Facts   ${facts.claimsError ? "not listed" : list(counts)}, from ${facts.pages.length} page${facts.pages.length === 1 ? "" : "s"}`);
     for (const skip of facts.skipped) lines.push(`  Note    Did not read ${skip.url}: ${skip.reason}.`);
+    if (facts.claimsError) lines.push(`  Note    Could not list the claims of ${facts.site}: ${facts.claimsError}.`);
   }
   for (const note of kit.notes) lines.push(`  Note    ${note}`);
   lines.push("", `Read ${dir}/BRAND.md for the details. ${dir}/_brand.yml is the kit for Quarto and Shiny.`);

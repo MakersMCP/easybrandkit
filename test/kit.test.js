@@ -1962,6 +1962,27 @@ test("with --facts, an error while the pages are read is one line in the summary
   assert.doesNotMatch(done.stdout, /^ {2}Note {4}A forged/m);
 });
 
+test("with --facts, rules that do not finish are told as that: the page was read, and no claim is said to be missing", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const preload = path.join(parent, "preload.js");
+  fs.writeFileSync(preload, `const wt = require("worker_threads");\nconst { EventEmitter } = require("events");\nwt.Worker = class extends EventEmitter { constructor() { super(); setTimeout(() => this.emit("error", new Error("the rules took\\n  Note    too long")), 0); } terminate() {} };\n`);
+  const dir = path.join(parent, "kit");
+  const done = await runCli([site.origin, "--out", dir, "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${preload}` });
+  assert.equal(done.code, 0, done.stderr);
+  const lines = done.stdout.split("\n");
+  const at = lines.findIndex((line) => line.startsWith("  Facts "));
+  assert.deepEqual(lines.slice(at, at + 2), ["  Facts   not listed, from 1 page", `  Note    Could not list the claims of ${site.origin}/: the rules took Note too long.`], done.stdout);
+  assert.doesNotMatch(done.stdout, /Did not read/);
+  assert.ok(fs.existsSync(path.join(dir, "pages", "home.md")));
+  const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+  assert.doesNotMatch(md, /Not read|## Not found/);
+});
+
 test("a robots.txt rule built to keep a matcher busy cannot keep a run from being stopped", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
   let robots = false;
   const stars = "*a".repeat(24);

@@ -440,9 +440,17 @@ test("a page built to keep the rules busy costs its claims, and the run stays fr
   clearInterval(beat);
   assert.ok(Date.now() - started < 20_000, `took ${Date.now() - started} ms`);
   assert.ok(longest < 4_000, `the main thread was held for ${longest} ms`);
-  assert.deepEqual(facts.skipped, [{ role: "home", url: "https://acme.test/", reason: "its claims could not be read (the rules took too long)" }]);
+  // The page was read: what did not finish is told as that, not as a page not read.
+  assert.deepEqual(facts.skipped, []);
+  assert.equal(facts.claimsError, "the rules took too long");
+  assert.deepEqual(facts.pages.map((one) => one.role), ["home"]);
   assert.deepEqual(facts.stats, []);
   assert.ok(fs.existsSync(path.join(dir, "pages", "home.md")), "the page's text is kept");
+  const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+  assert.match(md, /\| home \| <https:\/\/acme\.test\/> \| pages\/home\.md \|\n\nThe claims could not be listed: the rules took too long\. No claim was taken from any page, so pages\/ is all there is: its files hold the text of each page read\.\n/);
+  assert.doesNotMatch(md, /Not read/);
+  assert.doesNotMatch(md, /## Not found|showed nothing/, "no claim was looked for, so none is said to be missing");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "facts.json"), "utf8")).claimsError, "the rules took too long");
 });
 
 test("a page that trips the rules costs its claims, and a page of many backticks gets a fence", async (t) => {
@@ -451,8 +459,8 @@ test("a page that trips the rules costs its claims, and a page of many backticks
   setTimeLimit(120_000);
   const broken = { url: "https://acme.test/", title: "", jsonLd: [], tree: { tag: "body", block: 1, kids: [{ tag: "div", hidden: 1, kids: 5 }] } };
   const facts = await writeFacts(dir, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [page("home", broken)] });
-  assert.equal(facts.skipped.length, 1);
-  assert.match(facts.skipped[0].reason, /^its claims could not be read \(.*not iterable.*\)$/);
+  assert.deepEqual(facts.skipped, []);
+  assert.match(facts.claimsError, /not iterable/);
   const ticks = model("https://acme.test/", [el("p", {}, "` x ".repeat(190000))]);
   await writeFacts(dir, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [page("home", ticks)] });
   assert.match(fs.readFileSync(path.join(dir, "pages", "home.md"), "utf8"), /\n```text\n/);
@@ -473,6 +481,13 @@ test("what a page says stays out of FACTS.md and facts.json with its control cha
   assert.deepEqual(facts.company.map((item) => item.value), ["Acme [2J Inc", "Acme , Inc."]);
   const control = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
   assert.doesNotMatch(fs.readFileSync(path.join(dir, "FACTS.md"), "utf8"), control);
+  // A file for scripts: its strings as a script reads them, each quote too.
+  // The kit's name and the reasons for a page not read come to it clean.
+  const strings = [];
+  const walk = (value) => (typeof value === "string" ? strings.push(value) : value && typeof value === "object" ? Object.values(value).forEach(walk) : 0);
+  walk({ ...JSON.parse(fs.readFileSync(path.join(dir, "facts.json"), "utf8")), name: "", skipped: [] });
+  assert.ok(strings.some((text) => text.includes("Acme")));
+  assert.doesNotMatch(strings.join("\n"), control);
 });
 
 test("what comes back from a page is looked at again here: no control character in its text, and a link as the URL parser writes it", async (t) => {

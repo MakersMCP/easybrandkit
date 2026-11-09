@@ -549,6 +549,7 @@ function factsMarkdown(facts) {
     lines.push("No page could be read.");
   }
   for (const skip of facts.skipped) lines.push("", `Not read: the ${skip.role} page, <${skip.url}>: ${md(skip.reason)}.`);
+  if (facts.claimsError) lines.push("", `The claims could not be listed: ${md(facts.claimsError)}. No claim was taken from any page, so pages/ is all there is: its files hold the text of each page read.`);
   const empty = [];
   const section = (title, list, write) => {
     if (!list.length) return empty.push(title.toLowerCase());
@@ -601,7 +602,7 @@ function factsMarkdown(facts) {
   section("Company", facts.company, (list) => {
     for (const item of list) lines.push(`- ${item.field}: ${md(item.value)} (${from(item)}, in its JSON-LD)`);
   });
-  if (empty.length) lines.push("", "## Not found", "", `The pages read showed nothing for: ${empty.join(", ")}. That is no claim that the site has none.`);
+  if (empty.length && !facts.claimsError) lines.push("", "## Not found", "", `The pages read showed nothing for: ${empty.join(", ")}. That is no claim that the site has none.`);
   return lines.join("\n") + "\n";
 }
 
@@ -634,11 +635,9 @@ async function writeFacts(dir, { name, site, generator, pages = [], skipped = []
     fs.writeFileSync(path.join(dir, file), pageMarkdown(page, generator));
     listed.push({ role: page.role, url: page.url, readAt: page.readAt, title: noControls(page.model.title || ""), file });
   }
-  let { claims, error } = await claimsOf(pages);
-  if (error) {
-    claims = findClaims([]);
-    skipped = [...skipped, { role: "home", url: site, reason: `its claims could not be read (${error})` }];
-  }
+  const { claims, error } = await claimsOf(pages);
+  // Rules that did not finish say nothing about the pages, which were read:
+  // what is told of them is not told as a page that was not.
   const facts = {
     version: 1,
     site,
@@ -648,7 +647,8 @@ async function writeFacts(dir, { name, site, generator, pages = [], skipped = []
     note: NOTE,
     pages: listed,
     skipped,
-    ...claims,
+    ...(error ? { claimsError: error } : {}),
+    ...(error ? findClaims([]) : claims),
   };
   fs.writeFileSync(path.join(dir, "facts.json"), JSON.stringify(facts, null, 2) + "\n");
   fs.writeFileSync(path.join(dir, "FACTS.md"), factsMarkdown(facts));
