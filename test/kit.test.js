@@ -19,8 +19,10 @@ const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName 
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
+const { waitForContent } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 const { noControls, plainText } = require("../skills/easybrandkit/scripts/lib/text");
+const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
@@ -267,6 +269,26 @@ test("a logo's alt text and an icon's sizes come in without control characters",
       if (page.marks[0].alt !== "Acme logo [2J") throw new Error(JSON.stringify(page.marks));
     });
   `);
+});
+
+test("the first look at a page comes whatever time the run has left, and what the wait says is what it did", async (t) => {
+  const tab = (height, name) => ({
+    looks: 0,
+    send: async function (method) {
+      if (method === "Page.getLayoutMetrics") {
+        this.looks++;
+        return { cssLayoutViewport: { clientWidth: 1600, clientHeight: 900 }, cssContentSize: { height } };
+      }
+      return { documents: [{ nodes: { nodeName: [0] } }], strings: [name] };
+    },
+  });
+  t.after(() => setTimeLimit(120_000));
+  setTimeLimit(40_000);
+  for (const [height, name, said, what] of [[2000, "P", "content", "taller than the screen"], [900, "A", "content", "a link"], [900, "IMG", "content", "an image"], [900, "P", "no time", "a bare page, with no time left to wait"]]) {
+    const cdp = tab(height, name);
+    assert.equal(await waitForContent(cdp), said, what);
+    assert.equal(cdp.looks, 1, what);
+  }
 });
 
 test("stores and social networks: a listing leads to its website, a profile is refused before anything runs", async () => {
@@ -1435,11 +1457,14 @@ test("a store listing whose website fails keeps what the listing gave and says s
     assert.deepEqual(fs.readdirSync(dir).sort(), fromListing, what);
     assert.ok(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8").includes(`- ${noteOf(told)}\n`), what);
   }
-  // A page that shows nothing for as long as the run may wait costs the
-  // website, not the listing.
+  // A page that shows nothing after the whole wait costs the website, not
+  // the listing. The wait is told to have passed.
   answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end("<!doctype html><title>Loading</title>");
   seller = `${site.origin}/`;
-  const bare = await makeKit(listing, { dir: path.join(parent, "bare"), stores: false, timeLimit: 55_000 });
+  const pageLib = require("../skills/easybrandkit/scripts/lib/page");
+  t.mock.method(pageLib, "waitForContent", async () => "loader");
+  const bare = await reloadedKit().makeKit(listing, { dir: path.join(parent, "bare"), stores: false });
+  pageLib.waitForContent.mock.restore();
   assert.deepEqual(bare.kit.notes, [noteOf("still shows no content after 30 s")]);
   assert.deepEqual(fs.readdirSync(path.join(parent, "bare")).sort(), fromListing);
 
@@ -1815,6 +1840,24 @@ test("a home page the run used up its time on ends the run, with the advice to g
   const stalledOnce = withStalledTab(t, "Page.navigate", 1);
   const { kit } = await stalledOnce(deeper, { dir: path.join(parent, "deeper"), stores: false });
   assert.deepEqual(kit.notes, [`The home page, ${home}, could not be read: it did not answer. ${deeper} was read as given, and its header and colors can differ from the home page's.`]);
+});
+
+test("a short time limit reads what a page shows, and says so when the page shows nothing and there is no time to wait", { skip: noBrowser }, async (t) => {
+  const plain = "<!doctype html><meta charset=utf-8><title>No Logo Home</title><h1>A home page with plenty on it</h1><p><a href=/x>link</a></p><div style=height:2000px>text</div>";
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(req.url === "/deep" ? brandPage("rgb(255,0,0)") : req.url === "/tr" ? "<!doctype html><title>Loading</title><p>Loading</p>" : plain));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const home = `${site.origin}/`;
+  // A home page with text and links and no logo is the home page.
+  const { kit } = await makeKit(`${home}deep`, { dir: path.join(parent, "home"), stores: false, timeLimit: 45_000 });
+  assert.equal(kit.url, home);
+  assert.deepEqual(kit.notes, [`${home}deep is not the home page, so ${home} was read instead: the home page carries the brand's own header and colors.`, "No logo was found on the page itself."]);
+  // A page that shows nothing is not told as one that was waited for.
+  await assert.rejects(makeKit(`${home}tr`, { dir: path.join(parent, "bare"), stores: false, timeLimit: 45_000 }), (err) => err.message === `${home}tr shows no content yet and the run has no time left to wait for it, so nothing was read. Try again, or give it more time with --timeout.`);
+  assert.equal(fs.existsSync(path.join(parent, "bare")), false);
 });
 
 test("a browser killed while the page loads is told at once, not after the wait for the page's load event", { skip: noBrowser }, async (t) => {

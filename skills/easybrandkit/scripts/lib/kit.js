@@ -196,7 +196,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     // No overlay hiding before the logos: a fixed header that does not look
     // like page chrome would be hidden with the logo in it, and the cut-out
     // hides whatever paints over a mark anyway.
-    const loaded = await waitForContent(cdp);
+    const content = await waitForContent(cdp);
     log("Reading the page");
     await walk(cdp);
     // Back at the top, headers swap their scrolled style and re-render.
@@ -223,7 +223,10 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     const logos = await captureLogos(cdp, found.marks, dir, m.width, m.height);
     // A page still showing its loader has no logo yet. An empty kit would
     // pass for a site without one.
-    if (!logos.length && !loaded) {
+    if (!logos.length && content === "no time") {
+      throw pageFailed(`${pageUrl} shows no content yet and the run has no time left to wait for it, so nothing was read. Try again, or give it more time with --timeout.`, "shows no content yet", true);
+    }
+    if (!logos.length && content === "loader") {
       throw pageFailed(`${pageUrl} still shows no content after 30 s, so nothing was read. Try again, or check the page in a browser.`, "still shows no content after 30 s");
     }
     log("Taking the first screen");

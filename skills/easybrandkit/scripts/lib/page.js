@@ -52,19 +52,22 @@ async function walk(cdp) {
 }
 
 // A single-page app can show a bare loading screen for a long time (25 s on
-// one site, in a fresh browser). Wait, up to 30 s, until the page is taller
-// than the screen or has a link or an image. True once the page shows
-// content; false when it is still a bare loader.
+// one site, in a fresh browser). The page is looked at once in any case, and
+// then, up to 30 s while the run has the time for it, until it is taller than
+// the screen or has a link or an image. Says "content" once the page shows
+// some, "loader" when it is still a bare loader after the whole wait, and
+// "no time" when the run had no time left to wait that long.
 async function waitForContent(cdp) {
-  for (let waited = 0; waited < 30_000 && timeLeft() > 50_000; waited += 1_000) {
+  for (let waited = 0; ; waited += 1_000) {
     const m = await metrics(cdp);
-    if (m.height > m.viewportHeight + 50) return true;
+    if (m.height > m.viewportHeight + 50) return "content";
     const snap = await cdp.send("DOMSnapshot.captureSnapshot", { computedStyles: [] });
     const names = (((snap.documents || [])[0] || {}).nodes || {}).nodeName || [];
-    if (names.some((i) => snap.strings[i] === "A" || snap.strings[i] === "IMG")) return true;
+    if (names.some((i) => snap.strings[i] === "A" || snap.strings[i] === "IMG")) return "content";
+    if (waited >= 30_000) return "loader";
+    if (timeLeft() <= 50_000) return "no time";
     await sleep(1_000);
   }
-  return false;
 }
 
 // Floating overlays sit over the content: a promo box, a chat bubble, a
