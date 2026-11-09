@@ -9,17 +9,19 @@
 // mark is kept when it sits in the page header (the bar at the top) or the
 // page footer (the block that ends the page), inside a link to the home page,
 // or is named after the brand; customer, partner and payment strips are
-// skipped. Everything is read from one DOM snapshot: no extra request, no
-// page JavaScript, until the marks are cut out one by one. Once cut, a mark
-// in the page body that sits on a picture is dropped (an event's lockup over
-// a photo), and a mark the page draws as SVG is saved as a vector too.
+// skipped. Everything is read from one DOM snapshot, on a thread of its own
+// (see findLogos): no extra request, no page JavaScript, until the marks are
+// cut out one by one. Once cut, a mark in the page body that sits on a picture
+// is dropped (an event's lockup over a photo), and a mark the page draws as
+// SVG is saved as a vector too.
 
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
-const { inOwnWorld } = require("./chrome");
+const { Worker } = require("worker_threads");
+const { inOwnWorld, pageFailed } = require("./chrome");
 const { capture, metrics, nearest } = require("./page");
-const { sleep, outOfTime } = require("./time");
+const { sleep, outOfTime, timeLeft } = require("./time");
 const { plainText } = require("./text");
 
 const LOGO_MAX = 6;
@@ -44,8 +46,8 @@ const LD_CHARS = 15_000_000;
 const LOGO_WORD = /logo|brand/i;
 // What is worked out from a value, once per value. A snapshot holds each
 // string once, so one line of a page's script can give one very long value
-// to every element, and working it out for each of them would hold the one
-// thread that answers Ctrl-C and the run's own time limit.
+// to every element, and working it out for each of them could use up the
+// run's time.
 const once = (work) => {
   const known = new Map();
   return (value) => {
@@ -150,12 +152,48 @@ function brandLink(raw, base) {
   return null;
 }
 
-// alsoNamed: more names the brand goes by, such as the app a store listing
-// named when its maker's domain says something else (Things on culturedcode.com).
+// A timer longer than this goes off at once, and a program that calls makeKit
+// can give it any time limit.
+const LONGEST_TIMER = 2 ** 31 - 1;
+
+// The marks, the look and the links of the page as it stands, read from one
+// DOM snapshot on a thread of its own, for as long as the run still has. It
+// takes a moment on a real page, but how long it takes is up to what the page
+// holds, and on the main thread a page built for it would keep Ctrl-C, a kill
+// and the run's own time limit from working. alsoNamed: more names the brand
+// goes by, such as the app a store listing named when its maker's domain says
+// something else (Things on culturedcode.com).
 async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
   const snap = await cdp.send("DOMSnapshot.captureSnapshot", {
     computedStyles: ["visibility", "opacity", "background-color", "overflow-x", "overflow-y", "color", "font-family"],
   });
+  return new Promise((resolve, reject) => {
+    let worker;
+    const done = (settle, value) => {
+      clearTimeout(limit);
+      if (worker) worker.terminate();
+      settle(value);
+    };
+    const limit = setTimeout(() => done(reject, pageFailed(`The run's time ran out while the kit read ${pageUrl}, so no kit was made. Try again, or give it more time with --timeout.`, "took too long to read", true)), Math.max(1_000, Math.min(LONGEST_TIMER, timeLeft())));
+    // Not by what the error says, which can hold words of the page's.
+    const failed = (err) => {
+      const large = err && (err.code === "ERR_WORKER_OUT_OF_MEMORY" || err.name === "DataCloneError");
+      done(reject, pageFailed(`${pageUrl} ${large ? "is too large to read" : "could not be read"}, so no kit was made.`, large ? "is too large to read" : "ended the kit's read with an error"));
+    };
+    try {
+      worker = new Worker(path.join(__dirname, "logos-thread.js"), { workerData: { snap, pageUrl, pageWidth, pageHeight, alsoNamed } });
+    } catch (err) {
+      failed(err);
+      return;
+    }
+    worker.once("message", (found) => done(resolve, found));
+    worker.once("error", failed);
+    worker.once("exit", failed);
+  });
+}
+
+// What a snapshot holds, on findLogos's thread: it only reads what it is given.
+function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
   const doc = (snap.documents || [])[0];
   const empty = { marks: [], icons: [], images: [], manifest: "", links: [], siteName: "", title: "", description: "", challenge: "", brand: { colors: [], fonts: {} }, wordTargets: [] };
   if (!doc || !doc.nodes || !doc.layout) return empty;
@@ -1125,4 +1163,4 @@ function groundOf(png, band, sides = { top: true, right: true, bottom: true, lef
   return { hex: "#" + middle.map((v) => v.toString(16).padStart(2, "0")).join(""), solid: near >= samples.length * 0.9 };
 }
 
-module.exports = { findLogos, captureLogos, saveVector, readWords, brandLink, brandTokens, tagPng, logoInk, groundOf, CHALLENGE_TITLE };
+module.exports = { findLogos, readSnapshot, captureLogos, saveVector, readWords, brandLink, brandTokens, tagPng, logoInk, groundOf, CHALLENGE_TITLE };

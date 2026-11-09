@@ -236,7 +236,7 @@ function endsInTime(code, ms = 20_000) {
 // each string once, as a snapshot holds it, so a page can share a long one.
 const HOSTILE_PAGE = String.raw`
 const { findLogos } = require(lib + "/logos.js");
-const read = async (elements) => {
+const snapshot = (elements) => {
   const strings = [""];
   const known = new Map();
   const id = (text) => {
@@ -256,9 +256,10 @@ const read = async (elements) => {
     layout.bounds.push([0, 0, 100, 40]);
     layout.styles.push((el.style || plain).map(id));
   });
-  const snap = { documents: [{ baseURL: id("https://acme.test/"), documentURL: id("https://acme.test/"), nodes, layout }], strings };
-  return findLogos({ send: async () => snap }, "https://acme.test/", 1600, 900);
+  return { documents: [{ baseURL: id("https://acme.test/"), documentURL: id("https://acme.test/"), nodes, layout }], strings };
 };
+const readOf = (snap) => findLogos({ send: async () => snap }, "https://acme.test/", 1600, 900);
+const read = async (elements) => readOf(snapshot(elements));
 const long = Array(500000).fill("a").join(" ");
 const longAddress = "https://acme.test/" + "a/".repeat(500000);
 const spaces = " ".repeat(1000000);
@@ -267,6 +268,11 @@ const block = JSON.stringify(Array(200000).fill(1));
 const many = (count, make) => Array.from({ length: count }, (_, i) => make(i));
 // A chain of 20000 elements in the body, with those given at its end.
 const deep = (top, count, make) => [{ name: top, parent: 2 }, ...many(19999, (i) => ({ name: "DIV", parent: 3 + i })), ...many(count, (i) => make(20002, i))];
+// A site name of 50 words, a run of slashes in a link, and a long run of the
+// letter those words start with.
+const fiftyWords = many(50, (i) => "aa" + String.fromCharCode(98 + (i % 25)) + String.fromCharCode(98 + Math.floor(i / 25))).join(" ");
+const slashes = "/x" + "/".repeat(1980) + "a";
+const label = "a".repeat(2000);
 `;
 
 test("a page's text cannot hold the thread that answers Ctrl-C and the run's own time limit", () => {
@@ -316,6 +322,68 @@ test("a page's text cannot hold the thread that answers Ctrl-C and the run's own
     const nodeIndex = parentIndex.map((_, i) => i);
     const snap = { documents: [{ nodes: { parentIndex, backendNodeId: nodeIndex }, layout: { nodeIndex, bounds: nodeIndex.map(() => [0, 0, 10, 10]), styles: nodeIndex.map(() => [0]) } }], strings: ["static"] };
     hideOverlays({ send: async () => snap }, 1600, 900);
+  `);
+});
+
+test("a page built to keep the read of its snapshot busy holds neither the thread that answers Ctrl-C nor the run's own time limit", () => {
+  endsInTime(`${HOSTILE_PAGE}
+    const { setTimeLimit } = require(lib + "/time.js");
+    // A label of its own on each image: remembering a value does not help.
+    const snap = snapshot([
+      { name: "META", parent: 1, attrs: { property: "og:site_name", content: fiftyWords } },
+      ...many(40000, (i) => ({ name: "IMG", parent: 2, attrs: { alt: label + i, title: label, "aria-label": label } })),
+    ]);
+    setTimeLimit(1500);
+    let last = Date.now();
+    let longest = 0;
+    const beat = setInterval(() => {
+      longest = Math.max(longest, Date.now() - last);
+      last = Date.now();
+    }, 20);
+    const started = Date.now();
+    readOf(snap).then(
+      () => { throw new Error("read to its end in " + (Date.now() - started) + " ms"); },
+      (err) => {
+        clearInterval(beat);
+        const took = Date.now() - started;
+        if (err.message !== "The run's time ran out while the kit read https://acme.test/, so no kit was made. Try again, or give it more time with --timeout.") throw err;
+        if (!err.outOfTime || err.pageFailed !== "took too long to read") throw new Error(JSON.stringify(err));
+        if (took > 8000) throw new Error("ended after " + took + " ms");
+        if (longest > 3000) throw new Error("the thread was held for " + longest + " ms");
+      },
+    );
+  `);
+  // A read that breaks is told in the kit's words, not in those of the error.
+  endsInTime(`${HOSTILE_PAGE}
+    readOf({ documents: [{ nodes: { nodeName: 5 }, layout: {} }], strings: ["a word of the page's"] }).then(
+      () => { throw new Error("read"); },
+      (err) => {
+        if (err.message !== "https://acme.test/ could not be read, so no kit was made.") throw err;
+        if (err.pageFailed !== "ended the kit's read with an error" || err.outOfTime) throw new Error(JSON.stringify(err));
+      },
+    );
+  `);
+  // A thread that cannot be started for the size of what it is given.
+  endsInTime(`require("worker_threads").Worker = class { constructor() { throw Object.assign(new Error("Data cannot be cloned, out of memory."), { name: "DataCloneError" }); } };
+    ${HOSTILE_PAGE}
+    readOf(snapshot([])).then(
+      () => { throw new Error("read"); },
+      (err) => {
+        if (err.message !== "https://acme.test/ is too large to read, so no kit was made.") throw err;
+      },
+    );
+  `);
+  // And what comes back is what the read found, under a time limit longer
+  // than any timer can be.
+  endsInTime(`${HOSTILE_PAGE}
+    require(lib + "/time.js").setTimeLimit(2 ** 40);
+    read([
+      { name: "HEADER", parent: 2 },
+      { name: "IMG", parent: 3, attrs: { src: "/logo.png", alt: "Acme" } },
+      { name: "META", parent: 1, attrs: { property: "og:site_name", content: "Acme" } },
+    ]).then((page) => {
+      if (page.siteName !== "Acme" || page.marks.length !== 1 || page.marks[0].src !== "https://acme.test/logo.png" || page.marks[0].where !== "header") throw new Error(JSON.stringify(page));
+    });
   `);
 });
 
@@ -1985,7 +2053,7 @@ test("with --facts, rules that do not finish are told as that: the page was read
     fs.rmSync(parent, { recursive: true, force: true });
   });
   const preload = path.join(parent, "preload.js");
-  fs.writeFileSync(preload, `const wt = require("worker_threads");\nconst { EventEmitter } = require("events");\nwt.Worker = class extends EventEmitter { constructor() { super(); setTimeout(() => this.emit("error", new Error("the rules took\\n  Note    too long")), 0); } terminate() {} };\n`);
+  fs.writeFileSync(preload, `const wt = require("worker_threads");\nconst { EventEmitter } = require("events");\nconst { Worker } = wt;\nwt.Worker = function (file, options) {\n  if (!String(file).endsWith("claims-thread.js")) return new Worker(file, options);\n  const fake = new EventEmitter();\n  fake.terminate = () => {};\n  setTimeout(() => fake.emit("error", new Error("the rules took\\n  Note    too long")), 0);\n  return fake;\n};\n`);
   const dir = path.join(parent, "kit");
   const done = await runCli([site.origin, "--out", dir, "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${preload}` });
   assert.equal(done.code, 0, done.stderr);
@@ -2037,6 +2105,45 @@ test("a robots.txt rule built to keep a matcher busy cannot keep a run from bein
   assert.equal(ended[1], "SIGTERM");
   assert.equal(said.trim().split("\n").pop(), `easybrandkit: stopped by SIGTERM. The kit already in ${dir} is as it was.`);
   assert.deepEqual(filesOf(dir), before);
+});
+
+test("a page built to keep the read of its snapshot busy cannot keep a run from being stopped", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
+  const words = Array.from({ length: 50 }, (_, i) => `aa${String.fromCharCode(98 + (i % 25))}${String.fromCharCode(98 + Math.floor(i / 25))}`).join(" ");
+  const images = `<script>const l="a".repeat(2000);const f=document.createDocumentFragment();for(let i=0;i<40000;i++){const m=document.createElement("img");m.setAttribute("alt",l+i);m.setAttribute("title",l);m.setAttribute("aria-label",l);m.src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";m.width=40;m.height=40;m.style.cssText="position:absolute;left:0;top:0";f.appendChild(m);}document.body.appendChild(f);</script>`;
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("<title>", `<meta property="og:site_name" content="${words}"><title>`).replace("</body>", `${images}</body>`)));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  const temp = ownTemp(t);
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let child;
+  t.after(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // Says when the read of a snapshot has been handed to its thread.
+  const preload = path.join(parent, "preload.js");
+  fs.writeFileSync(preload, `const wt = require("worker_threads");\nconst { Worker } = wt;\nwt.Worker = class extends Worker {\n  constructor(file, options) {\n    super(file, options);\n    if (String(file).endsWith("logos-thread.js")) require("fs").writeSync(2, "the read has started\\n");\n  }\n};\n`);
+  child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", "--timeout", "120"], { detached: true, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, ...(temp ? { TMPDIR: temp } : {}), NODE_OPTIONS: `--require ${preload}` } });
+  const closed = once(child, "close");
+  let said = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  for (let waited = 0; waited < 90_000 && !said.includes("the read has started"); waited += 50) await wait(50);
+  assert.ok(said.includes("the read has started"), `the run got as far as the read: ${said}`);
+  await wait(300);
+  process.kill(child.pid, "SIGTERM");
+  const ended = await Promise.race([closed, wait(10_000).then(() => null)]);
+  assert.ok(ended, `still running 10 s after SIGTERM: ${said}`);
+  assert.equal(ended[1], "SIGTERM");
+  assert.equal(said.trim().split("\n").pop(), `easybrandkit: stopped by SIGTERM. The kit already in ${dir} is as it was.`);
+  assert.deepEqual(filesOf(dir), before);
+  if (temp) assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {
