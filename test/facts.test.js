@@ -11,9 +11,10 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { findClaims } = require("../skills/easybrandkit/scripts/lib/claims");
-const { pickPages, robotsRules, robotsAllow, pageLines, writeFacts, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
+const { pickPages, robotsRules, robotsAllow, pageLines, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
 
@@ -287,6 +288,48 @@ test("the files: page text stays data, fenced and quoted, never Markdown of its 
 test("page text: headings, list items and quotes marked, the menu bar and the footer left out", () => {
   assert.deepEqual(pageLines(PRICING).slice(0, 6), ["# Pricing", "### Free", "$0", "Free forever", "- 3 projects", "- Community support"]);
   assert.ok(!pageLines(HOME).includes("Pricing"));
+});
+
+test("a menu page that fails is told once, in words, and one that answers an error is not read any further", async (t) => {
+  setTimeLimit(120_000);
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/security", "Security"), link("https://acme.test/about", "About"))]);
+  const timedOut = (method) => Object.assign(new Error(`${method} timed out`), { timedOut: true });
+  // The browser's tab: each page says what it does.
+  let at = "";
+  let loaded = () => {};
+  const asked = [];
+  const cdp = {
+    answer: { status: 0, url: "", unreachable: "", blank: false },
+    closed: new Promise(() => {}),
+    on: (method, listener) => {
+      if (method === "Page.loadEventFired") loaded = listener;
+    },
+    send: async (method, params = {}) => {
+      if (method === "Runtime.evaluate") return { result: { value: params.expression.includes("const SKIP") ? home : "" } };
+      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
+      if (method === "Page.navigate") {
+        at = params.url;
+        if (at.endsWith("/pricing")) throw timedOut(method);
+        if (at.endsWith("/customers")) return { errorText: "net::ERR_CONNECTION_RESET" };
+        if (at.endsWith("/security")) cdp.answer.status = 404;
+        loaded();
+        return {};
+      }
+      asked.push(`${at} ${method}`);
+      if (at.endsWith("/about")) throw timedOut(method);
+      return {};
+    },
+  };
+  const { pages, skipped } = await readFactPages(cdp, "https://acme.test/", () => {});
+  assert.deepEqual(pages.map((one) => one.role), ["home"]);
+  assert.deepEqual(skipped, [
+    { role: "pricing", url: "https://acme.test/pricing", reason: "it did not answer" },
+    { role: "customers", url: "https://acme.test/customers", reason: "it could not be opened (net::ERR_CONNECTION_RESET)" },
+    { role: "security", url: "https://acme.test/security", reason: "it answered 404" },
+    { role: "about", url: "https://acme.test/about", reason: "it stopped answering" },
+  ]);
+  assert.deepEqual(asked, ["https://acme.test/about Page.getLayoutMetrics"], "nothing more was read of the page that answered 404");
 });
 
 test("--facts end to end: the home page and the pages it links to, as robots.txt allows", { skip: noBrowser }, async (t) => {

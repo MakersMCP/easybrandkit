@@ -371,7 +371,8 @@ async function readFactPages(cdp, home, log) {
       }
       pages.push({ role: pick.role, url: at, readAt: new Date().toISOString(), model: read });
     } catch (err) {
-      skipped.push({ ...pick, reason: err.timedOut ? "it stopped answering" : String(err.message || err) });
+      // The note that tells it names the address already.
+      skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : String(err.message || err) });
     }
   }
   return { pages, skipped };
