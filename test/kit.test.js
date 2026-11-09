@@ -19,7 +19,7 @@ const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName 
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf, saveVector } = require("../skills/easybrandkit/scripts/lib/logos");
-const { waitForContent } = require("../skills/easybrandkit/scripts/lib/page");
+const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 const { noControls, plainText } = require("../skills/easybrandkit/scripts/lib/text");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
@@ -375,6 +375,44 @@ test("the first look at a page comes whatever time the run has left, and what th
     assert.equal(await waitForContent(cdp), said, what);
     assert.equal(cdp.looks, 1, what);
   }
+});
+
+test("a page of many fixed elements gets a few hundred hidden, and none once the run's time is nearly up", async (t) => {
+  t.after(() => setTimeLimit(120_000));
+  const tab = (count) => {
+    const ids = Array.from({ length: count }, (_, i) => i + 1);
+    const bounds = ids.map(() => [400, 400, 5, 5]);
+    const snap = { documents: [{ nodes: { parentIndex: ids.map(() => -1), backendNodeId: ids }, layout: { nodeIndex: ids.map((_, i) => i), bounds, styles: ids.map(() => [0]) } }], strings: ["fixed"] };
+    const calls = { pushed: 0, read: 0, set: 0 };
+    const cdp = {
+      calls,
+      send: async (method, params = {}) => {
+        if (method === "DOMSnapshot.captureSnapshot") return snap;
+        if (method === "DOM.pushNodesByBackendIdsToFrontend") {
+          calls.pushed = params.backendNodeIds.length;
+          return { nodeIds: params.backendNodeIds };
+        }
+        if (method === "DOM.getAttributes") {
+          calls.read++;
+          return { attributes: [] };
+        }
+        if (method === "DOM.setAttributeValue") calls.set++;
+        return {};
+      },
+    };
+    return cdp;
+  };
+  setTimeLimit(120_000);
+  const few = tab(3);
+  assert.equal(await hideOverlays(few, 1600, 900), 3);
+  assert.deepEqual(few.calls, { pushed: 3, read: 3, set: 3 });
+  const many = tab(20_000);
+  assert.equal(await hideOverlays(many, 1600, 900), 500);
+  assert.deepEqual(many.calls, { pushed: 500, read: 500, set: 500 });
+  setTimeLimit(4_000);
+  const late = tab(20_000);
+  assert.equal(await hideOverlays(late, 1600, 900), 0, "the run has nearly used up its time");
+  assert.equal(late.calls.set, 0);
 });
 
 test("stores and social networks: a listing leads to its website, a profile is refused before anything runs", async () => {

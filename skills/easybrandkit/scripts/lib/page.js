@@ -96,7 +96,10 @@ async function waitForContent(cdp) {
 // Floating overlays sit over the content: a promo box, a chat bubble, a
 // cookie bar, a modal backdrop. Hide every position:fixed element except the
 // page's own chrome: a short bar on the top edge (navigation) and a tall,
-// narrow bar on the left or right edge (an app's sidebar).
+// narrow bar on the left or right edge (an app's sidebar). Each one takes two
+// calls to the browser, so no more are hidden than any page has, and none
+// once the run has nearly used up its time.
+const MANY_OVERLAYS = 500;
 function isPageChrome([x, y, width, height], viewportWidth, viewportHeight) {
   const topBar = y <= 20 && height <= viewportHeight * 0.3;
   const sideBar =
@@ -141,10 +144,11 @@ async function hideOverlays(cdp, viewportWidth, viewportHeight) {
   if (backendIds.length === 0) return 0;
   await cdp.send("DOM.getDocument", { depth: 0 });
   const { nodeIds = [] } = await cdp.send("DOM.pushNodesByBackendIdsToFrontend", {
-    backendNodeIds: backendIds,
+    backendNodeIds: backendIds.slice(0, MANY_OVERLAYS),
   });
   let hidden = 0;
   for (const nodeId of nodeIds) {
+    if (timeLeft() < 5_000) break;
     if (!nodeId) continue;
     try {
       const { attributes = [] } = await cdp.send("DOM.getAttributes", { nodeId });
