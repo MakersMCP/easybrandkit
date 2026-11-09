@@ -36,7 +36,9 @@ redirect, or that moves on to a page that cannot be opened or to a blank
 page, gets no kit: the run fails and says which address answered what. When
 the page that fails is one the kit chose to read, the home page of a deeper
 address or the website a store listing names, the run goes on with what it
-has and says so in the kit's notes.
+has and says so in the kit's notes. It fails instead when it has used up its
+--timeout on that page, or when none of a listing's pictures could be
+downloaded either.
 
 The new kit takes the place of an earlier one in the folder only once the
 run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
