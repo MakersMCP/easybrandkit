@@ -455,6 +455,29 @@ test("a home page that has moved on since the kit read it is not read as the hom
   assert.deepEqual(await skippedOf(tab(null)), [["home", url, "its text could not be read"]]);
 });
 
+test("a browser that ends during --facts is not waited for through the site's crawl delay", async (t) => {
+  setTimeLimit(120_000);
+  t.mock.method(globalThis, "fetch", async () => new Response("User-agent: *\nCrawl-delay: 10\n"));
+  const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/about", "About"))]);
+  let end;
+  const cdp = {
+    answer: { status: 200, url: "https://acme.test/", unreachable: "", blank: false },
+    closed: new Promise((resolve) => (end = resolve)),
+    on: () => {},
+    send: async (method, params = {}) => {
+      if (method === "Runtime.evaluate") return { result: { value: params.expression.includes("const SKIP") ? home : "" } };
+      return {};
+    },
+  };
+  const said = [];
+  setTimeout(end, 300);
+  const started = Date.now();
+  const { pages } = await readFactPages(cdp, "https://acme.test/", (line) => said.push(line));
+  assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(pages.map((one) => one.role), ["home"]);
+  assert.deepEqual(said, ["Reading the page's claims"]);
+});
+
 test("page text: headings, list items and quotes marked, the menu bar and the footer left out", () => {
   assert.deepEqual(pageLines(PRICING).slice(0, 6), ["# Pricing", "### Free", "$0", "Free forever", "- 3 projects", "- Community support"]);
   assert.ok(!pageLines(HOME).includes("Pricing"));

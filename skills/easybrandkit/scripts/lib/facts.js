@@ -367,6 +367,10 @@ async function readFactPages(cdp, home, log) {
   if (!picks.length) return { pages, skipped };
   const robots = await readRobots(new URL(home).origin);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
+  // A browser that has ended fails the run, which readPage says at once: no
+  // more pauses for pages that cannot be read.
+  let ended = false;
+  cdp.closed.then(() => (ended = true));
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });
@@ -380,7 +384,10 @@ async function readFactPages(cdp, home, log) {
       skipped.push({ ...pick, reason: "the run ran out of time; give --timeout more seconds" });
       continue;
     }
-    await sleep(pause);
+    let timer;
+    await Promise.race([new Promise((resolve) => (timer = setTimeout(resolve, pause))), cdp.closed]);
+    clearTimeout(timer);
+    if (ended) break;
     log(`Reading the ${pick.role} page`);
     try {
       const at = await navigate(cdp, pick.url);
