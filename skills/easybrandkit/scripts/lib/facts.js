@@ -328,6 +328,9 @@ async function readFactPages(cdp, home, log) {
   if (!picks.length) return { pages, skipped };
   const robots = await readRobots(new URL(home).origin);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
+  // A page the server answered with an error, or that the browser could not
+  // open, also after it has moved on: its text is not the site's page.
+  const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : "");
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });
@@ -349,11 +352,19 @@ async function readFactPages(cdp, home, log) {
         skipped.push({ ...pick, reason: `it led to ${at}` });
         continue;
       }
+      if (notThePage()) {
+        skipped.push({ ...pick, reason: notThePage() });
+        continue;
+      }
       await waitForContent(cdp);
       await walk(cdp);
       const m = await metrics(cdp);
       await hideOverlays(cdp, m.width, m.viewportHeight);
       const read = await readModel(cdp);
+      if (notThePage()) {
+        skipped.push({ ...pick, reason: notThePage() });
+        continue;
+      }
       if (!read || !read.tree || CHALLENGE_TITLE.test(read.title || "")) {
         skipped.push({ ...pick, reason: "it answered with a bot check or an empty page" });
         continue;

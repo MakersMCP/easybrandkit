@@ -291,7 +291,7 @@ test("page text: headings, list items and quotes marked, the menu bar and the fo
 
 test("--facts end to end: the home page and the pages it links to, as robots.txt allows", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} .big{font-size:48px} main{min-height:1200px}</style></head><body>`;
-  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/customers">Customers</a></nav></header>`;
+  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/customers">Customers</a> <a href="/security">Security</a> <a href="/about">About</a></nav></header>`;
   const pages = {
     "/": `${head("Acme")}${nav}<main><h1>Tools for teams</h1>
       <div class="stat"><p class="big">135+</p><p>currencies supported</p></div>
@@ -304,13 +304,14 @@ test("--facts end to end: the home page and the pages it links to, as robots.txt
       <section><h3>Pro</h3><p>$12 per user/month</p><p>Billed yearly</p><ul><li>Unlimited projects</li></ul></section>
       </div></main></body></html>`,
     "/customers": `${head("Customers")}${nav}<main><h1>Customers</h1></main></body></html>`,
+    "/about": `${head("Internal Server Error")}<h1>Internal Server Error</h1><p>Something went wrong on our side. <a href="/">Back home</a></p></body></html>`,
     "/robots.txt": "User-agent: *\nDisallow: /customers\n",
   };
   const asked = [];
   const server = http.createServer((req, res) => {
     asked.push(req.url);
     const body = pages[req.url];
-    res.writeHead(body ? 200 : 404, { "content-type": req.url === "/robots.txt" ? "text/plain" : "text/html; charset=utf-8" });
+    res.writeHead(req.url === "/about" ? 500 : body ? 200 : 404, { "content-type": req.url === "/robots.txt" ? "text/plain" : "text/html; charset=utf-8" });
     res.end(body || "");
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -324,7 +325,14 @@ test("--facts end to end: the home page and the pages it links to, as robots.txt
 
   assert.equal(kit.name, "Acme");
   assert.deepEqual(facts.pages.map((p) => [p.role, p.url]), [["home", `${origin}/`], ["pricing", `${origin}/pricing`]]);
-  assert.deepEqual(facts.skipped, [{ role: "customers", url: `${origin}/customers`, reason: "the site's robots.txt asks tools not to read it" }]);
+  // Pages that answer an error, with a page of their own or none, are not
+  // read or counted, and say so.
+  assert.deepEqual(facts.skipped, [
+    { role: "customers", url: `${origin}/customers`, reason: "the site's robots.txt asks tools not to read it" },
+    { role: "security", url: `${origin}/security`, reason: "it answered 404" },
+    { role: "about", url: `${origin}/about`, reason: "it answered 500" },
+  ]);
+  assert.deepEqual(fs.readdirSync(path.join(dir, "pages")).sort(), ["home.md", "pricing.md"]);
   assert.ok(!asked.includes("/customers"), "a page robots.txt rules out is not asked for");
   assert.deepEqual(facts.stats.map((s) => s.quote), ["135+ currencies supported", "99.99% uptime last year"]);
   assert.deepEqual(facts.testimonials.map((x) => [x.person, x.role, x.company]), [["Jane Doe", "CTO", "Globex"]]);
