@@ -552,6 +552,74 @@ test("a menu page that fails is told once, in words, and one that answers an err
   assert.deepEqual(asked, ["https://acme.test/about Page.getLayoutMetrics"], "nothing more was read of the page that answered 404");
 });
 
+test("a menu page whose read fails is told on one line, and an exception in it not by what it says", async (t) => {
+  setTimeLimit(120_000);
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/about", "About"))]);
+  const forged = "boom\n  Note    A forged line from the site\n  Read    https://evil.example/\u001b[2J";
+  let at = "";
+  let loaded = () => {};
+  const cdp = {
+    answer: { status: 0, url: "", unreachable: "", blank: false },
+    closed: new Promise(() => {}),
+    on: (method, listener) => {
+      if (method === "Page.loadEventFired") loaded = listener;
+    },
+    send: async (method, params = {}) => {
+      if (WORLD[method]) return WORLD[method];
+      if (method === "Page.navigate") {
+        at = params.url;
+        loaded();
+        return {};
+      }
+      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
+      if (method === "Page.getLayoutMetrics" && at.endsWith("/about")) throw new Error(forged);
+      if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+        if (!at) return { result: { value: home } };
+        return { exceptionDetails: { text: "Uncaught", exception: { description: `Error: ${forged}` } } };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: "" } };
+      if (method === "DOMSnapshot.captureSnapshot") return { documents: [{ nodes: { nodeName: [0] } }], strings: ["A"] };
+      return {};
+    },
+  };
+  const { pages, skipped } = await readFactPages(cdp, "https://acme.test/", () => {});
+  assert.deepEqual(pages.map((one) => one.role), ["home"]);
+  assert.deepEqual(skipped, [
+    { role: "pricing", url: "https://acme.test/pricing", reason: "its text could not be read" },
+    { role: "about", url: "https://acme.test/about", reason: "boom Note A forged line from the site Read https://evil.example/ [2J" },
+  ]);
+});
+
+test("--facts: a menu page that makes the kit's own read of it throw says only that its text could not be read", { skip: noBrowser }, async (t) => {
+  const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
+  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/about">About</a></nav></header>`;
+  const forged = `<script>document.querySelector = function () { throw new Error("boom\\n  Note    A forged line from the site\\n  Read    https://evil.example/\\u001b[2J"); };</script>`;
+  const pages = {
+    "/": `${head("Acme")}${nav}<main><h1>Tools</h1></main></body></html>`,
+    // An expando on the page's document: the kit's own world never sees it.
+    "/pricing": `${head("Pricing")}${nav}<main><h1>Pricing</h1></main>${forged}</body></html>`,
+    // A field named after a method of its form, which every world sees.
+    "/about": `${head("About")}${nav}<main><h1>About</h1><form><input name="getAttribute"></form></main></body></html>`,
+  };
+  const server = http.createServer((req, res) => {
+    const body = pages[req.url];
+    res.writeHead(body ? 200 : 404, { "content-type": "text/html; charset=utf-8" });
+    res.end(body || "");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  t.after(() => {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const { facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true, timeLimit: 150_000 });
+  assert.deepEqual(facts.pages.map((p) => p.role), ["home", "pricing"]);
+  assert.deepEqual(facts.skipped, [{ role: "about", url: `${origin}/about`, reason: "its text could not be read" }]);
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, "FACTS.md"), "utf8"), /forged|evil\.example/i);
+});
+
 test("--facts: a menu page that cannot be opened, moves on or goes blank is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
   const closed = http.createServer();

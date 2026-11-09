@@ -23,7 +23,7 @@ const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
 const { sleep, timeLeft } = require("./time");
-const { noControls } = require("./text");
+const { noControls, plainText } = require("./text");
 const version = require("./version");
 
 // The page as data, read once it has settled, in a JavaScript world of the
@@ -170,7 +170,8 @@ const FIGURES = `(document.body ? document.body.innerText : "").match(/\\d[\\d.,
 
 async function evaluate(cdp, expression, timeoutMs = 20_000) {
   const { result, exceptionDetails } = await inOwnWorld(cdp, (contextId) => cdp.send("Runtime.evaluate", { expression, returnByValue: true, contextId }, timeoutMs));
-  if (exceptionDetails) throw new Error((exceptionDetails.exception && exceptionDetails.exception.description) || exceptionDetails.text || "page script failed");
+  // Not by what the exception says, which can be words of the page's.
+  if (exceptionDetails) throw new Error("its text could not be read");
   return result ? result.value : undefined;
 }
 
@@ -415,8 +416,8 @@ async function readFactPages(cdp, home, log) {
       }
       pages.push({ role: pick.role, url: at, readAt: new Date().toISOString(), model: read });
     } catch (err) {
-      // The note that tells it names the address already.
-      skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : String(err.message || err) });
+      // The note that tells it names the address already, and is one line.
+      skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : plainText(String(err.message || err)) });
     }
   }
   return { pages, skipped };
@@ -600,7 +601,7 @@ function claimsOf(pages) {
     };
     const limit = setTimeout(() => done({ error: "the rules took too long" }), Math.max(5_000, Math.min(30_000, timeLeft())));
     worker.once("message", (claims) => done({ claims }));
-    worker.once("error", (err) => done({ error: String(err.message || err) }));
+    worker.once("error", (err) => done({ error: plainText(String(err.message || err)) }));
     worker.once("exit", () => done({ error: "the rules stopped" }));
   });
 }

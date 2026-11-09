@@ -1810,6 +1810,21 @@ test("what a page says reaches no terminal with its control characters, and a no
   assert.match(refused.stderr, /answered with a bot check \("Just a moment \[2J \[Hcleared by it"\)/);
 });
 
+test("with --facts, an error while the pages are read is one line in the summary", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const preload = path.join(parent, "preload.js");
+  fs.writeFileSync(preload, `const facts = require(${JSON.stringify(path.join(LIB, "facts.js"))});\nfacts.readFactPages = async () => { throw new Error("boom\\n  Note    A forged line\\u001b[2J"); };\n`);
+  const done = await runCli([site.origin, "--out", path.join(parent, "kit"), "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${preload}` });
+  assert.equal(done.code, 0, done.stderr);
+  assert.ok(done.stdout.includes(`  Note    Did not read ${site.origin}/: boom Note A forged line [2J.\n`), done.stdout);
+  assert.doesNotMatch(done.stdout, /^ {2}Note {4}A forged/m);
+});
+
 test("a robots.txt rule built to keep a matcher busy cannot keep a run from being stopped", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
   let robots = false;
   const stars = "*a".repeat(24);

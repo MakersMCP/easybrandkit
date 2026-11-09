@@ -254,7 +254,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     });
     // The claims last, from the page as the kit leaves it and the pages it
     // links to: the kit is made the same way with or without them.
-    const factPages = facts ? await readFactPages(cdp, pageUrl, log).catch((err) => ({ pages: [], skipped: [{ role: "home", url: pageUrl, reason: String(err.message || err) }] })) : null;
+    const factPages = facts ? await readFactPages(cdp, pageUrl, log).catch((err) => ({ pages: [], skipped: [{ role: "home", url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
     // A browser that was killed or crashed on the way has left the kit
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.
