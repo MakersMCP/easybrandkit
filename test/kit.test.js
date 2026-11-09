@@ -538,6 +538,75 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
   }
 });
 
+// Stands in for Chrome on Linux and macOS, which keeps the socket that makes
+// it one browser per profile in a folder of its own in the temp folder,
+// linked from the profile. Ctrl-C reaches the browser too, and Chrome's own
+// shutdown then removes the profile's links first and that folder a moment
+// later: this one removes the links and goes on running, as a browser that
+// the kit kills in that moment leaves them.
+const WITH_SOCKET = `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
+done
+echo $$ > "$STAND_IN_PID"
+socket=$(mktemp -d "$TMPDIR/com.google.Chrome.XXXXXX")
+echo x > "$socket/SingletonSocket"
+ln -s 1234567890 "$socket/SingletonCookie"
+ln -s "$socket/SingletonSocket" "$profile/SingletonSocket"
+ln -s "$socket/SingletonCookie" "$profile/SingletonCookie"
+trap 'rm -f "$profile/SingletonSocket" "$profile/SingletonCookie"' INT
+printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
+while :; do sleep 0.05; done
+`;
+
+// The stand-in above, as the browser, in a temp folder of the test's own.
+function withSocket(t) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  const names = ["CHROME_PATH", "TMPDIR", "STAND_IN_PID"];
+  const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const started = [];
+  t.after(() => {
+    for (const pid of started) if (!ended(pid)) process.kill(pid, "SIGKILL");
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, WITH_SOCKET, { mode: 0o755 });
+  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, STAND_IN_PID: path.join(parent, "chrome.pid") });
+  return {
+    temp,
+    // The profile of the browser that runs, and the browser's pid.
+    started() {
+      const pid = Number(fs.readFileSync(process.env.STAND_IN_PID, "utf8"));
+      started.push(pid);
+      return { pid, profile: path.join(temp, fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"))) };
+    },
+  };
+}
+
+test("a browser killed as it begins to quit on Ctrl-C leaves no folder of its own in the temp folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+  const { temp, started } = withSocket(t);
+  // Ended by a stop, as the CLI's handler of Ctrl-C ends it, and by close,
+  // as a run that fails then ends it.
+  for (const end of ["stopped", "closed"]) {
+    const browser = await launch({ width: 800, height: 600 });
+    const { pid, profile } = started();
+    process.kill(pid, "SIGINT");
+    const link = () => fs.lstatSync(path.join(profile, "SingletonSocket"), { throwIfNoEntry: false });
+    for (let waited = 0; waited < 2_000 && link(); waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(link(), undefined, "the browser has begun to quit");
+    if (end === "stopped") killBrowsers();
+    else await browser.close();
+    assert.ok(ended(pid), `the browser ${end}`);
+    assert.deepEqual(fs.readdirSync(temp), [], `a browser ${end}`);
+  }
+});
+
 test("what Chrome's component updater was fetching goes once a browser has ended, and only what came while it ran", (t) => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-temp-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));

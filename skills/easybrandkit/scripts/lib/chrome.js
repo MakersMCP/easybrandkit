@@ -306,7 +306,7 @@ async function launch({ width, height }) {
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
     endAll(processes, profile);
     open.delete(entry);
-    removeSingleton(profile);
+    removeSingleton(profile, entry.singleton);
     try {
       fs.rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch {
@@ -334,8 +334,10 @@ async function launch({ width, height }) {
       if (/^\d+$/.test(port)) {
         base = `http://127.0.0.1:${port}`;
         // Known from the start: by the time the browser is stopped, its
-        // helpers can have ended.
+        // helpers can have ended, and its link to the folder of its socket
+        // can be gone.
         entry.crashHandler = crashHandlerOf(processesOf(child));
+        entry.singleton = singletonOf(profile, temp);
         return { base, close, alive };
       }
     } catch {
@@ -350,14 +352,35 @@ async function launch({ width, height }) {
 // Chrome keeps the socket that makes it one browser per profile in a folder
 // of its own in the temp folder, linked from the profile, and removes it
 // only when it quits. Killed, it leaves it: removed here, those two names
-// only.
-function removeSingleton(profile) {
+// only. As it quits, as Ctrl-C makes it do, it removes the profile's links
+// first and the folder a moment later, so a browser killed in between
+// leaves the folder with nothing that leads to it: the folder named as the
+// browser started is used then.
+function removeSingleton(profile, known = "") {
+  let folder = known;
   try {
-    const folder = path.dirname(fs.readlinkSync(path.join(profile, "SingletonSocket")));
+    folder = path.dirname(fs.readlinkSync(path.join(profile, "SingletonSocket")));
+  } catch {
+    // No link any more.
+  }
+  if (!folder) return;
+  try {
     for (const name of ["SingletonSocket", "SingletonCookie"]) fs.rmSync(path.join(folder, name), { force: true });
     fs.rmdirSync(folder);
   } catch {
-    // None, or Chrome removed it as it quit.
+    // Gone already, as Chrome removed it as it quit.
+  }
+}
+
+// The folder of a browser's socket, as the profile's link names it while
+// the browser runs: "" when there is none, or when it is not a folder of
+// Chrome's kind right in the temp folder.
+function singletonOf(profile, temp) {
+  try {
+    const folder = path.dirname(fs.readlinkSync(path.join(profile, "SingletonSocket")));
+    return path.isAbsolute(folder) && TEMP_NAME.test(path.basename(folder)) && fs.realpathSync(path.dirname(folder)) === fs.realpathSync(temp) ? folder : "";
+  } catch {
+    return "";
   }
 }
 
@@ -378,7 +401,7 @@ function killBrowsers() {
   }
   // Until they are gone, with any they started, a second at most each.
   for (const entry of ending) entry.processes = endAll(entry.processes, entry.profile);
-  for (const { profile } of ending) removeSingleton(profile);
+  for (const { profile, singleton } of ending) removeSingleton(profile, singleton);
   // Once its processes are gone, nothing writes into a profile again. Where
   // they cannot be told, helpers can still write into it for a moment as
   // they end: it is removed until it stays gone, half a second at most.
