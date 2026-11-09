@@ -5,6 +5,10 @@
 // network: the parsers run on fixtures.
 
 const assert = require("node:assert/strict");
+const dns = require("node:dns");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 const stores = require("../skills/easybrandkit/scripts/lib/stores");
 
@@ -136,4 +140,39 @@ test("fetches only HTTPS on the listed hosts, and only public addresses", async 
   await assert.rejects(stores.checkFetchUrl("http://play.google.com/store"), /not HTTPS/);
   await assert.rejects(stores.checkFetchUrl("https://user:pw@play.google.com/"), /not a plain URL/);
   await assert.rejects(stores.checkFetchUrl("https://play.google.com:8443/"), /not a plain URL/);
+});
+
+test("a picture that does not come is skipped, a host that cannot be found is told, and a picture that cannot be written fails the run", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const png = Buffer.alloc(33);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(1024, 20);
+  const art = "https://is1-ssl.mzstatic.com/image/thumb";
+  const lookup = { results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, screenshotUrls: [`${art}/1.png/392x696bb.jpg`, `${art}/2.png/392x696bb.jpg`] }] };
+  t.mock.method(globalThis, "fetch", async (url) => {
+    if (url.hostname === "itunes.apple.com") return new Response(JSON.stringify(lookup));
+    return url.pathname.includes("/1.png/") ? new Response("gone", { status: 404 }) : new Response(png);
+  });
+  const found = t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
+  const link = stores.classify("https://apps.apple.com/us/app/acme/id1234567890");
+  const source = await stores.readSource(link, dir);
+  assert.equal(source.ok, true);
+  assert.deepEqual(source.assets.map((asset) => asset.file), ["appstore-icon.png", "appstore-shot-01.png"]);
+
+  const write = fs.writeFileSync;
+  const full = t.mock.method(fs, "writeFileSync", function (file, ...rest) {
+    if (path.basename(String(file)) === "appstore-shot-01.png") throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", syscall: "write" });
+    return write.call(this, file, ...rest);
+  });
+  await assert.rejects(stores.readSource(link, dir), (err) => err.code === "ENOSPC");
+  full.mock.restore();
+
+  found.mock.mockImplementation(async () => {
+    throw Object.assign(new Error("getaddrinfo ENOTFOUND itunes.apple.com"), { code: "ENOTFOUND", syscall: "getaddrinfo" });
+  });
+  const unknown = await stores.readSource(link, dir);
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /ENOTFOUND/);
 });

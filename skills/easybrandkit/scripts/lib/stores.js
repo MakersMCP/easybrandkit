@@ -293,9 +293,12 @@ function profilePlan(html) {
 
 // One listing or profile, its pictures saved in dir as <type>-icon.png,
 // <type>-shot-01.png … <type>-profile.jpg. A source that cannot be read (a
-// login wall, a removed app) comes back with ok:false and the reason.
+// login wall, a removed app) comes back with ok:false and the reason. A
+// picture that cannot be written, as on a full disk, fails the run instead:
+// what it has of the file would otherwise go into the kit.
 async function readSource(link, dir) {
   const source = { type: link.type, url: link.url, ok: false, assets: [] };
+  let notWritten = null;
   try {
     let plan = null;
     if (link.type === "appstore") {
@@ -313,21 +316,30 @@ async function readSource(link, dir) {
     Object.assign(source, facts);
     let shot = 0;
     for (const image of images) {
+      let body;
+      let info;
       try {
-        const { body } = await get(image.url, { binary: true, accept: "image/png,image/jpeg,image/webp,*/*;q=0.5" });
-        const info = imageInfo(body);
-        if (!info) continue;
-        const suffix = image.kind === "screenshot" ? `shot-${String(++shot).padStart(2, "0")}` : image.kind;
-        const file = `${link.type}-${suffix}.${info.ext}`;
-        fs.writeFileSync(path.join(dir, file), body);
-        source.assets.push({ file, kind: image.kind, url: image.url, width: info.width, height: info.height, alpha: info.alpha });
+        ({ body } = await get(image.url, { binary: true, accept: "image/png,image/jpeg,image/webp,*/*;q=0.5" }));
+        info = imageInfo(body);
       } catch {
         // One image that will not come is skipped; the rest still count.
+        continue;
       }
+      if (!info) continue;
+      const suffix = image.kind === "screenshot" ? `shot-${String(++shot).padStart(2, "0")}` : image.kind;
+      const file = `${link.type}-${suffix}.${info.ext}`;
+      try {
+        fs.writeFileSync(path.join(dir, file), body);
+      } catch (err) {
+        notWritten = err;
+        throw err;
+      }
+      source.assets.push({ file, kind: image.kind, url: image.url, width: info.width, height: info.height, alpha: info.alpha });
     }
     source.ok = source.assets.length > 0 || Boolean(source.name);
     if (!source.ok) source.error = "no images could be downloaded";
   } catch (err) {
+    if (err === notWritten) throw err;
     source.error = err.message;
   }
   return source;

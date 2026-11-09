@@ -868,7 +868,10 @@ async function saveVector(cdp, mark, dir, file) {
     if (!svg.startsWith("<svg") || svg.length > SVG_LIMIT) return "";
     fs.writeFileSync(path.join(dir, file), svg + "\n");
     return file;
-  } catch {
+  } catch (err) {
+    // A file that cannot be written fails the run: what it has of the file
+    // would otherwise go into the kit.
+    if (err.syscall) throw err;
     return "";
   }
 }

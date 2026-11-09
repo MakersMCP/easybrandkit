@@ -231,6 +231,9 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     log("Drawing the card");
     let cardError = "the browser gave back an empty picture";
     const card = await renderCard(chrome.base, { url: pageUrl, name, colors, fonts: found.brand.fonts, logos, screenshots }, dir).catch((err) => {
+      // A file that cannot be written fails the run: what it has of the file
+      // would otherwise go into the kit.
+      if (err.syscall) throw err;
       cardError = String(err.message || err);
       return null;
     });

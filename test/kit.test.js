@@ -1122,6 +1122,47 @@ test("a home page that ends on an HTTP error or on a page that cannot be opened 
   assert.deepEqual(through.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
 });
 
+test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const write = fs.writeFileSync;
+  const full = t.mock.method(fs, "writeFileSync", function (file, data, ...rest) {
+    if (path.basename(String(file)) !== "logo-01.svg") return write.call(this, file, data, ...rest);
+    // As the write of a full disk ends: some of the file is there.
+    write.call(this, file, data.slice(0, 8));
+    throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", syscall: "write" });
+  });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The disk has no room left for the new kit (ENOSPC)." && err.earlierKit === dir);
+  full.mock.restore();
+  assert.deepEqual(filesOf(dir), before, "the vector");
+
+  // The whole CLI, with a card that does not fit.
+  const hook = path.join(parent, "full.js");
+  fs.writeFileSync(hook, `const fs = require("fs");
+const write = fs.writeFileSync;
+fs.writeFileSync = function (file, data, ...rest) {
+  if (!String(file).endsWith("card.png")) return write.call(this, file, data, ...rest);
+  write.call(this, file, data.subarray(0, 4096));
+  throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", syscall: "write" });
+};
+`);
+  // Not spawnSync: the page is served from this process.
+  const child = spawn(process.execPath, ["--require", hook, CLI, site.origin, "--out", dir, "--no-stores"], { stdio: ["ignore", "ignore", "pipe"] });
+  let said = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  const [code] = await once(child, "close");
+  assert.equal(code, 1, said);
+  assert.equal(said.trim().split("\n").pop(), `easybrandkit: The disk has no room left for the new kit (ENOSPC). The kit already in ${dir} is as it was.`);
+  assert.deepEqual(filesOf(dir), before, "the card");
+});
+
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
