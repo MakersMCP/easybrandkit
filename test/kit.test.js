@@ -226,15 +226,20 @@ function endsInTime(code, ms = 20_000) {
   return done.stdout;
 }
 
-// findLogos on a page that is one DOM snapshot, built from the elements given.
+// findLogos on a page that is one DOM snapshot, built from the elements given:
+// each string once, as a snapshot holds it, so a page can share a long one.
 const HOSTILE_PAGE = String.raw`
 const { findLogos } = require(lib + "/logos.js");
 const read = async (elements) => {
   const strings = [""];
-  const id = (text) => strings.push(text) - 1;
+  const known = new Map();
+  const id = (text) => {
+    if (!known.has(text)) known.set(text, strings.push(text) - 1);
+    return known.get(text);
+  };
   const nodes = { nodeName: [], parentIndex: [], attributes: [], nodeValue: [], backendNodeId: [] };
   const layout = { nodeIndex: [], bounds: [], styles: [] };
-  const style = ["visible", "1", "rgba(0, 0, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", "Arial"].map(id);
+  const plain = ["visible", "1", "rgba(0, 0, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", "Arial"];
   [{ name: "HTML", parent: -1 }, { name: "HEAD", parent: 0 }, { name: "BODY", parent: 0 }, ...elements].forEach((el, i) => {
     nodes.nodeName.push(id(el.name));
     nodes.parentIndex.push(el.parent);
@@ -243,11 +248,19 @@ const read = async (elements) => {
     nodes.backendNodeId.push(i + 1);
     layout.nodeIndex.push(i);
     layout.bounds.push([0, 0, 100, 40]);
-    layout.styles.push(style);
+    layout.styles.push((el.style || plain).map(id));
   });
   const snap = { documents: [{ baseURL: id("https://acme.test/"), documentURL: id("https://acme.test/"), nodes, layout }], strings };
   return findLogos({ send: async () => snap }, "https://acme.test/", 1600, 900);
 };
+const long = Array(500000).fill("a").join(" ");
+const longAddress = "https://acme.test/" + "a/".repeat(500000);
+const spaces = " ".repeat(1000000);
+const longName = "A".repeat(1000000);
+const block = JSON.stringify(Array(200000).fill(1));
+const many = (count, make) => Array.from({ length: count }, (_, i) => make(i));
+// A chain of 20000 elements in the body, with those given at its end.
+const deep = (top, count, make) => [{ name: top, parent: 2 }, ...many(19999, (i) => ({ name: "DIV", parent: 3 + i })), ...many(count, (i) => make(20002, i))];
 `;
 
 test("a page's text cannot hold the thread that answers Ctrl-C and the run's own time limit", () => {
@@ -264,9 +277,75 @@ test("a page's text cannot hold the thread that answers Ctrl-C and the run's own
     ["a link of slashes", `[{ name: "A", parent: 2, attrs: { href: "https://x.com/" + "/".repeat(300000) + "a" } }]`, ""],
     ["a site name of many words", `[{ name: "META", parent: 1, attrs: { property: "og:site_name", content: Array.from({ length: 100000 }, (_, i) => "w" + i).join(" ") } }, ...Array.from({ length: 3000 }, (_, i) => ({ name: "IMG", parent: 2, attrs: { alt: "x".repeat(200) + i, src: "/a" + i + ".png" } }))]`, `if (page.siteName.length > 200) throw new Error("long");`],
     ["many links", `Array.from({ length: 100000 }, (_, i) => ({ name: "A", parent: 2, attrs: { href: "https://x.com/u" + i } }))`, `if (page.links.length !== 100000) throw new Error(String(page.links.length));`],
+    ["many preview images", `many(100000, (i) => ({ name: "META", parent: 1, attrs: { property: "og:image", content: "https://x.com/i" + i } }))`, `if (page.images.length !== 100000) throw new Error(String(page.images.length));`],
+    ["one long class on many elements", `many(40000, () => ({ name: "I", parent: 2, attrs: { class: long } }))`, ""],
+    ["one long id on many elements", `many(40000, () => ({ name: "I", parent: 2, attrs: { id: long } }))`, ""],
+    ["a long class of its own on many elements", `many(40000, (i) => ({ name: "I", parent: 2, attrs: { class: i + " " + long.slice(0, 4000) } }))`, ""],
+    ["many images under one long class", `[{ name: "DIV", parent: 2, attrs: { class: long, role: long } }, ...many(20000, (i) => ({ name: "IMG", parent: 3, attrs: { src: "/a" + i + ".png", alt: "x" } }))]`, ""],
+    ["many images under many elements with one long class", `[...many(60, (i) => ({ name: "DIV", parent: i ? 2 + i : 2, attrs: { class: long, id: long } })), ...many(20000, (i) => ({ name: "IMG", parent: 62, attrs: { src: "/a" + i + ".png", alt: "x" } }))]`, ""],
+    ["one long rel on many links", `many(20000, () => ({ name: "LINK", parent: 1, attrs: { rel: long, href: "/a" } }))`, ""],
+    ["one long address on many links", `many(20000, () => ({ name: "LINK", parent: 1, attrs: { rel: "stylesheet", href: longAddress } }))`, ""],
+    ["one long address on many preview images", `many(20000, () => ({ name: "META", parent: 1, attrs: { property: "og:image", content: longAddress } }))`, `if (page.images[0].url !== longAddress) throw new Error("cut");`],
+    ["one long site name on many elements", `many(20000, () => ({ name: "META", parent: 1, attrs: { property: "og:site_name", content: long } }))`, ""],
+    ["one long attribute name on many elements", `many(20000, () => ({ name: "DIV", parent: 2, attrs: { [longName]: "1" } }))`, ""],
+    ["one long script address on many elements", `many(40000, () => ({ name: "SCRIPT", parent: 1, attrs: { src: long } }))`, ""],
+    ["one long address on many images", `many(20000, () => ({ name: "IMG", parent: 2, attrs: { src: longAddress, alt: "Acme logo" } }))`, ""],
+    ["one long address on the links around many images", `[{ name: "A", parent: 2, attrs: { href: longAddress } }, ...many(20000, (i) => ({ name: "IMG", parent: 3, attrs: { src: "/a" + i + ".png", alt: "acme" } }))]`, ""],
+    ["many titles of spaces", `[...many(20000, () => ({ name: "TITLE", parent: 1 })), ...many(20000, (i) => ({ name: "#text", parent: 3 + i, text: spaces }))]`, ""],
+    ["the same JSON-LD in many scripts", `[...many(3000, () => ({ name: "SCRIPT", parent: 1, attrs: { type: "application/ld+json" } })), ...many(3000, (i) => ({ name: "#text", parent: 3 + i, text: block }))]`, ""],
+    ["links at the end of a long chain", `deep("DIV", 100000, (p, i) => ({ name: "A", parent: p, attrs: { href: "https://x.com/a" } }))`, ""],
+    ["vectors at the end of a long chain", `deep("DIV", 100000, (p) => ({ name: "svg", parent: p, style: ["hidden", "1", "rgba(0, 0, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", "Arial"] }))`, ""],
+    ["logos at the end of a long chain", `deep("DIV", 30000, (p, i) => ({ name: "IMG", parent: p, attrs: { src: "/a" + i + ".png", alt: "Acme logo" } }))`, ""],
+    ["headings at the end of a long chain in a menu", `deep("NAV", 100000, (p) => ({ name: "H2", parent: p }))`, `if (page.wordTargets.length) throw new Error("listed");`],
+    ["buttons at the end of a long chain", `deep("DIV", 100000, (p) => ({ name: "BUTTON", parent: p, style: ["visible", "1", "rgb(200, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", "Arial"] }))`, ""],
   ]) {
     assert.doesNotThrow(() => endsInTime(`${HOSTILE_PAGE}\nread(${elements}).then((page) => { ${check} });`), what);
   }
+  // Hiding what floats over the page, with nothing fixed above those elements.
+  endsInTime(`
+    const { hideOverlays } = require(lib + "/page.js");
+    const parentIndex = [-1];
+    for (let i = 1; i < 20000; i++) parentIndex.push(i - 1);
+    for (let i = 0; i < 100000; i++) parentIndex.push(19999);
+    const nodeIndex = parentIndex.map((_, i) => i);
+    const snap = { documents: [{ nodes: { parentIndex, backendNodeId: nodeIndex }, layout: { nodeIndex, bounds: nodeIndex.map(() => [0, 0, 10, 10]), styles: nodeIndex.map(() => [0]) } }], strings: ["static"] };
+    hideOverlays({ send: async () => snap }, 1600, 900);
+  `);
+});
+
+test("what a class says is read as far as a class can reach, and a whole address is kept", () => {
+  endsInTime(`${HOSTILE_PAGE}
+    const padding = "x".repeat(99) + " ";
+    const page = (classes) => [
+      { name: "HEADER", parent: 2 },
+      { name: "SPAN", parent: 3, attrs: { class: classes + "site-logo" } },
+      { name: "META", parent: 1, attrs: { property: "og:image", content: "https://acme.test/" + "b".repeat(5000) + ".png" } },
+    ];
+    (async () => {
+      const near = await read(page(padding.repeat(20)));
+      if (near.marks.length !== 1 || near.marks[0].where !== "header") throw new Error(JSON.stringify(near.marks));
+      if (near.images[0].url.length !== 5022) throw new Error(String(near.images[0].url.length));
+      const far = await read(page(padding.repeat(21)));
+      if (far.marks.length) throw new Error(JSON.stringify(far.marks));
+      const many = await read(page("a ".repeat(200)));
+      if (many.marks.length) throw new Error(JSON.stringify(many.marks));
+    })();
+  `);
+  // JSON-LD is read up to more than a page has, and no further.
+  endsInTime(`${HOSTILE_PAGE}
+    const ld = (count, text) => [...Array.from({ length: count }, () => ({ name: "SCRIPT", parent: 1, attrs: { type: "application/ld+json" } })), ...Array.from({ length: count }, (_, i) => ({ name: "#text", parent: 3 + i, text: text(i) }))];
+    (async () => {
+      const blocks = await read(ld(1200, (i) => JSON.stringify({ logo: "https://acme.test/" + i + ".png" })));
+      if (blocks.images.length !== 1000) throw new Error(String(blocks.images.length));
+      const pad = "b".repeat(1000000);
+      const chars = await read(ld(20, (i) => JSON.stringify({ logo: "https://acme.test/" + i + ".png", pad })));
+      if (chars.images.length !== 14) throw new Error(String(chars.images.length));
+      // A block given many times counts once.
+      const same = JSON.stringify({ logo: "https://acme.test/same.png", pad });
+      const repeated = await read(ld(21, (i) => (i < 20 ? same : JSON.stringify({ logo: "https://acme.test/last.png" }))));
+      if (repeated.images.map((image) => image.url).join() !== "https://acme.test/same.png,https://acme.test/last.png") throw new Error(JSON.stringify(repeated.images));
+    })();
+  `);
 });
 
 test("a logo's alt text and an icon's sizes come in without control characters", () => {

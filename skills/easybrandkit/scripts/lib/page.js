@@ -21,6 +21,29 @@ async function metrics(cdp) {
   };
 }
 
+// What the nearest of an element and those above it says, by what own says
+// of each one (something truthy), asked once per element: a page can nest its
+// elements as deep as it likes, and a walk up from each of them would then
+// hold the one thread that answers Ctrl-C and the run's own time limit.
+function nearest(parents, own) {
+  const known = new Map();
+  return (start) => {
+    const passed = [];
+    let said;
+    for (let at = start; at >= 0; at = parents[at]) {
+      if (known.has(at)) {
+        said = known.get(at);
+        break;
+      }
+      passed.push(at);
+      said = own(at);
+      if (said) break;
+    }
+    for (const at of passed) known.set(at, said);
+    return said;
+  };
+}
+
 function wheel(cdp, x, y, deltaY) {
   return cdp.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY });
 }
@@ -98,15 +121,15 @@ async function hideOverlays(cdp, viewportWidth, viewportHeight) {
   // it holds.
   const held = new Map();
   const parentOf = doc.nodes.parentIndex || [];
+  // One above the node index, so that the first node counts as something.
+  const fixedAbove = nearest(parentOf, (n) => (fixed.has(n) ? n + 1 : 0));
   doc.layout.nodeIndex.forEach((nodeIndex, i) => {
     const [x, y, w, h] = doc.layout.bounds[i] || [];
     if (!(w > 0 && h > 0)) return;
-    for (let n = parentOf[nodeIndex]; n >= 0; n = parentOf[n]) {
-      if (!fixed.has(n)) continue;
-      const [x0, y0, x1, y1] = held.get(n) || [x, y, x + w, y + h];
-      held.set(n, [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x + w), Math.max(y1, y + h)]);
-      break;
-    }
+    const n = (fixedAbove(parentOf[nodeIndex]) || 0) - 1;
+    if (n < 0) return;
+    const [x0, y0, x1, y1] = held.get(n) || [x, y, x + w, y + h];
+    held.set(n, [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x + w), Math.max(y1, y + h)]);
   });
   for (const [nodeIndex, own] of fixed) {
     const box = held.get(nodeIndex);
@@ -212,4 +235,4 @@ async function capture(cdp, x, y, width, height, scale = 1, beyondViewport = tru
   );
 }
 
-module.exports = { metrics, walk, waitForContent, isPageChrome, hideOverlays, resetPictureWait, capture };
+module.exports = { metrics, walk, waitForContent, nearest, isPageChrome, hideOverlays, resetPictureWait, capture };

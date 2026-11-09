@@ -18,7 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const { inOwnWorld } = require("./chrome");
-const { capture, metrics } = require("./page");
+const { capture, metrics, nearest } = require("./page");
 const { sleep } = require("./time");
 const { plainText } = require("./text");
 
@@ -31,8 +31,29 @@ const HEADER_TOKEN = /^(site-|page-|main-|global-)?(header|navbar|nav-bar|topbar
 const FOOTER_TOKEN = /^(site-|page-|main-|global-)?footer([_-].*)?$/i;
 const MARK_TOKEN = /^([a-z0-9]+[_-]+)*(logo|brand)([_-]+[a-z0-9]+)*$/i;
 // No class or id this long names a logo, and a site can write one to keep
-// these patterns busy for minutes.
-const hasToken = (hint, pattern) => hint.split(/\s+/).some((token) => token.length <= 100 && pattern.test(token));
+// these patterns busy for minutes, or give an element more classes than any
+// real one has.
+const hasToken = (hint, pattern) => hint.split(/\s+/, 200).some((token) => token.length <= 100 && pattern.test(token));
+// No class, label or role says more than fits in this many characters. An
+// address does not end there, so src, href and content are read whole.
+const LONG_VALUE = 2_048;
+const WHOLE_VALUES = new Set(["src", "href", "content"]);
+// JSON-LD read from a page, far more than a real page has.
+const LD_BLOCKS = 1_000;
+const LD_CHARS = 15_000_000;
+const LOGO_WORD = /logo|brand/i;
+// What is worked out from a value, once per value. A snapshot holds each
+// string once, so one line of a page's script can give one very long value
+// to every element, and working it out for each of them would hold the one
+// thread that answers Ctrl-C and the run's own time limit.
+const once = (work) => {
+  const known = new Map();
+  return (value) => {
+    if (!known.has(value)) known.set(value, work(value));
+    return known.get(value);
+  };
+};
+const matches = (pattern) => once((text) => pattern.test(text));
 const BRAND_STOPWORDS = new Set(["home", "the", "and", "www", "site", "app", "official", "web"]);
 const IMAGE_META = new Set([
   "og:image", "og:image:url", "og:image:secure_url", "og:logo",
@@ -143,17 +164,38 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
   const nodes = doc.nodes;
   const names = (nodes.nodeName || []).map(str);
   const parents = nodes.parentIndex || [];
+  const attrName = once((index) => str(index).toLowerCase());
+  const shortValue = once((index) => str(index).slice(0, LONG_VALUE));
   const attrCache = new Map();
   const attrs = (i) => {
     if (!attrCache.has(i)) {
       const out = {};
       const list = (nodes.attributes || [])[i] || [];
-      for (let k = 0; k + 1 < list.length; k += 2) out[str(list[k]).toLowerCase()] = str(list[k + 1]);
+      for (let k = 0; k + 1 < list.length; k += 2) {
+        const name = attrName(list[k]);
+        out[name] = WHOLE_VALUES.has(name) ? str(list[k + 1]) : shortValue(list[k + 1]);
+      }
       attrCache.set(i, out);
     }
     return attrCache.get(i);
   };
+  const roleOf = (i) => (attrs(i).role || "").toLowerCase();
+  // Whether an element's class or id says something: asked of each by itself,
+  // since none of these looks for anything with a space in it.
+  const hintSays = (work) => {
+    const answer = once(work);
+    return (a) => Boolean((a.class && answer(a.class)) || (a.id && answer(a.id)));
+  };
+  const namedMark = hintSays((value) => hasToken(value, MARK_TOKEN));
+  const namedHeader = hintSays((value) => hasToken(value, HEADER_TOKEN));
+  const namedFooter = hintSays((value) => hasToken(value, FOOTER_TOKEN));
+  const namedThirdParty = hintSays((value) => THIRD_PARTY.test(value));
   const base = str(doc.baseURL) || str(doc.documentURL) || pageUrl;
+  const absolute = once((raw) => absoluteUrl(raw, base));
+  const pathIn = once(pathOf);
+  const fileIn = once((urlPath) => urlPath.split("/").pop());
+  const thirdPartyPath = matches(THIRD_PARTY);
+  const logoPath = matches(LOGO_WORD);
   const layoutIndex = new Map();
   doc.layout.nodeIndex.forEach((nodeIndex, li) => layoutIndex.set(nodeIndex, li));
   const boxOf = (i) => {
@@ -173,14 +215,14 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
   } catch {
     // An origin-less page has no home link either.
   }
-  const isHomeHref = (raw) => {
+  const isHomeHref = once((raw) => {
     try {
       const href = new URL(raw || "", base);
       return href.origin === pageOrigin && !href.search && /^\/([a-z]{2}(-[a-z]{2})?\/?)?(index\.html?)?$/i.test(href.pathname);
     } catch {
       return false;
     }
-  };
+  });
 
   // The head and the links: icons, social preview images, the manifest, the
   // site name, and app store and social media pages. Meta tags and JSON-LD
@@ -197,7 +239,7 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
   const imageUrls = new Set();
   const linkUrls = new Set();
   const addImage = (property, raw) => {
-    const url = absoluteUrl(raw, base);
+    const url = absolute(raw);
     if (!url || imageUrls.has(url)) return;
     imageUrls.add(url);
     images.push({ property, url });
@@ -209,11 +251,15 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     links.push({ ...link, from });
   };
   const ldJson = [];
+  const isChallengeSrc = matches(CHALLENGE_SRC);
+  const shortText = once((text) => plainText(text, 200));
+  const longText = once((text) => plainText(text, 2_000));
+  const titleText = once((text) => plainText(text));
   names.forEach((name, i) => {
     const a = attrs(i);
     if (name === "LINK") {
       const rel = (a.rel || "").toLowerCase();
-      const href = absoluteUrl(a.href, base);
+      const href = absolute(a.href);
       if (!href) return;
       if (/(^|\s)(icon|apple-touch-icon(-precomposed)?|mask-icon)(\s|$)/.test(rel)) {
         icons.push({ rel: plainText(rel, 100), href, sizes: plainText(a.sizes, 100) });
@@ -222,9 +268,9 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     } else if (name === "META") {
       const key = (a.property || a.name || a.itemprop || "").toLowerCase();
       const content = a.content || "";
-      if (key === "og:site_name") siteName = plainText(content, 200);
-      if (key === "description" && !description) description = plainText(content, 2_000);
-      if (key === "og:description" && !ogDescription) ogDescription = plainText(content, 2_000);
+      if (key === "og:site_name") siteName = shortText(content);
+      if (key === "description" && !description) description = longText(content);
+      if (key === "og:description" && !ogDescription) ogDescription = longText(content);
       if (IMAGE_META.has(key)) addImage(key, content);
       const appId = content.length > 300 ? "" : (content.match(/app-id=([\w.]+)/) || [])[1] || content.trim();
       if ((key === "apple-itunes-app" || key === "al:ios:app_store_id" || key === "twitter:app:id:iphone") && /^\d{5,}$/.test(appId)) {
@@ -236,8 +282,8 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     } else if (name === "#text" && parents[i] >= 0 && names[parents[i]] === "SCRIPT") {
       if (/ld\+json/i.test(attrs(parents[i]).type || "")) ldJson.push(str((nodes.nodeValue || [])[i]));
     } else if (name === "#text" && parents[i] >= 0 && names[parents[i]] === "TITLE" && !title) {
-      title = plainText(str((nodes.nodeValue || [])[i]));
-    } else if ((name === "SCRIPT" || name === "IFRAME") && CHALLENGE_SRC.test(a.src || "")) {
+      title = titleText(str((nodes.nodeValue || [])[i]));
+    } else if ((name === "SCRIPT" || name === "IFRAME") && isChallengeSrc(a.src || "")) {
       challengeScript = true;
     }
   });
@@ -250,26 +296,24 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     for (const same of [].concat(value.sameAs || [])) addLink(same, "ld+json");
     for (const key of ["@graph", "publisher", "brand", "organization", "author"]) walkLd(value[key]);
   };
-  for (const text of ldJson) {
+  // The same block on many elements says what it says once.
+  let ldRead = 0;
+  for (const text of [...new Set(ldJson)].slice(0, LD_BLOCKS)) {
+    ldRead += text.length;
+    if (ldRead > LD_CHARS) break;
     try {
       walkLd(JSON.parse(text));
     } catch {
       // Broken JSON-LD carries nothing usable.
     }
   }
+  const linkPlace = nearest(parents, (p) => (names[p] === "FOOTER" ? "footer" : names[p] === "HEADER" || names[p] === "NAV" ? "header" : ""));
   names.forEach((name, i) => {
     if (name !== "A") return;
-    let from = "page";
-    for (let p = parents[i]; p >= 0; p = parents[p]) {
-      if (names[p] === "FOOTER") from = "footer";
-      else if (names[p] === "HEADER" || names[p] === "NAV") from = "header";
-      else continue;
-      break;
-    }
-    addLink(attrs(i).href, from);
+    addLink(attrs(i).href, linkPlace(parents[i]) || "page");
   });
   if (icons.length === 0) {
-    const fallback = absoluteUrl("/favicon.ico", base);
+    const fallback = absolute("/favicon.ico");
     if (fallback) icons.push({ rel: "default", href: fallback, sizes: "" });
   }
 
@@ -283,23 +327,22 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     if (!isMarkName(name)) return;
     for (let p = parents[i]; p >= 0 && !wrapsImage.has(p); p = parents[p]) wrapsImage.add(p);
   });
-  const insideSvg = (i) => {
-    for (let p = parents[i]; p >= 0; p = parents[p]) if (names[p] === "svg") return true;
-    return false;
-  };
+  const svgAbove = nearest(parents, (p) => names[p] === "svg");
+  const insideSvg = (i) => svgAbove(parents[i]);
   const inside = ([x, y, w, h], [bx, by, bw, bh], share) => {
     const cut = Math.max(0, Math.min(x + w, bx + bw) - Math.max(x, bx)) * Math.max(0, Math.min(y + h, by + bh) - Math.max(y, by));
     return cut >= share * w * h;
   };
 
+  const backgroundOf = nearest(parents, (p) => cssColorToHex(styleOf(p, 2)));
+  const brandInFile = once((file) => brand.some((token) => file.toLowerCase().includes(token)));
   const candidates = [];
   names.forEach((name, i) => {
     const own = attrs(i);
-    const hint = `${own.class || ""} ${own.id || ""}`;
     let kind = "";
     if (name === "IMG") kind = "img";
     else if (name === "svg" && !insideSvg(i)) kind = "svg";
-    else if (!isMarkName(name) && !wrapsImage.has(i) && hasToken(hint, MARK_TOKEN)) kind = "css";
+    else if (!isMarkName(name) && !wrapsImage.has(i) && namedMark(own)) kind = "css";
     if (!kind) return;
     const box = boxOf(i);
     if (!box) return;
@@ -311,11 +354,12 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     if (x < 0 || y < 0 || x + w > pageWidth + 1 || y + h > pageHeight + 1) return;
     if (styleOf(i, 0) === "hidden") return;
 
-    const src = kind === "img" ? currentSrc.get(i) || absoluteUrl(own.src, base) : "";
+    const src = kind === "img" ? currentSrc.get(i) || absolute(own.src) : "";
+    const srcPath = pathIn(src);
     let where = "page";
     let homeLink = kind === "css" && name === "A" && isHomeHref(own.href);
     let linkLabel = "";
-    let thirdParty = THIRD_PARTY.test(`${hint} ${pathOf(src)}`);
+    let thirdParty = namedThirdParty(own) || thirdPartyPath(srcPath);
     for (let p = i, depth = 0; p >= 0 && depth < 60; p = parents[p], depth++) {
       if (p !== i) {
         const parentBox = boxOf(p);
@@ -325,14 +369,13 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
         const clips = names[p] !== "HTML" && names[p] !== "BODY" && [styleOf(p, 3), styleOf(p, 4)].some((v) => v && v !== "visible");
         if (clips && parentBox && !inside(box, parentBox, 0.8)) return;
         const a = attrs(p);
-        const parentHint = `${a.class || ""} ${a.id || ""}`;
-        const role = (a.role || "").toLowerCase();
+        const role = roleOf(p);
         // The page header is a bar at the top, the page footer the block that
         // ends the page: a <header> around a hero or an article is neither.
         if (where === "page" && parentBox) {
           const [, by, , bh] = parentBox;
-          const headerLike = names[p] === "HEADER" || names[p] === "NAV" || role === "banner" || role === "navigation" || hasToken(parentHint, HEADER_TOKEN);
-          const footerLike = names[p] === "FOOTER" || role === "contentinfo" || hasToken(parentHint, FOOTER_TOKEN);
+          const headerLike = names[p] === "HEADER" || names[p] === "NAV" || role === "banner" || role === "navigation" || namedHeader(a);
+          const footerLike = names[p] === "FOOTER" || role === "contentinfo" || namedFooter(a);
           if (headerLike && by <= 120 && bh <= 400) where = "header";
           else if (footerLike && by + bh >= pageHeight * 0.9 - 50) where = "footer";
         }
@@ -340,7 +383,7 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
           linkLabel = `${a["aria-label"] || ""} ${a.title || ""} `;
           homeLink = homeLink || isHomeHref(a.href);
         }
-        if (depth < 8 && THIRD_PARTY.test(parentHint)) thirdParty = true;
+        if (depth < 8 && namedThirdParty(a)) thirdParty = true;
       }
     }
     if (thirdParty) return;
@@ -351,9 +394,9 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     // keeps every picture there, the press logos too, and Apple's logo came
     // back as a Things logo.
     const labels = `${own.alt || ""} ${own.title || ""} ${own["aria-label"] || ""}`;
-    const named = `${labels} ${pathOf(src).split("/").pop()} ${linkLabel}`.toLowerCase();
-    const brandHit = brand.some((token) => named.includes(token));
-    const logoHit = /logo|brand/i.test(`${labels} ${hint} ${pathOf(src)}`);
+    const named = `${labels} ${linkLabel}`.toLowerCase();
+    const brandHit = brand.some((token) => named.includes(token)) || brandInFile(fileIn(srcPath));
+    const logoHit = LOGO_WORD.test(`${labels} ${own.class || ""} ${own.id || ""}`) || logoPath(srcPath);
     const keep =
       where === "header" ? homeLink || brandHit || logoHit
       : where === "footer" ? homeLink || brandHit
@@ -362,9 +405,7 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     // The colour it sits on as CSS has it: the first element up from it with
     // a background, white when none has one. The cut's own pixels have the
     // last word (captureLogos): CSS says white under a logo on a hero photo.
-    let background = "";
-    for (let p = i; p >= 0 && !background; p = parents[p]) background = cssColorToHex(styleOf(p, 2));
-    candidates.push({ kind, where, x, y, w, h, src, alt: plainText(own.alt), background: background || "#ffffff", backendNodeId: (nodes.backendNodeId || [])[i] });
+    candidates.push({ kind, where, x, y, w, h, src, alt: plainText(own.alt), background: backgroundOf(i) || "#ffffff", backendNodeId: (nodes.backendNodeId || [])[i] });
   });
 
   // Header marks first, then the footer, then the page, each top to bottom.
@@ -375,10 +416,11 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
   candidates.sort((a, b) => rank[a.where] - rank[b.where] || a.y - b.y || a.x - b.x);
   const seen = new Set();
   const marks = [];
+  const fileKey = once((src) => fileIn(pathIn(src)).replace(/\.[a-z0-9_-]{6,12}(?=\.[a-z0-9]+$)/i, ""));
   for (const c of candidates) {
     const key =
       c.kind === "img" && c.src
-        ? pathOf(c.src).split("/").pop().replace(/\.[a-z0-9_-]{6,12}(?=\.[a-z0-9]+$)/i, "")
+        ? fileKey(c.src)
         : `${c.kind}:${c.where}:${Math.round(c.w)}x${Math.round(c.h)}`;
     if (seen.has(key)) continue;
     if (marks.some((m) => m.where === c.where && inside([c.x, c.y, c.w, c.h], [m.x - 1, m.y - 1, m.w + 2, m.h + 2], 1))) continue;
@@ -397,8 +439,8 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     title,
     description: description || ogDescription,
     challenge,
-    brand: brandLook(names, parents, attrs, boxOf, styleOf, pageWidth, pageHeight),
-    wordTargets: wordTargets(names, parents, attrs, boxOf, styleOf, nodes.backendNodeId || [], pageWidth, pageHeight),
+    brand: brandLook(names, parents, roleOf, boxOf, styleOf, pageWidth, pageHeight),
+    wordTargets: wordTargets(names, parents, roleOf, boxOf, styleOf, nodes.backendNodeId || [], pageWidth, pageHeight),
   };
 }
 
@@ -426,7 +468,7 @@ function isBrandButton(name, role, background, w, h) {
   return (name === "BUTTON" || name === "A" || role === "button") && Boolean(background) && colourful(background) && w >= 40 && w <= 600 && h >= 24 && h <= 120;
 }
 
-function brandLook(names, parents, attrs, boxOf, styleOf, pageWidth, pageHeight) {
+function brandLook(names, parents, roleOf, boxOf, styleOf, pageWidth, pageHeight) {
   const tally = new Map();
   const add = (role, hex, weight = 1) => {
     if (!hex) return;
@@ -442,8 +484,7 @@ function brandLook(names, parents, attrs, boxOf, styleOf, pageWidth, pageHeight)
     if (name === "#text" || !box || !(box[2] > 0 && box[3] > 0)) return;
     if (styleOf(i, 0) === "hidden" || parseFloat(styleOf(i, 1)) === 0) return;
     const [, y, w, h] = box;
-    const a = attrs(i);
-    const role = (a.role || "").toLowerCase();
+    const role = roleOf(i);
     const background = solidHex(styleOf(i, 2));
     if (name === "H1" || name === "H2") {
       add("heading", solidHex(styleOf(i, 5)));
@@ -484,21 +525,16 @@ function brandLook(names, parents, attrs, boxOf, styleOf, pageWidth, pageHeight)
 // snapshot picks the elements; their text is read as the page renders it
 // (innerText), because a snapshot's text pieces lose the line breaks and the
 // spaces between them.
-function wordTargets(names, parents, attrs, boxOf, styleOf, backendIds, pageWidth, pageHeight) {
-  const within = (i, test) => {
-    for (let p = parents[i]; p >= 0; p = parents[p]) if (test(names[p], (attrs(p).role || "").toLowerCase())) return true;
-    return false;
+function wordTargets(names, parents, roleOf, boxOf, styleOf, backendIds, pageWidth, pageHeight) {
+  const within = (test) => {
+    const above = nearest(parents, (p) => test(names[p], roleOf(p)));
+    return (i) => above(parents[i]);
   };
-  const inFooter = (i) => within(i, (name, role) => name === "FOOTER" || role === "contentinfo");
-  const inChrome = (i) => within(i, (name, role) => name === "FOOTER" || name === "NAV" || role === "contentinfo" || role === "navigation");
+  const inFooter = within((name, role) => name === "FOOTER" || role === "contentinfo");
+  const inChrome = within((name, role) => name === "FOOTER" || name === "NAV" || role === "contentinfo" || role === "navigation");
   // A filled button: its own solid background, unlike what it sits on.
-  const ground = (i) => {
-    for (let p = parents[i]; p >= 0; p = parents[p]) {
-      const hex = solidHex(styleOf(p, 2));
-      if (hex) return hex;
-    }
-    return "#ffffff";
-  };
+  const groundAbove = nearest(parents, (p) => solidHex(styleOf(p, 2)));
+  const ground = (i) => groundAbove(parents[i]) || "#ffffff";
   const visible = (i) => {
     const box = boxOf(i);
     if (!box || !(box[2] > 0 && box[3] > 0)) return false;
@@ -516,7 +552,7 @@ function wordTargets(names, parents, attrs, boxOf, styleOf, backendIds, pageWidt
       if (headings.length < 30 && visible(i) && !inChrome(i)) headings.push({ kind: "heading", tag: name.toLowerCase(), backendNodeId: backendIds[i] });
       return;
     }
-    const role = (attrs(i).role || "").toLowerCase();
+    const role = roleOf(i);
     if (name !== "BUTTON" && name !== "A" && role !== "button") return;
     const box = boxOf(i);
     const fill = solidHex(styleOf(i, 2));
