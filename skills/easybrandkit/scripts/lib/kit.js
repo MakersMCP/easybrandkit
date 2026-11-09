@@ -352,6 +352,18 @@ function writeMarkdown(kit, dir) {
 // website; a profile link is refused.
 const PLATFORM_HOST = /^(www\.|m\.|mobile\.)?((apps|itunes)\.apple\.com|play\.google\.com|(x|twitter|instagram|facebook|fb|linkedin|youtube|tiktok|threads|pinterest)\.(com|net))$/i;
 
+// What a listing's pictures gave a kit, in words: said of a kit made from
+// the listing alone, or the note for one whose website was read too.
+function listingGave(assets) {
+  const shots = assets.filter((asset) => asset.kind === "screenshot").length;
+  const icon = assets.some((asset) => asset.kind === "icon");
+  return {
+    alone: [icon && "the app icon", shots && (shots === 1 ? "a screenshot" : "screenshots")].filter(Boolean).join(" and "),
+    withSite: [icon && "icon", shots && (shots === 1 ? "screenshot" : "screenshots")].filter(Boolean).join(" and "),
+    plural: shots > 1 || (icon && shots > 0),
+  };
+}
+
 // The website a listing names, as the brand's page: as given (a product's
 // own page on a maker's site is its brand), but the home page instead of a
 // support or legal page, which Google Play often links.
@@ -419,8 +431,15 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       }
       if (failed && !listing) read = await readPage(asked, work, log, appName, facts);
     }
-    const onlyListing = "so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts.";
-    if (listing && read) notes.push(`${asked} is a store listing: its icon and screenshots come from the listing, the rest from the website it names, ${page}.`);
+    // A listing none of whose pictures came, and no website to read: a name
+    // alone is no kit to put in the place of an earlier one.
+    if (listing && !read && !given.assets.length) {
+      throw new Error(`${asked}: no picture of the listing could be downloaded, ${failed ? `and the website it names, ${page}, ${failed}` : "and it names no website"}, so no kit was made.`);
+    }
+    const gave = given ? listingGave(given.assets) : {};
+    const onlyListing = `so only the listing was read: the kit has ${gave.alone} but no logos, colors or fonts.`;
+    if (listing && read && !gave.withSite) notes.push(`${asked} is a store listing none of whose pictures could be downloaded, so the kit comes from the website it names, ${page}.`);
+    else if (listing && read) notes.push(`${asked} is a store listing: its ${gave.withSite} ${gave.plural ? "come" : "comes"} from the listing, the rest from the website it names, ${page}.`);
     else if (listing && failed) notes.push(`${asked} is a store listing, and the website it names, ${page}, ${failed}, ${onlyListing} For those, give an address of the product's site that opens.`);
     else if (listing) notes.push(`${asked} is a store listing that names no website, ${onlyListing} Give the product's website for those.`);
     else if (failed) notes.push(`The home page, ${page}, could not be read: it ${failed}. ${asked} was read as given, and its header and colors can differ from the home page's.`);

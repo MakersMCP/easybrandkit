@@ -1419,11 +1419,16 @@ test("a store listing whose website fails keeps what the listing gave and says s
   png.writeUInt32BE(1024, 20);
   const art = "https://is1-ssl.mzstatic.com/image/thumb";
   let seller = `${site.origin}/app`;
+  // A picture whose address holds this does not come.
+  let missing = "";
   const realFetch = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (url, ...rest) => {
     const { hostname } = new URL(url);
     if (hostname === "itunes.apple.com") return new Response(JSON.stringify({ results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, sellerUrl: seller, screenshotUrls: [`${art}/1.png/392x696bb.jpg`] }] }));
-    if (hostname.endsWith("mzstatic.com")) return new Response(png);
+    if (hostname.endsWith("mzstatic.com")) {
+      if (missing && String(url).includes(missing)) throw new TypeError("fetch failed");
+      return new Response(png);
+    }
     return realFetch(url, ...rest);
   });
   t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
@@ -1433,7 +1438,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
     fs.rmSync(parent, { recursive: true, force: true });
   });
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
-  const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
+  const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
   const fromListing = ["BRAND.md", "_brand.yml", "appstore-icon.png", "appstore-shot-01.png", "brand.json"];
   const bot = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(BOT_CHECK);
   const blank = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`${brandPage("rgb(255,0,0)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`);
@@ -1468,16 +1473,65 @@ test("a store listing whose website fails keeps what the listing gave and says s
   assert.deepEqual(bare.kit.notes, [noteOf("still shows no content after 30 s")]);
   assert.deepEqual(fs.readdirSync(path.join(parent, "bare")).sort(), fromListing);
 
+  // A run with no time left to wait, or that used up its time on the page,
+  // gave up: that says nothing about the website, and it does not cost the
+  // kit already in the folder.
+  const earlier = path.join(parent, "earlier");
+  writeFiles(earlier, EARLIER);
+  const kept = filesOf(earlier);
+  await assert.rejects(makeKit(listing, { dir: earlier, stores: false, timeLimit: 45_000 }), (err) => err.message === `${seller} shows no content yet and the run has no time left to wait for it, so nothing was read. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
+  assert.deepEqual(filesOf(earlier), kept, "no time left to wait");
+  answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", "<script>alert(1)</script></body>"));
+  await assert.rejects(makeKit(listing, { dir: earlier, stores: false, timeLimit: 12_000 }), (err) => err.message === `The browser tab stopped answering while it read ${seller}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
+  assert.deepEqual(filesOf(earlier), kept, "a tab that stops answering at the end of the run's time");
+
+  // The note says what came of the listing.
+  answers = (req, res) => res.writeHead(403, { "content-type": "text/html" }).end("<!doctype html><title>Forbidden</title><h1>Forbidden</h1>");
+  const partly = async (blocked, gave, files) => {
+    missing = blocked;
+    const dir = path.join(parent, `partly-${blocked}`);
+    const { kit } = await makeKit(listing, { dir, stores: false });
+    assert.deepEqual(kit.notes, [`${listing} is a store listing, and the website it names, ${seller}, answered 403, so only the listing was read: the kit has ${gave} but no logos, colors or fonts. For those, give an address of the product's site that opens.`]);
+    assert.deepEqual(fs.readdirSync(dir).sort(), files);
+  };
+  await partly("1.png", "the app icon", ["BRAND.md", "_brand.yml", "appstore-icon.png", "brand.json"]);
+  await partly("AppIcon", "a screenshot", ["BRAND.md", "_brand.yml", "appstore-shot-01.png", "brand.json"]);
+
+  // None of its pictures came, and the website failed or there is none: a
+  // name alone is no kit to put in the place of an earlier one.
+  missing = "mzstatic";
+  await assert.rejects(makeKit(listing, { dir: earlier, stores: false }), (err) => err.message === `${listing}: no picture of the listing could be downloaded, and the website it names, ${seller}, answered 403, so no kit was made.` && err.earlierKit === earlier);
+  assert.deepEqual(filesOf(earlier), kept, "no picture, and a website that fails");
+  seller = "";
+  await assert.rejects(makeKit(listing, { dir: earlier, stores: false }), (err) => err.message === `${listing}: no picture of the listing could be downloaded, and it names no website, so no kit was made.` && err.earlierKit === earlier);
+  assert.deepEqual(filesOf(earlier), kept, "no picture, and no website");
+  // A website that opens makes the kit without them.
+  missing = "mzstatic";
+  seller = `${site.origin}/`;
+  answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  const noPictures = await makeKit(listing, { dir: path.join(parent, "no-pictures"), stores: false });
+  assert.deepEqual(noPictures.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.deepEqual(noPictures.kit.stores[0].assets, []);
+  assert.deepEqual(noPictures.kit.notes, [`${listing} is a store listing none of whose pictures could be downloaded, so the kit comes from the website it names, ${seller}.`]);
+  // And the note says which ones came.
+  missing = "1.png";
+  const iconOnly = await makeKit(listing, { dir: path.join(parent, "icon-only"), stores: false });
+  assert.deepEqual(iconOnly.kit.notes, [`${listing} is a store listing: its icon comes from the listing, the rest from the website it names, ${seller}.`]);
+  missing = "AppIcon";
+  const shotOnly = await makeKit(listing, { dir: path.join(parent, "shot-only"), stores: false });
+  assert.deepEqual(shotOnly.kit.notes, [`${listing} is a store listing: its screenshot comes from the listing, the rest from the website it names, ${seller}.`]);
+  missing = "";
+
   // A website that opens gives the rest of the kit.
   answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   const whole = await makeKit(listing, { dir: path.join(parent, "whole"), stores: false });
-  assert.deepEqual(whole.kit.notes, [`${listing} is a store listing: its icon and screenshots come from the listing, the rest from the website it names, ${seller}.`]);
+  assert.deepEqual(whole.kit.notes, [`${listing} is a store listing: its icon and screenshot come from the listing, the rest from the website it names, ${seller}.`]);
   assert.deepEqual(whole.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.ok(fs.existsSync(path.join(parent, "whole", "appstore-icon.png")));
   // A listing that names no website.
   seller = "";
   const alone = await makeKit(listing, { dir: path.join(parent, "alone"), stores: false, facts: true });
-  assert.deepEqual(alone.kit.notes, [`${listing} is a store listing that names no website, so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts. Give the product's website for those.`, "No facts were read: the listing names no website."]);
+  assert.deepEqual(alone.kit.notes, [`${listing} is a store listing that names no website, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. Give the product's website for those.`, "No facts were read: the listing names no website."]);
 
   // A browser that ends on the way, or that is not there, is no failure of
   // the website's, and ends the run.
