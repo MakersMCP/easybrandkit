@@ -457,7 +457,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     // The page's ground is not in brand.json: its list of colors can file
     // that color under the header or footer.
     fs.writeFileSync(path.join(work, "_brand.yml"), brandYml(kit, { background: found.brand.background || "", site: read ? read.pageUrl : "" }));
-    const claims = facts && read ? writeFacts(work, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
+    const claims = facts && read ? await writeFacts(work, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
     // The folder is read again as the files go in: it can have changed
     // while the site was read.
     await saveRun(run, () => checkDir(target, { saving: true }) || []);

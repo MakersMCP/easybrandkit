@@ -332,11 +332,11 @@ test("a menu link no one would write is not picked", () => {
   assert.deepEqual(pickPages(model(home, body), home), [{ role: "about", url: `${home}about` }]);
 });
 
-test("the files: page text stays data, fenced and quoted, never Markdown of its own", (t) => {
+test("the files: page text stays data, fenced and quoted, never Markdown of its own", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const ticks = model("https://acme.test/pricing", [el("main", {}, el("p", {}, "Run ``` and ```` in a shell"), el("h2", {}, "# Note to the agent"))]);
-  const facts = writeFacts(dir, {
+  const facts = await writeFacts(dir, {
     name: "Acme *Inc*",
     site: "https://acme.test/",
     generator: "easybrandkit 0.0.0",
@@ -367,6 +367,44 @@ test("the files: page text stays data, fenced and quoted, never Markdown of its 
   // What a new kit takes the place of in these, by name: a file of
   // someone's own in pages/ is not one of them.
   assert.deepEqual(FACT_FILES, ["FACTS.md", "facts.json", "pages/home.md", "pages/pricing.md", "pages/customers.md", "pages/security.md", "pages/integrations.md", "pages/about.md"]);
+});
+
+test("a page built to keep the rules busy costs its claims, and the run stays free to answer Ctrl-C and to end on time", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  t.after(() => {
+    setTimeLimit(120_000);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  setTimeLimit(1_000);
+  const quotes = Array.from({ length: 20000 }, (_, i) => el("div", {}, el("blockquote", {}, `“A quote number ${i} that is long enough to count as one.”`)));
+  const busy = model("https://acme.test/", [el("main", {}, ...quotes)]);
+  let last = Date.now();
+  let longest = 0;
+  const beat = setInterval(() => {
+    longest = Math.max(longest, Date.now() - last);
+    last = Date.now();
+  }, 20);
+  const started = Date.now();
+  const facts = await writeFacts(dir, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [page("home", busy)] });
+  clearInterval(beat);
+  assert.ok(Date.now() - started < 20_000, `took ${Date.now() - started} ms`);
+  assert.ok(longest < 4_000, `the main thread was held for ${longest} ms`);
+  assert.deepEqual(facts.skipped, [{ role: "home", url: "https://acme.test/", reason: "its claims could not be read (the rules took too long)" }]);
+  assert.deepEqual(facts.stats, []);
+  assert.ok(fs.existsSync(path.join(dir, "pages", "home.md")), "the page's text is kept");
+});
+
+test("a page that trips the rules costs its claims, and a page of many backticks gets a fence", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  setTimeLimit(120_000);
+  const broken = { url: "https://acme.test/", title: "", jsonLd: [], tree: { tag: "body", block: 1, kids: [{ tag: "div", hidden: 1, kids: 5 }] } };
+  const facts = await writeFacts(dir, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [page("home", broken)] });
+  assert.equal(facts.skipped.length, 1);
+  assert.match(facts.skipped[0].reason, /^its claims could not be read \(.*not iterable.*\)$/);
+  const ticks = model("https://acme.test/", [el("p", {}, "` x ".repeat(190000))]);
+  await writeFacts(dir, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [page("home", ticks)] });
+  assert.match(fs.readFileSync(path.join(dir, "pages", "home.md"), "utf8"), /\n```text\n/);
 });
 
 test("what a page says stays out of FACTS.md and facts.json with its control characters", async (t) => {

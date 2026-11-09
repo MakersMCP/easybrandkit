@@ -17,6 +17,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { Worker } = require("worker_threads");
 const { navigate } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
@@ -573,8 +574,28 @@ function factsMarkdown(facts) {
   return lines.join("\n") + "\n";
 }
 
+// The rules, on a thread of their own and for as long as the run still has,
+// 30 s at most. They take a moment on a real page, but a page built for it
+// can keep them busy for many minutes, and on the main thread that would
+// keep Ctrl-C, a kill and the run's own time limit from working. Such a page
+// costs its claims, not the kit.
+function claimsOf(pages) {
+  return new Promise((resolve) => {
+    const worker = new Worker(path.join(__dirname, "claims-thread.js"), { workerData: pages });
+    const done = (result) => {
+      clearTimeout(limit);
+      worker.terminate();
+      resolve(result);
+    };
+    const limit = setTimeout(() => done({ error: "the rules took too long" }), Math.max(5_000, Math.min(30_000, timeLeft())));
+    worker.once("message", (claims) => done({ claims }));
+    worker.once("error", (err) => done({ error: String(err.message || err) }));
+    worker.once("exit", () => done({ error: "the rules stopped" }));
+  });
+}
+
 // facts.json, FACTS.md and the text of each page read, in pages/.
-function writeFacts(dir, { name, site, generator, pages = [], skipped = [] }) {
+async function writeFacts(dir, { name, site, generator, pages = [], skipped = [] }) {
   const listed = [];
   if (pages.length) fs.mkdirSync(path.join(dir, "pages"), { recursive: true });
   for (const page of pages) {
@@ -582,13 +603,10 @@ function writeFacts(dir, { name, site, generator, pages = [], skipped = [] }) {
     fs.writeFileSync(path.join(dir, file), pageMarkdown(page, generator));
     listed.push({ role: page.role, url: page.url, readAt: page.readAt, title: page.model.title || "", file });
   }
-  let claims;
-  try {
-    claims = findClaims(pages);
-  } catch (err) {
-    // A page built to trip the rules costs its claims, not the kit.
+  let { claims, error } = await claimsOf(pages);
+  if (error) {
     claims = findClaims([]);
-    skipped = [...skipped, { role: "home", url: site, reason: `its claims could not be read (${String(err.message || err)})` }];
+    skipped = [...skipped, { role: "home", url: site, reason: `its claims could not be read (${error})` }];
   }
   const facts = {
     version: 1,
