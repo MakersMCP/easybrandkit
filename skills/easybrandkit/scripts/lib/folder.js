@@ -104,7 +104,9 @@ function look(at, dir) {
   try {
     return fs.lstatSync(at, { throwIfNoEntry: false });
   } catch (err) {
-    if (err.code === "ENOTDIR") return undefined;
+    // Below a file, or below a link that leads nowhere: checkDir finds which
+    // one on its way up the path.
+    if (err.code === "ENOTDIR" || err.code === "ELOOP") return undefined;
     if (err.code !== "EACCES" && err.code !== "EPERM") throw err;
     let shut = path.dirname(at);
     for (;;) {

@@ -1065,9 +1065,12 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   if (process.platform !== "win32") {
     fs.symlinkSync("loop-b", path.join(parent, "loop-a"));
     fs.symlinkSync("loop-a", path.join(parent, "loop-b"));
-    const loop = cli("--out", path.join(parent, "loop-a"));
-    assert.equal(loop.status, 1);
-    assert.equal(loop.stderr, `easybrandkit: ${path.join(parent, "loop-a")} is a link that does not lead to a folder. Pick a folder with --out.\n`);
+    // At the folder itself, or on the way to it.
+    for (const out of [path.join(parent, "loop-a"), path.join(parent, "loop-a", "x"), path.join(parent, "loop-a", "x", "y")]) {
+      const loop = cli("--out", out);
+      assert.equal(loop.status, 1);
+      assert.equal(loop.stderr, `easybrandkit: ${path.join(parent, "loop-a")} is a link that does not lead to a folder. Pick a folder with --out.\n`);
+    }
   }
   assert.deepEqual(filesOf(dir), before);
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
