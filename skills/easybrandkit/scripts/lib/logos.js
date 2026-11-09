@@ -19,7 +19,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { inOwnWorld } = require("./chrome");
 const { capture, metrics, nearest } = require("./page");
-const { sleep } = require("./time");
+const { sleep, outOfTime } = require("./time");
 const { plainText } = require("./text");
 
 const LOGO_MAX = 6;
@@ -576,6 +576,9 @@ async function readWords(cdp, targets) {
   const headings = [];
   const ctas = [];
   for (const target of targets) {
+    // A call that a tab no longer answers takes a second even with no time
+    // left, and sixty of them are a minute past the run's limit.
+    if (outOfTime()) break;
     let text = "";
     try {
       const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: target.backendNodeId });
