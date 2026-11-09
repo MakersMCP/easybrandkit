@@ -200,6 +200,11 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   assert.equal(homePageOf("https://news.com/"), null);
   assert.equal(homePageOf("https://support.co.uk/"), null);
   assert.equal(homePageOf("https://help.com.tr/"), null);
+  for (const level of ["ac", "co", "com", "edu", "gov", "net", "or", "org"]) assert.equal(homePageOf(`https://news.${level}.uk/`), null, level);
+  // A country's second level is two letters after one of those; this is a site.
+  assert.equal(homePageOf("https://blog.com.example/"), "https://com.example/");
+  // A last dot makes no label of its own.
+  assert.equal(homePageOf("https://news.com./"), null);
   assert.equal(homePageOf("https://news.com/world"), "https://news.com/");
   assert.equal(brandName("Acme", "Whatever", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/"), "Acme");
@@ -211,6 +216,7 @@ test("text a site wrote: control characters out, line breaks kept only where ask
   const raw = "A\x1b]0;title\x07 \x1b[31mRED\u009b2J\n\tEnd";
   assert.equal(plainText(raw), "A ]0;title [31mRED 2J End");
   assert.equal(noControls("one\x1b[2J\ntwo\x07"), "one [2J\ntwo ");
+  assert.equal(noControls("a\u007fb\u0080c\u009fd"), "a b c d");
   assert.equal(plainText("a   b", 2), "a");
   assert.equal(plainText(undefined), "");
   assert.equal(noControls(null), "");
@@ -1904,10 +1910,11 @@ test("a download no connection refuses goes into the throwaway profile, not the 
 test("what a page says reaches no terminal with its control characters, and a note stays on one line", { skip: noBrowser }, async (t) => {
   const ESC = "\x1b";
   const bot = `<!doctype html><title>Just a moment ${ESC}[2J${ESC}[Hcleared\n\nby it</title><h1>x</h1><a href="/w">w</a>`;
-  const named = brandPage("rgb(255,0,0)").replace("<title>Acme</title>", `<meta charset="utf-8"><title>Acme</title><meta property="og:site_name" content="A${ESC}]0;set-by-site${ESC}\\${ESC}[31mRED\u009b2J${ESC}[0m"><meta name="description" content="Words${ESC}[2Jhere">`).replace("<h1>Acme</h1>", `<h1>Hello${ESC}[2Jthere</h1>`);
+  const named = brandPage("rgb(255,0,0)").replace("<title>Acme</title>", `<meta charset="utf-8"><title>Acme</title><meta property="og:site_name" content="A${ESC}]0;set-by-site${ESC}\\${ESC}[31mRED\u009b2J${ESC}[0m"><meta name="description" content="Words${ESC}[2Jhere"><link rel="icon ${ESC}[2J" sizes="16x16" href="/i.png"><style>h1,p{font-family:"Fo\u009b2Jnt"}</style>`).replace("<h1>Acme</h1>", `<h1>Hello${ESC}[2Jthere</h1><p>Text</p>`);
   const site = await serve((req, res) => {
     const html = (status, body) => res.writeHead(status, { "content-type": "text/html; charset=utf-8" }).end(body);
     if (req.url === "/tr") return html(200, named);
+    if (req.url === "/de") return html(200, named.replace('name="description"', 'property="og:description"'));
     if (req.url === "/project/") return html(200, brandPage("rgb(255,0,0)"));
     html(403, bot);
   });
@@ -1927,9 +1934,17 @@ test("what a page says reaches no terminal with its control characters, and a no
   assert.match(made.stdout, /^Saved the A \]0;set-by-site \\ \[31mRED 2J \[0m brand kit to /);
   assert.doesNotMatch(made.stdout, CONTROL, "the summary");
   for (const file of ["BRAND.md", "brand.json", "_brand.yml"]) assert.doesNotMatch(fs.readFileSync(path.join(parent, "named", file), "utf8"), CONTROL, file);
+  const told = JSON.parse(fs.readFileSync(path.join(parent, "named", "brand.json"), "utf8"));
+  assert.equal(told.fonts.heading, "Fo 2Jnt", "a font's name");
+  assert.equal(told.icons[0].rel, "icon [2j", "an icon's rel");
   const json = await run(`${site.origin}/tr`, "named", "--json");
   assert.equal(json.code, 0, json.stderr);
   assert.doesNotMatch(json.stdout, CONTROL, "--json");
+  // A description that only og:description gives.
+  const og = await run(`${site.origin}/de`, "og");
+  assert.equal(og.code, 0, og.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(parent, "og", "brand.json"), "utf8")).text.description, "Words [2Jhere");
+  for (const file of ["BRAND.md", "brand.json"]) assert.doesNotMatch(fs.readFileSync(path.join(parent, "og", file), "utf8"), CONTROL, file);
 
   // A bot check's title, in a note for a page the kit chose.
   const went = await run(`${site.origin}/project/`, "kit");
