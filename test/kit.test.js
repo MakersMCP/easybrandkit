@@ -1426,6 +1426,36 @@ test("a tab that stops answering is told in words, and more time is advised only
   assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its header and colors can differ from the home page's.`]);
 });
 
+test("a site cannot make the browser save a file in the user's Downloads folder", { skip: noBrowser || (process.platform !== "linux" && "the Downloads folder follows HOME on Linux only") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    if (req.url === "/report.bin") {
+      asked++;
+      return res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=report.bin" }).end(Buffer.alloc(2048, 65));
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>setTimeout(() => { location.href = "/report.bin"; }, 300)</script></body>`));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const env = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DOWNLOAD_DIR: process.env.XDG_DOWNLOAD_DIR };
+  t.after(() => {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const home = path.join(parent, "home");
+  fs.mkdirSync(home);
+  process.env.HOME = home;
+  delete process.env.XDG_CONFIG_HOME;
+  delete process.env.XDG_DOWNLOAD_DIR;
+  const { kit } = await makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], "the page stays where it is");
+  assert.ok(asked >= 1, "the page asked for the file");
+  assert.deepEqual(filesOf(path.join(home, "Downloads")), []);
+});
+
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));

@@ -526,6 +526,9 @@ async function openPage(base, { width, height }) {
   const res = await fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(10_000) });
   const target = await res.json();
   const cdp = await connect(target.webSocketDebuggerUrl);
+  // A site can make a browser save a file, into the Downloads folder of the
+  // user it runs as, where nothing removes it. This browser saves none.
+  await cdp.send("Browser.setDownloadBehavior", { behavior: "deny" }).catch(() => {});
   await cdp.send("Page.enable");
   cdp.answer = await watchAnswer(cdp);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
