@@ -10,7 +10,7 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { findClaims } = require("../skills/easybrandkit/scripts/lib/claims");
+const { findClaims, pageOf, regionOf } = require("../skills/easybrandkit/scripts/lib/claims");
 const { spawnSync } = require("node:child_process");
 const { pickPages, robotsRules, robotsAllow, readRobots, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
@@ -329,6 +329,23 @@ test("what a site writes in robots.txt and its links takes no more time than its
     for (let i = 0; i < 3000; i++) node = { tag: "a", href: home + "x" + i, kids: [node] };
     pickPages({ url: home, title: "", jsonLd: [], tree: { tag: "body", block: 1, kids: [node] } }, home);
   `);
+});
+
+test("an element's region is worked out once, however deep the links are nested", () => {
+  let tree = { tag: "div", kids: Array.from({ length: 3000 }, (_, i) => ({ tag: "a", href: `https://acme.test/${i}`, kids: ["x"] })) };
+  for (let i = 0; i < 3000; i++) tree = { tag: "div", ...(i === 2000 ? { region: "footer" } : {}), kids: [tree] };
+  const page = pageOf({ model: { tree: { tag: "body", kids: [tree] } } });
+  let asked = 0;
+  const { get } = page.parent;
+  page.parent.get = (node) => {
+    asked++;
+    return get.call(page.parent, node);
+  };
+  const regions = page.all.filter((node) => node.tag === "a").map((node) => regionOf(page, node));
+  assert.equal(new Set(regions).size, 1);
+  assert.equal(regions[0], "footer");
+  assert.ok(asked <= 6_100, `asked ${asked} times`);
+  assert.equal(regionOf(page, page.all[0]), "main");
 });
 
 test("robots.txt: a line or a list too long for any real site is not read", () => {

@@ -304,6 +304,8 @@ test("a page's text cannot hold the thread that answers Ctrl-C and the run's own
     ["one long address on many images", `many(20000, () => ({ name: "IMG", parent: 2, attrs: { src: longAddress, alt: "Acme logo" } }))`, ""],
     ["one long address on the links around many images", `[{ name: "A", parent: 2, attrs: { href: longAddress } }, ...many(20000, (i) => ({ name: "IMG", parent: 3, attrs: { src: "/a" + i + ".png", alt: "acme" } }))]`, ""],
     ["one link of slashes on many links", `many(40000, () => ({ name: "A", parent: 2, attrs: { href: slashes } }))`, ""],
+    ["one label on many images under a site name of many words", `[{ name: "META", parent: 1, attrs: { property: "og:site_name", content: fiftyWords } }, ...many(40000, () => ({ name: "IMG", parent: 2, attrs: { alt: label, title: label, "aria-label": label } }))]`, ""],
+    ["one font name of spaces on many paragraphs and headings", `[...many(4000, () => ({ name: "P", parent: 2, style: ["visible", "1", "rgba(0, 0, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", spaces] })), ...many(4000, () => ({ name: "H2", parent: 2, style: ["visible", "1", "rgba(0, 0, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", spaces] }))]`, `if (page.brand.fonts.body || page.brand.fonts.heading) throw new Error("a font of spaces");`],
     ["one JSON-LD of many links of slashes", `[{ name: "SCRIPT", parent: 1, attrs: { type: "application/ld+json" } }, { name: "#text", parent: 3, text: JSON.stringify({ sameAs: many(7400, () => slashes) }) }]`, ""],
     ["many titles of spaces", `[...many(20000, () => ({ name: "TITLE", parent: 1 })), ...many(20000, (i) => ({ name: "#text", parent: 3 + i, text: spaces }))]`, ""],
     ["the same JSON-LD in many scripts", `[...many(3000, () => ({ name: "SCRIPT", parent: 1, attrs: { type: "application/ld+json" } })), ...many(3000, (i) => ({ name: "#text", parent: 3 + i, text: block }))]`, ""],
@@ -374,6 +376,20 @@ test("a page built to keep the read of its snapshot busy holds neither the threa
         if (err.message !== "https://acme.test/ is too large to read, so no kit was made.") throw err;
       },
     );
+  `);
+  // A link is worked out once, however many elements and JSON-LD entries share it.
+  endsInTime(`
+    let parsed = 0;
+    const { URL: Real } = globalThis;
+    globalThis.URL = class extends Real { constructor(...args) { super(...args); parsed++; } };
+    const { readSnapshot } = require(lib + "/logos.js");
+    const href = "https://x.com/acme";
+    const strings = ["", "HTML", "A", "href", href, "SCRIPT", "#text", "type", "application/ld+json", JSON.stringify({ sameAs: Array(2000).fill(href) })];
+    const anchors = Array.from({ length: 2000 }, () => 2);
+    const snap = { strings, documents: [{ baseURL: 0, documentURL: 0, nodes: { nodeName: [1, 5, 6, ...anchors], parentIndex: [-1, 0, 1, ...anchors.map(() => 0)], attributes: [[], [7, 8], [], ...anchors.map(() => [3, 4])], nodeValue: [0, 0, 9, ...anchors.map(() => 0)], backendNodeId: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
+    const page = readSnapshot({ snap, pageUrl: "https://acme.test/", pageWidth: 1600, pageHeight: 900, alsoNamed: "" });
+    if (page.links.length !== 1 || page.links[0].url !== href) throw new Error(JSON.stringify(page.links));
+    if (parsed > 50) throw new Error("parsed " + parsed + " times");
   `);
   // And what comes back is what the read found, under a time limit longer
   // than any timer can be.

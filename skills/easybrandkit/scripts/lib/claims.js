@@ -28,7 +28,7 @@ function pageOf({ role, url, readAt, model }) {
     for (const kid of node.kids || []) if (isNode(kid)) visit(kid, node, level + 1);
   };
   if (model && model.tree) visit(model.tree, null, 0);
-  return { role, url, readAt, model, parent, depth, all, texts: new Map() };
+  return { role, url, readAt, model, parent, depth, all, texts: new Map(), regions: new Map() };
 }
 
 // An element's text as a reader gets it: blocks on lines of their own, an
@@ -76,9 +76,24 @@ function* ancestors(page, node) {
 }
 
 // "main" unless the element sits in the page's menu bar ("nav") or footer.
+// Worked out once per element: pickPages asks it of each link on the thread
+// that answers Ctrl-C, and a page can put them under elements nested very deep.
 function regionOf(page, node) {
-  for (let n = node; n; n = page.parent.get(n)) if (n.region) return n.region;
-  return "main";
+  const passed = [];
+  let region = "main";
+  for (let n = node; n; n = page.parent.get(n)) {
+    if (page.regions.has(n)) {
+      region = page.regions.get(n);
+      break;
+    }
+    passed.push(n);
+    if (n.region) {
+      region = n.region;
+      break;
+    }
+  }
+  for (const n of passed) page.regions.set(n, region);
+  return region;
 }
 
 const words = (cls) => String(cls || "").toLowerCase().split(/[\s_-]+/);

@@ -233,7 +233,7 @@ function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
   const pathIn = once(pathOf);
   const fileIn = once((urlPath) => urlPath.split("/").pop());
   const thirdPartyPath = matches(THIRD_PARTY);
-  const logoPath = matches(LOGO_WORD);
+  const saysLogo = matches(LOGO_WORD);
   const layoutIndex = new Map();
   doc.layout.nodeIndex.forEach((nodeIndex, li) => layoutIndex.set(nodeIndex, li));
   const boxOf = (i) => {
@@ -282,8 +282,9 @@ function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
     imageUrls.add(url);
     images.push({ property, url });
   };
+  const linkOf = once((raw) => brandLink(raw, base));
   const addLink = (raw, from) => {
-    const link = brandLink(raw, base);
+    const link = linkOf(raw);
     if (!link || linkUrls.has(link.url)) return;
     linkUrls.add(link.url);
     links.push({ ...link, from });
@@ -373,7 +374,10 @@ function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
   };
 
   const backgroundOf = nearest(parents, (p) => cssColorToHex(styleOf(p, 2)));
-  const brandInFile = once((file) => brand.some((token) => file.toLowerCase().includes(token)));
+  const namesBrand = once((text) => {
+    const lower = text.toLowerCase();
+    return brand.some((token) => lower.includes(token));
+  });
   const candidates = [];
   names.forEach((name, i) => {
     const own = attrs(i);
@@ -396,7 +400,7 @@ function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
     const srcPath = pathIn(src);
     let where = "page";
     let homeLink = kind === "css" && name === "A" && isHomeHref(own.href);
-    let linkLabel = "";
+    let linkLabels = null;
     let thirdParty = namedThirdParty(own) || thirdPartyPath(srcPath);
     for (let p = i, depth = 0; p >= 0 && depth < 60; p = parents[p], depth++) {
       if (p !== i) {
@@ -417,8 +421,8 @@ function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
           if (headerLike && by <= 120 && bh <= 400) where = "header";
           else if (footerLike && by + bh >= pageHeight * 0.9 - 50) where = "footer";
         }
-        if (names[p] === "A" && !linkLabel) {
-          linkLabel = `${a["aria-label"] || ""} ${a.title || ""} `;
+        if (names[p] === "A" && !linkLabels) {
+          linkLabels = [a["aria-label"] || "", a.title || ""];
           homeLink = homeLink || isHomeHref(a.href);
         }
         if (depth < 8 && namedThirdParty(a)) thirdParty = true;
@@ -430,11 +434,11 @@ function readSnapshot({ snap, pageUrl, pageWidth, pageHeight, alsoNamed }) {
     // and in the file's name; class names often carry a site-wide prefix.
     // Not in the folders above the file: a product page under /things/
     // keeps every picture there, the press logos too, and Apple's logo came
-    // back as a Things logo.
-    const labels = `${own.alt || ""} ${own.title || ""} ${own["aria-label"] || ""}`;
-    const named = `${labels} ${linkLabel}`.toLowerCase();
-    const brandHit = brand.some((token) => named.includes(token)) || brandInFile(fileIn(srcPath));
-    const logoHit = LOGO_WORD.test(`${labels} ${own.class || ""} ${own.id || ""}`) || logoPath(srcPath);
+    // back as a Things logo. Asked of each text by itself, since neither looks
+    // for anything with a space in it.
+    const labels = [own.alt || "", own.title || "", own["aria-label"] || ""];
+    const brandHit = [...labels, ...(linkLabels || [])].some(namesBrand) || namesBrand(fileIn(srcPath));
+    const logoHit = [...labels, own.class || "", own.id || ""].some(saysLogo) || saysLogo(srcPath);
     const keep =
       where === "header" ? homeLink || brandHit || logoHit
       : where === "footer" ? homeLink || brandHit
@@ -513,7 +517,7 @@ function brandLook(names, parents, roleOf, boxOf, styleOf, pageWidth, pageHeight
     if (!tally.has(role)) tally.set(role, new Map());
     tally.get(role).set(hex, (tally.get(role).get(hex) || 0) + weight);
   };
-  const family = (css) => plainText(String(css || "").split(",")[0].replace(/["']/g, ""), 200);
+  const family = once((css) => plainText(String(css || "").split(",")[0].replace(/["']/g, ""), 200));
   const fonts = {};
   let header = "";
   let footer = "";
