@@ -528,17 +528,21 @@ async function openPage(base, { width, height }) {
 
 // What the tab's own page came from, kept up to date as the page moves on:
 // the status the server last answered its document with and that address,
-// after any redirect, and the address of a page the browser could not open
-// and shows its own error page for. Frames inside the page do not count. The
-// bodies of the responses are not wanted, so little of them is kept.
+// after any redirect, the address of a page the browser could not open and
+// shows its own error page for, and whether the page has moved on to
+// about:blank, as scripts that guard against DevTools make it do. Frames
+// inside the page do not count. The bodies of the responses are not wanted,
+// so little of them is kept.
 async function watchAnswer(cdp) {
   const { frameTree } = await cdp.send("Page.getFrameTree");
-  const answer = { status: 0, url: "", unreachable: "" };
+  const answer = { status: 0, url: "", unreachable: "", blank: false };
   cdp.on("Network.responseReceived", ({ type, frameId, response }) => {
     if (type === "Document" && frameId === frameTree.frame.id && response) Object.assign(answer, { status: response.status, url: response.url });
   });
   cdp.on("Page.frameNavigated", ({ frame }) => {
-    if (!frame.parentId) answer.unreachable = /^chrome-error:/.test(frame.url) ? frame.unreachableUrl || frame.url : "";
+    if (frame.parentId) return;
+    answer.unreachable = /^chrome-error:/.test(frame.url) ? frame.unreachableUrl || frame.url : "";
+    answer.blank = frame.url === "about:blank";
   });
   await cdp.send("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 100_000 });
   return answer;
@@ -552,7 +556,7 @@ async function watchAnswer(cdp) {
 // to cdp.answer too.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
-  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "" });
+  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false });
   let errorText;
   try {
     ({ errorText } = await cdp.send("Page.navigate", { url }));

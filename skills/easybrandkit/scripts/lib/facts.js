@@ -330,7 +330,7 @@ async function readFactPages(cdp, home, log) {
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
   // A page the server answered with an error, or that the browser could not
   // open, also after it has moved on: its text is not the site's page.
-  const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : "");
+  const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "");
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });

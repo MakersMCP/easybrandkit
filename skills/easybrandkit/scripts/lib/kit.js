@@ -156,23 +156,24 @@ async function captureFirstScreen(cdp, dir) {
 
 const BROWSER_GONE = "The browser was closed or crashed before the kit was done, so no kit was made. Try again.";
 
-const errorPage = ({ status, unreachable }) => status >= 400 || Boolean(unreachable);
+const errorPage = ({ status, unreachable, blank }) => status >= 400 || Boolean(unreachable) || blank;
 
 // Throws when the tab does not show the site's own page: a bot check, whatever
-// status it came with, or a page the server answered with an error or the
-// browser could not open. A CDN's 5xx page or a site's own 404 has a logo,
-// colors and fonts of its own, and a kit made from them would pass for the
-// brand's.
+// status it came with, a page the server answered with an error or the
+// browser could not open, or a blank page it moved on to. A CDN's 5xx page or
+// a site's own 404 has a logo, colors and fonts of its own, and a kit made
+// from them would pass for the brand's.
 function refuseOtherPage(cdp, url, pageUrl, challenge) {
   if (challenge) {
     throw new Error(`${pageUrl} answered with a bot check ("${challenge}") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`);
   }
-  const { status, url: at, unreachable } = cdp.answer;
+  const { status, url: at, unreachable, blank } = cdp.answer;
   if (status >= 400) {
     const led = at && at.split("#")[0] !== url.split("#")[0];
     throw new Error(`${led ? `${url} led to ${at}, which` : url} answered ${status}, so no kit was made.`);
   }
   if (unreachable) throw new Error(`${url} led to ${unreachable}, which could not be opened, so no kit was made.`);
+  if (blank) throw new Error(`${url} moved on to a blank page, so no kit was made.`);
 }
 
 async function readPage(url, dir, log, alsoNamed = "", facts = false) {
