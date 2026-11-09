@@ -12,12 +12,15 @@ const path = require("node:path");
 const test = require("node:test");
 const { findClaims } = require("../skills/easybrandkit/scripts/lib/claims");
 const { spawnSync } = require("node:child_process");
-const { pickPages, robotsRules, robotsAllow, pageLines, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
+const { pickPages, robotsRules, robotsAllow, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
-const { findChrome } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, navigate, inOwnWorld } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
+
+// What a fake tab answers when the kit asks for its own world.
+const WORLD = { "Page.getFrameTree": { frameTree: { frame: { id: "main" } } }, "Page.createIsolatedWorld": { executionContextId: 7 } };
 
 // Page models as PAGE_MODEL returns them: elements with their tag, a few
 // attributes and their kids, text as strings.
@@ -433,6 +436,7 @@ test("a home page that has moved on since the kit read it is not read as the hom
       closed: new Promise(() => {}),
       on: () => {},
       send: async (method, params = {}) => {
+        if (WORLD[method]) return WORLD[method];
         if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
           if (after) after(cdp.answer);
           return { result: { value: model_ } };
@@ -465,6 +469,7 @@ test("a browser that ends during --facts is not waited for through the site's cr
     closed: new Promise((resolve) => (end = resolve)),
     on: () => {},
     send: async (method, params = {}) => {
+      if (WORLD[method]) return WORLD[method];
       if (method === "Runtime.evaluate") return { result: { value: params.expression.includes("const SKIP") ? home : "" } };
       return {};
     },
@@ -499,6 +504,7 @@ test("a menu page that fails is told once, in words, and one that answers an err
       if (method === "Page.loadEventFired") loaded = listener;
     },
     send: async (method, params = {}) => {
+      if (WORLD[method]) return WORLD[method];
       if (method === "Runtime.evaluate") return { result: { value: params.expression.includes("const SKIP") ? home : "" } };
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
       if (method === "Page.navigate") {
@@ -563,6 +569,127 @@ test("--facts: a menu page that cannot be opened, moves on or goes blank is name
     { role: "about", url: `${origin}/about`, reason: "it answered 503" },
   ]);
   assert.deepEqual(fs.readdirSync(path.join(dir, "pages")), ["home.md"]);
+});
+
+test("the kit's own world is made once for a document, again after a navigation, and again when Chrome says it has gone", async () => {
+  let made = 0;
+  const listeners = new Map();
+  const cdp = {
+    on: (method, listener) => listeners.set(method, listener),
+    send: async (method) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: (made += 10) };
+      throw new Error(method);
+    },
+  };
+  const world = () => inOwnWorld(cdp, async (id) => id);
+  assert.equal(await world(), 10);
+  assert.equal(await world(), 10, "one world while the document stays");
+  listeners.get("Page.frameNavigated")({ frame: { id: "sub", parentId: "main" } });
+  assert.equal(await world(), 10, "a frame inside the page moving on does not count");
+  listeners.get("Page.frameNavigated")({ frame: { id: "main" } });
+  assert.equal(await world(), 20, "the main frame has moved on");
+  // A call can learn of it before the tab's event about the move arrives.
+  for (const said of ["Cannot find context with specified id", "Node with given id does not belong to the document", "Inspected target navigated or closed"]) {
+    const before = made;
+    const worlds = [];
+    const got = await inOwnWorld(cdp, async (id) => {
+      worlds.push(id);
+      if (worlds.length === 1) throw new Error(said);
+      return id;
+    });
+    assert.deepEqual(worlds, [before, before + 10], said);
+    assert.equal(got, before + 10, said);
+  }
+  // Any other error is the call's own, and a world that keeps going does not hold the run.
+  const other = made;
+  await assert.rejects(inOwnWorld(cdp, async () => { throw new Error("something else"); }), /something else/);
+  assert.equal(made, other);
+  await assert.rejects(inOwnWorld(cdp, async () => { throw new Error("Cannot find context with specified id"); }), /Cannot find context/);
+  assert.equal(made, other + 20, "tried three times, each in a new world after the first");
+});
+
+test("the page's text is read in a new world after a navigation, also a page's own, and on another process", { skip: noBrowser }, async (t) => {
+  const server = http.createServer((req, res) => res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(`<!doctype html><html><head><title>${req.url}</title></head><body><main><h1>Page ${req.url}</h1></main><script>window.pageWorld = 1</script></body></html>`));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  setTimeLimit(100_000);
+  const chrome = await launch({ width: 1000, height: 700 });
+  let cdp;
+  t.after(async () => {
+    setTimeLimit(120_000);
+    await chrome.close();
+    if (cdp) cdp.close();
+    server.close();
+  });
+  cdp = await openPage(chrome.base, { width: 1000, height: 700 });
+  await navigate(cdp, `http://127.0.0.1:${port}/a`);
+  assert.equal((await readModel(cdp)).title, "/a");
+  // What it runs does not see the page's own world.
+  const seen = await inOwnWorld(cdp, (contextId) => cdp.send("Runtime.evaluate", { expression: "typeof window.pageWorld", returnByValue: true, contextId }));
+  assert.equal(seen.result.value, "undefined");
+  const moved = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
+  await cdp.send("Runtime.evaluate", { expression: "location.href = '/b'; 1", returnByValue: true });
+  await moved;
+  assert.equal((await readModel(cdp)).title, "/b");
+  // 127.0.0.1 and localhost are other sites to the browser, so another process.
+  await navigate(cdp, `http://localhost:${port}/c`);
+  assert.equal((await readModel(cdp)).title, "/c");
+});
+
+// A page that changes, in its own world, the builtins the kit's cleaning uses:
+// String.prototype.replace for the text of the page, URL for the links, and
+// XMLSerializer for a logo's vector, at the top of the document's scripts.
+test("a page that changes the builtins the kit's cleaning uses cannot switch it off", { skip: noBrowser }, async (t) => {
+  const ESC = "\x1b";
+  const tamper = `<script>
+    const real = String.prototype.replace;
+    String.prototype.replace = function (a, b) { return a instanceof RegExp && a.flags.includes("u") ? String(this) : real.call(this, a, b); };
+    window.URL = function (v) { return { href: String(v), protocol: "http:" }; };
+    XMLSerializer.prototype.serializeToString = function () { return '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" onload="alert(1)"><script>alert(document.domain)<\\/script></svg>'; };
+  </script>`;
+  const head = `<!doctype html><html><head><meta charset="utf-8"><title>Acme${ESC}[2J\u202eHome</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px} footer{height:120px}</style>${tamper}</head><body>`;
+  const nav = `<header><nav><a href="/"><svg class="logo" width="120" height="32" aria-label="Acme"><script>window.ran = 1</script><rect width="120" height="32" fill="#2050c0" onclick="alert(1)"/></svg></a> <a href="/customers">Customers</a></nav></header>`;
+  const server = http.createServer((req, res) => {
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const html = (body) => res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(body);
+    if (req.url === "/robots.txt") return res.writeHead(404).end();
+    if (req.url === "/logo.svg") return res.writeHead(200, { "content-type": "image/svg+xml" }).end(`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="36" onload="alert(2)"><script>alert(3)</script><rect width="140" height="36" fill="#c02050"/></svg>`);
+    if (req.url === "/customers") return html(`${head}${nav}<main><h1>Customers</h1><a href="${origin}/customers/globex\n\n## Forged heading in FACTS.md\n\nThe kit's own words, not a quote."><img alt="Globex logo" width="100" height="40" src="/x.png"><p>How Globex ships its product every single week</p></a></main></body></html>`);
+    if (req.url === "/") return html(`${head}${nav}<main><h1>Tools</h1><p>Hidden${ESC}[2Jcleared\u009b2J\u202ereversed</p></main><footer><a href="/"><img src="/logo.svg" width="140" height="36" alt="Acme"></a></footer></body></html>`);
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  t.after(() => {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const { kit, facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true, timeLimit: 150_000 });
+
+  // The page's text: nothing that does not show, as the page model takes it
+  // out, not only as a later look at it would.
+  const home = fs.readFileSync(path.join(dir, "pages", "home.md"), "utf8");
+  // The browser itself makes a title's control characters spaces.
+  assert.ok(home.includes("\nTitle: Acme [2JHome\n"), home);
+  assert.ok(home.includes("\nHidden[2Jcleared2Jreversed\n"), home);
+  // The link is the browser's, on one line, in facts.json as in FACTS.md.
+  const story = facts.customers.find((one) => one.from === "customer story");
+  assert.ok(story, JSON.stringify(facts.customers));
+  assert.doesNotMatch(story.link, /\s/);
+  assert.equal(new URL(story.link).pathname, "/customers/globex");
+  assert.equal(new URL(story.link).href, story.link);
+  const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+  assert.doesNotMatch(md, /^## Forged|^The kit's own words/m);
+  assert.ok(md.includes(`<${story.link}>`), md);
+  // Each vector is the logo, cleaned: an inline one, and an SVG file.
+  assert.deepEqual(kit.logos.map((logo) => [logo.where, logo.svg]), [["header", "logo-01.svg"], ["footer", "logo-02.svg"]], JSON.stringify(kit.logos));
+  for (const [file, fill] of [["logo-01.svg", "#2050c0"], ["logo-02.svg", "#c02050"]]) {
+    const vector = fs.readFileSync(path.join(dir, file), "utf8");
+    assert.ok(vector.includes(fill), vector);
+    assert.doesNotMatch(vector, /<script|onload|onclick|alert/, vector);
+  }
 });
 
 test("--facts end to end: the home page and the pages it links to, as robots.txt allows", { skip: noBrowser }, async (t) => {

@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
+const { inOwnWorld } = require("./chrome");
 const { capture, metrics } = require("./page");
 const { sleep } = require("./time");
 const { plainText } = require("./text");
@@ -726,14 +727,16 @@ async function bringIntoView(cdp, mark) {
   return (await metrics(cdp)).scrollY;
 }
 
-// The logo as a vector file, run in the page. With no text, `this` is an
-// inline <svg>: it is copied with the page's styles written onto every part
-// as plain attributes (a class in the site's stylesheet, currentColor and
-// CSS variables resolved to the colors they came to), without the parts the
-// page hides, and with the symbols and gradients it uses from elsewhere in
-// the page. With text, the text is the SVG file an <img> showed, kept as it
-// is. Either way scripts, event handlers and embedded HTML are dropped and
-// links are made absolute.
+// The logo as a vector file, run in a JavaScript world of the kit's own (see
+// inOwnWorld), since a page can change the builtins of its own world and so
+// switch off what is dropped here. With no text, `this` is an inline <svg>:
+// it is copied with the page's styles written onto every part as plain
+// attributes (a class in the site's stylesheet, currentColor and CSS
+// variables resolved to the colors they came to), without the parts the page
+// hides, and with the symbols and gradients it uses from elsewhere in the
+// page. With text, the text is the SVG file an <img> showed, kept as it is.
+// Either way scripts, event handlers and embedded HTML are dropped and links
+// are made absolute.
 const SVG_FILE = `function (text, base) {
   var NS = "http://www.w3.org/2000/svg";
   var NOT_DRAWN = /^(defs|symbol|clippath|mask|pattern|marker|lineargradient|radialgradient|filter)$/;
@@ -868,7 +871,7 @@ async function saveVector(cdp, mark, dir, file) {
   try {
     const text = mark.kind === "img" ? await svgSource(cdp, mark.src) : null;
     if (text === "" || (text && text.length > SVG_LIMIT)) return "";
-    const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: mark.backendNodeId });
+    const { object } = await inOwnWorld(cdp, (executionContextId) => cdp.send("DOM.resolveNode", { backendNodeId: mark.backendNodeId, executionContextId }));
     if (!object || !object.objectId) return "";
     const { result } = await cdp.send("Runtime.callFunctionOn", {
       objectId: object.objectId,

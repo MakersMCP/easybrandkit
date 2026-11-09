@@ -610,4 +610,43 @@ async function navigate(cdp, url) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, openPage, navigate, pageFailed };
+// A JavaScript world of the kit's own in the tab's main frame. It sees the
+// page's document but none of what the page's scripts have done to their own
+// world, so what runs in it has the browser's own URL, String.prototype.replace
+// and XMLSerializer. A navigation destroys it with its document. Each process
+// of the browser numbers its worlds afresh, so the number of a world that has
+// gone can come to name another one, the page's own among them: it is forgotten
+// the moment the main frame has moved on.
+async function ownWorld(cdp) {
+  if (cdp.world) return cdp.world;
+  if (!cdp.worldWatched) {
+    cdp.worldWatched = true;
+    cdp.on("Page.frameNavigated", ({ frame }) => {
+      if (!frame.parentId) cdp.world = 0;
+    });
+  }
+  const { frameTree } = await cdp.send("Page.getFrameTree");
+  const { executionContextId } = await cdp.send("Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: "easybrandkit" });
+  cdp.world = executionContextId;
+  return cdp.world;
+}
+
+// What Chrome says when the world a call names has gone with its document,
+// which the call can learn before the tab's event about the move arrives.
+const WORLD_GONE = /Cannot find context|does not belong to the document|navigated or closed/;
+
+// Calls use with the number of the kit's own world, in a new world when a
+// navigation has destroyed the last one. What the page's scripts can change
+// is never run instead: a world that cannot be made fails the call.
+async function inOwnWorld(cdp, use) {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await use(await ownWorld(cdp));
+    } catch (err) {
+      if (tries === 3 || !WORLD_GONE.test(err.message)) throw err;
+      cdp.world = 0;
+    }
+  }
+}
+
+module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, openPage, navigate, inOwnWorld, pageFailed };

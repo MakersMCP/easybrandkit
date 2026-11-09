@@ -18,7 +18,7 @@
 const fs = require("fs");
 const path = require("path");
 const { Worker } = require("worker_threads");
-const { navigate } = require("./chrome");
+const { navigate, inOwnWorld } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
@@ -26,12 +26,13 @@ const { sleep, timeLeft } = require("./time");
 const { noControls } = require("./text");
 const version = require("./version");
 
-// The page as data, read in the page once it has settled: the elements a
-// visitor can see, each with its tag, the few attributes the rules read and
-// its text, plus the page's JSON-LD. Scripts, styles, frames and form fields
-// are left out, and so are characters that do not show (control characters,
-// zero width, bidi controls, Unicode tags), which can hide words from a
-// reader.
+// The page as data, read once it has settled, in a JavaScript world of the
+// kit's own (see inOwnWorld), since a page can change the builtins of its
+// own world and so switch off what is done here: the elements a visitor can
+// see, each with its tag, the few attributes the rules read and its text,
+// plus the page's JSON-LD. Scripts, styles, frames and form fields are left
+// out, and so are characters that do not show (control characters, zero
+// width, bidi controls, Unicode tags), which can hide words from a reader.
 const PAGE_MODEL = `(() => {
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO", "SELECT", "TEXTAREA", "INPUT", "HEAD"]);
   const INVISIBLE = /[\\u0000-\\u0008\\u000E-\\u001F\\u007F-\\u009F\\u00AD\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]|[\\u{E0000}-\\u{E007F}]/gu;
@@ -168,7 +169,7 @@ const SETTLE = `(() => {
 const FIGURES = `(document.body ? document.body.innerText : "").match(/\\d[\\d.,]*/g)?.join(" ") || ""`;
 
 async function evaluate(cdp, expression, timeoutMs = 20_000) {
-  const { result, exceptionDetails } = await cdp.send("Runtime.evaluate", { expression, returnByValue: true }, timeoutMs);
+  const { result, exceptionDetails } = await inOwnWorld(cdp, (contextId) => cdp.send("Runtime.evaluate", { expression, returnByValue: true, contextId }, timeoutMs));
   if (exceptionDetails) throw new Error((exceptionDetails.exception && exceptionDetails.exception.description) || exceptionDetails.text || "page script failed");
   return result ? result.value : undefined;
 }
