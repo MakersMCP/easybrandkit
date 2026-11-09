@@ -258,6 +258,15 @@ async function launch({ width, height }) {
   const temp = os.tmpdir();
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
+  // A download that starts while no connection is refusing it (see openPage)
+  // goes into the throwaway profile and is removed with it, not into the
+  // Downloads folder of the user the browser runs as.
+  try {
+    fs.mkdirSync(path.join(profile, "Default"));
+    fs.writeFileSync(path.join(profile, "Default", "Preferences"), JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false } }));
+  } catch {
+    // The refusal still holds.
+  }
   // Chrome on Linux has its crash handler write the reports of its processes
   // into the user's own browser's folder (~/.config/google-chrome/Crash
   // Reports), where nothing removes them; Ctrl-\ asks for one from each of
@@ -527,7 +536,9 @@ async function openPage(base, { width, height }) {
   const target = await res.json();
   const cdp = await connect(target.webSocketDebuggerUrl);
   // A site can make a browser save a file, into the Downloads folder of the
-  // user it runs as, where nothing removes it. This browser saves none.
+  // user it runs as, where nothing removes it. This browser saves none, but
+  // only as long as this connection is open: it goes back to saving them the
+  // moment the connection closes, so readPage closes it last.
   await cdp.send("Browser.setDownloadBehavior", { behavior: "deny" }).catch(() => {});
   await cdp.send("Page.enable");
   cdp.answer = await watchAnswer(cdp);

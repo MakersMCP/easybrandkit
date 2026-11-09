@@ -97,7 +97,7 @@ A run that fails, is refused, or is stopped with Ctrl-C or a kill leaves the fol
 
 Installed globally (`npm install -g easybrandkit`), the command is `easybrandkit`. npx keeps the copy an earlier run fetched, so `npx easybrandkit@latest` is how you get a newer version. To stop a run started with npx, press Ctrl-C or send the signal to its whole process group (`kill -- -<pgid>`). A kill sent to the npx process alone may not reach easybrandkit: where `/bin/sh` is dash, as on Debian and Ubuntu, the run goes on and puts its kit in place if it ends well.
 
-It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and nothing is downloaded: easybrandkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile. A download a page tries to start is refused, so nothing lands in your Downloads folder.
+It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and nothing is downloaded: easybrandkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile. A download a page tries to start is refused, or lands in that profile and goes with it, so nothing reaches your Downloads folder.
 
 ### If a run is killed outright
 

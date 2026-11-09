@@ -1396,6 +1396,17 @@ test("a store listing whose website fails keeps what the listing gave and says s
   assert.equal(fs.existsSync(gone), false);
 });
 
+// kit.js loaded afresh, for what the test has mocked of the modules it takes
+// its functions from.
+function reloadedKit() {
+  const file = require.resolve("../skills/easybrandkit/scripts/lib/kit");
+  const loaded = require.cache[file];
+  delete require.cache[file];
+  const reloaded = require(file);
+  require.cache[file] = loaded;
+  return reloaded;
+}
+
 // kit.js with a browser tab whose calls of method time out, for the first
 // stalled tabs opened or for all: a real wait for one takes half a minute.
 function withStalledTab(t, method, stalled = Infinity) {
@@ -1409,12 +1420,7 @@ function withStalledTab(t, method, stalled = Infinity) {
     cdp.send = (name, ...rest) => (name === method ? Promise.reject(Object.assign(new Error(`${name} timed out`), { timedOut: true })) : send(name, ...rest));
     return cdp;
   });
-  const file = require.resolve("../skills/easybrandkit/scripts/lib/kit");
-  const loaded = require.cache[file];
-  delete require.cache[file];
-  const reloaded = require(file);
-  require.cache[file] = loaded;
-  return reloaded.makeKit;
+  return reloadedKit().makeKit;
 }
 
 test("a tab that stops answering is told in words, and more time is advised only to a run that used up its own", { skip: noBrowser }, async (t) => {
@@ -1453,14 +1459,17 @@ test("a tab that stops answering is told in words, and more time is advised only
   assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its header and colors can differ from the home page's.`]);
 });
 
-test("a site cannot make the browser save a file in the user's Downloads folder", { skip: noBrowser || (process.platform !== "linux" && "the Downloads folder follows HOME on Linux only") }, async (t) => {
-  let asked = 0;
-  const site = await serve((req, res) => {
-    if (req.url === "/report.bin") {
-      asked++;
+// A site whose page tries to save a file every 25 ms for as long as it is
+// open, and a HOME of the test's own, whose Downloads folder a browser saves
+// into on Linux.
+async function savingSite(t) {
+  const site = { asked: 0 };
+  const served = await serve((req, res) => {
+    if (req.url.startsWith("/report.bin")) {
+      site.asked++;
       return res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": "attachment; filename=report.bin" }).end(Buffer.alloc(2048, 65));
     }
-    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>setTimeout(() => { location.href = "/report.bin"; }, 300)</script></body>`));
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>let n = 0; setInterval(() => { const a = document.createElement("a"); a.href = "/report.bin?" + ++n; a.download = "report-" + n + ".bin"; document.body.appendChild(a); a.click(); a.remove(); }, 25)</script></body>`));
   });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const env = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DOWNLOAD_DIR: process.env.XDG_DOWNLOAD_DIR };
@@ -1469,7 +1478,7 @@ test("a site cannot make the browser save a file in the user's Downloads folder"
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
-    site.server.close();
+    served.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
   const home = path.join(parent, "home");
@@ -1477,10 +1486,80 @@ test("a site cannot make the browser save a file in the user's Downloads folder"
   process.env.HOME = home;
   delete process.env.XDG_CONFIG_HOME;
   delete process.env.XDG_DOWNLOAD_DIR;
-  const { kit } = await makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
+  return Object.assign(site, { origin: served.origin, parent, downloads: () => filesOf(path.join(home, "Downloads")) });
+}
+
+const LINUX_HOME = noBrowser || (process.platform !== "linux" && "the Downloads folder follows HOME on Linux only");
+
+test("a page that tries to save files for the whole run leaves nothing in the user's Downloads folder", { skip: LINUX_HOME }, async (t) => {
+  const site = await savingSite(t);
+  const { kit } = await makeKit(site.origin, { dir: path.join(site.parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], "the page stays where it is");
-  assert.ok(asked >= 1, "the page asked for the file");
-  assert.deepEqual(filesOf(path.join(home, "Downloads")), []);
+  assert.ok(site.asked >= 1, "the page asked for the file");
+  assert.deepEqual(site.downloads(), []);
+});
+
+test("the browser is told to end before the tab's connection closes, since that connection is what refuses downloads", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const realLaunch = chrome.launch;
+  const realOpen = chrome.openPage;
+  const order = [];
+  t.mock.method(chrome, "launch", async (...args) => {
+    const browser = await realLaunch(...args);
+    const close = browser.close;
+    browser.close = async () => {
+      order.push("browser told to end");
+      await close();
+      order.push("browser ended");
+    };
+    return browser;
+  });
+  t.mock.method(chrome, "openPage", async (...args) => {
+    const cdp = await realOpen(...args);
+    const close = cdp.close;
+    cdp.close = () => {
+      order.push("connection closed");
+      close();
+    };
+    return cdp;
+  });
+  await reloadedKit().makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(order, ["browser told to end", "browser ended", "connection closed"]);
+});
+
+test("a download no connection refuses goes into the throwaway profile, not the user's Downloads folder", { skip: LINUX_HOME }, async (t) => {
+  const site = await savingSite(t);
+  const temp = ownTemp(t);
+  if (!temp) return t.skip("the temp folder is too deep for a browser");
+  const tmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = temp;
+  t.after(() => {
+    if (tmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = tmpdir;
+  });
+  // The refusal taken back as soon as the tab is open.
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const realOpen = chrome.openPage;
+  t.mock.method(chrome, "openPage", async (...args) => {
+    const cdp = await realOpen(...args);
+    await cdp.send("Browser.setDownloadBehavior", { behavior: "default" });
+    return cdp;
+  });
+  let inProfile = [];
+  const look = () => {
+    const profile = fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"));
+    inProfile = fs.readdirSync(path.join(temp, profile, "Downloads"));
+  };
+  await reloadedKit().makeKit(site.origin, { dir: path.join(site.parent, "kit"), stores: false, log: (line) => line === "Drawing the card" && look() });
+  assert.ok(inProfile.length >= 1, "the page's files went into the profile");
+  assert.deepEqual(site.downloads(), []);
+  assert.deepEqual(fs.readdirSync(temp), [], "and went with it");
 });
 
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {

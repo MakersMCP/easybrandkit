@@ -258,8 +258,10 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     }
     throw err;
   } finally {
-    if (cdp) cdp.close();
+    // In this order: the browser refuses downloads only as long as this
+    // connection is open, and the page goes on until the browser has ended.
     await chrome.close();
+    if (cdp) cdp.close();
   }
 }
 
