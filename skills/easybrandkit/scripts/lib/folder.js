@@ -178,9 +178,14 @@ function checkDir(dir, { facts = false, saving = false } = {}) {
   if (!old && !saving) {
     // Another run may be putting its kit in place right now, with brand.json
     // or every file of the earlier kit aside: this run reads the folder
-    // again when it saves. Or it was done between the two looks.
-    if (swapping(target)) return [...KIT_NAMES];
-    old = readKit(target);
+    // again when it saves. Or it was done between two looks, and the next
+    // run has just begun, so the folder counts as left in pieces only when
+    // two reads find no brand.json and no lock is seen around them.
+    for (let reads = 0; !old && reads < 2; reads++) {
+      if (swapping(target)) return [...KIT_NAMES];
+      old = readKit(target);
+    }
+    if (!old && swapping(target)) return [...KIT_NAMES];
   }
   if (!old) {
     // A run killed while its files moved can leave the earlier kit aside,

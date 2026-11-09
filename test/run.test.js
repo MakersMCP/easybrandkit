@@ -510,6 +510,46 @@ test("of two runs that find a lock left by a run that has ended, one removes it,
   assert.deepEqual(filesOf(dir), [`BRAND.md ${hash("A")}`, `_brand.yml ${hash("A")}`, `brand.json ${hash(kitOf("A", ["logo-01.png"])["brand.json"])}`, `card.png ${hash("A")}`, `logo-01.png ${hash("A")}`]);
 });
 
+test("a folder read between two other runs' saves is not taken for one a killed run left in pieces", (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, kitOf("seed", ["logo-01.png"]));
+  // The part folder of a run at work, with the earlier kit's brand.json aside.
+  writeFiles(path.join(dir, `.easybrandkit-part-${livePid(t)}-0a1b2c3d`), { ".earlier/brand.json": kitOf("earlier", ["logo-01.png"])["brand.json"] });
+  const brand = path.join(dir, "brand.json");
+  const lock = path.join(dir, LOCK);
+  const live = JSON.stringify({ pid: livePid(t), host: os.hostname(), token: "c0ffee00" });
+  const read = fs.readFileSync;
+  const reading = (answer) => {
+    let reads = 0;
+    return t.mock.method(fs, "readFileSync", function (file, ...rest) {
+      if (file === brand && answer(++reads)) throw Object.assign(new Error(`ENOENT: no such file or directory, open '${file}'`), { code: "ENOENT", syscall: "open", path: file });
+      return read.call(this, file, ...rest);
+    });
+  };
+  // Away on the first read, and back on the next: that run has finished.
+  let mock = reading((reads) => reads === 1);
+  assert.ok(checkDir(dir).includes("logo-01.png"));
+  mock.mock.restore();
+  // A lock comes as brand.json is found away, on any of the reads: a run is
+  // at work, and this run reads the folder again when it saves.
+  for (const nth of [1, 2, 3]) {
+    mock = reading((reads) => {
+      if (reads === nth) fs.writeFileSync(lock, live);
+      return true;
+    });
+    const names = checkDir(dir);
+    mock.mock.restore();
+    fs.unlinkSync(lock);
+    assert.ok(names.includes("brand.json"), `read ${nth}`);
+    assert.equal(names.includes("logo-01.png"), false, `read ${nth}: told without reading a brand.json`);
+  }
+  // With no lock around any read, the folder is one a killed run left.
+  mock = reading(() => true);
+  assert.throws(() => checkDir(dir), /holds no brand\.json: a run that did not finish putting its kit in place/);
+  mock.mock.restore();
+});
+
 test("a run lets go of its own lock only: one that took its place stays", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
