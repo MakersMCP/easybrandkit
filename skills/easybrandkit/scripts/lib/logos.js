@@ -22,7 +22,7 @@ const { Worker } = require("worker_threads");
 const { inOwnWorld, pageFailed } = require("./chrome");
 const { capture, metrics, nearest } = require("./page");
 const { sleep, outOfTime, timeLeft } = require("./time");
-const { plainText } = require("./text");
+const { plainText, noEndSlashes } = require("./text");
 
 const LOGO_MAX = 6;
 const LOGO_MARGIN = 12;
@@ -144,7 +144,7 @@ function brandLink(raw, base) {
   if (host === "play.google.com" && url.pathname.startsWith("/store/apps/details") && pkg) {
     return { type: "googleplay", url: `https://play.google.com/store/apps/details?id=${pkg}` };
   }
-  const page = url.pathname.replace(/\/+$/, "");
+  const page = noEndSlashes(url.pathname);
   if (!page || /\/(sharer|share|intent|sharearticle|dialog)(\/|\.|$)|\/pin\/create/i.test(page)) return null;
   for (const [pattern, type] of SOCIAL_HOSTS) {
     if (pattern.test(host)) return { type, url: `https://${host}${page}` };

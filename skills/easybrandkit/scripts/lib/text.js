@@ -15,4 +15,12 @@ const noControls = (text) => String(text === undefined || text === null ? "" : t
 // One line, at most max characters, with single spaces between its words.
 const plainText = (text, max = 300) => noControls(text).replace(/\s+/g, " ").trim().slice(0, max).trim();
 
-module.exports = { noControls, plainText };
+// A path without the slashes at its end. A pattern for it starts over at each
+// slash of a run, so a link with a long run in it costs the square of the run.
+function noEndSlashes(text) {
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 47) end--;
+  return text.slice(0, end);
+}
+
+module.exports = { noControls, plainText, noEndSlashes };

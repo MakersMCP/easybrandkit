@@ -14,7 +14,7 @@ const path = require("path");
 const net = require("net");
 const { promises: dns } = require("dns");
 const { timeLeft } = require("./time");
-const { noControls, plainText } = require("./text");
+const { noControls, plainText, noEndSlashes } = require("./text");
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
@@ -71,8 +71,8 @@ function classify(raw) {
     if (/^[A-Z]{2}$/.test(gl)) return { type: "googleplay", id: pkg, hl, gl, url: `https://play.google.com/store/apps/details?id=${pkg}&hl=${hl}&gl=${gl}` };
     return { type: "googleplay", id: pkg, hl, url: `https://play.google.com/store/apps/details?id=${pkg}&hl=${hl}` };
   }
+  const page = noEndSlashes(url.pathname);
   for (const [pattern, type] of PROFILE_HOSTS) {
-    const page = url.pathname.replace(/\/+$/, "");
     if (pattern.test(host) && page) return { type, url: `https://${host}${page}` };
   }
   return null;

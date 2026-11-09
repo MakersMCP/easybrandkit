@@ -312,6 +312,16 @@ test("what a site writes in robots.txt and its links takes no more time than its
     pickPages(model(${link(`home + "pricing"`, `"1".repeat(800000)`)}), home);
     pageLines({ tree: { tag: "p", block: 1, kids: ["1".repeat(800000)] } });
   `);
+  // Many links with a long run of slashes in them, and a page that has moved
+  // itself to such an address.
+  endsInTime(`${require_}
+    const home = "https://acme.test/";
+    const kids = Array.from({ length: 40000 }, () => ({ tag: "a", href: home + "x" + "/".repeat(1960) + "a", kids: ["x"] }));
+    pickPages({ url: home, title: "", jsonLd: [], tree: { tag: "body", block: 1, kids } }, home);
+    const far = home + "x" + "/".repeat(500000) + "a";
+    const none = { tag: "a", href: home + "pricing", kids: ["Pricing"] };
+    pickPages({ url: far, title: "", jsonLd: [], tree: { tag: "body", block: 1, kids: Array.from({ length: 40000 }, () => none) } }, far);
+  `);
   // A link inside a link inside a link, all the page's text at the bottom.
   endsInTime(`${require_}
     const home = "https://acme.test/";

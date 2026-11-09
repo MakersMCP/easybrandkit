@@ -23,7 +23,7 @@ const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
 const { sleep, timeLeft } = require("./time");
-const { noControls, plainText } = require("./text");
+const { noControls, plainText, noEndSlashes } = require("./text");
 const version = require("./version");
 
 // The page as data, read once it has settled, in a JavaScript world of the
@@ -203,9 +203,10 @@ const ROLES = [
 ];
 const PAGE_FILES = ["home", ...ROLES.map(([role]) => role)].map((role) => `${role}.md`);
 
+const siteOf = (url) => url.hostname.toLowerCase().replace(/^www\./, "");
 const hostOf = (raw) => {
   try {
-    return new URL(raw).hostname.toLowerCase().replace(/^www\./, "");
+    return siteOf(new URL(raw));
   } catch {
     return "";
   }
@@ -221,7 +222,8 @@ const LONG_WORDS = 400;
 // menu or the footer, then the shorter address.
 function pickPages(model, home) {
   const page = pageOf({ model });
-  const homePath = new URL(home).pathname.replace(/\/+$/, "");
+  const homePath = noEndSlashes(new URL(home).pathname);
+  const homeSite = hostOf(home);
   const best = new Map();
   for (const node of page.all) {
     if (node.tag !== "a" || !node.href || node.href.length > LONG_LINK || node.hidden) continue;
@@ -230,11 +232,12 @@ function pickPages(model, home) {
     try {
       url = new URL(node.href);
       url.hash = "";
-      last = decodeURIComponent(url.pathname).toLowerCase().split("/").filter(Boolean).pop() || "";
+      const lowered = noEndSlashes(decodeURIComponent(url.pathname).toLowerCase());
+      last = lowered.slice(lowered.lastIndexOf("/") + 1);
     } catch {
       continue;
     }
-    if (hostOf(url.href) !== hostOf(home) || url.pathname.replace(/\/+$/, "") === homePath) continue;
+    if (siteOf(url) !== homeSite || noEndSlashes(url.pathname) === homePath) continue;
     if (/\.(pdf|zip|png|jpe?g|gif|svg|webp|mp4|dmg|exe)$/i.test(url.pathname)) continue;
     const text = textOf(page, node).length > LONG_WORDS ? "" : lineOf(page, node);
     for (const [role, byText, byPath] of ROLES) {

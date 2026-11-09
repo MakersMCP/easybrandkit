@@ -282,8 +282,8 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
 async function readSources(links, dir, log, skip = []) {
   const picked = [];
   for (const type of SOURCE_ORDER.filter((kind) => !skip.includes(kind))) {
-    const source = links.filter((link) => link.type === type).map((link) => classify(link.url)).find(Boolean);
-    if (source) picked.push(source);
+    const link = links.find((one) => one.type === type && classify(one.url));
+    if (link) picked.push(classify(link.url));
   }
   if (!picked.length) return [];
   log(`Reading ${picked.length === 1 ? "1 store listing or profile" : `${Math.min(picked.length, MAX_SOURCES)} store listings and profiles`}`);

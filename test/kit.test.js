@@ -21,7 +21,7 @@ const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../
 const { groundOf, saveVector, readWords } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
-const { noControls, plainText } = require("../skills/easybrandkit/scripts/lib/text");
+const { noControls, plainText, noEndSlashes } = require("../skills/easybrandkit/scripts/lib/text");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
@@ -303,6 +303,8 @@ test("a page's text cannot hold the thread that answers Ctrl-C and the run's own
     ["one long script address on many elements", `many(40000, () => ({ name: "SCRIPT", parent: 1, attrs: { src: long } }))`, ""],
     ["one long address on many images", `many(20000, () => ({ name: "IMG", parent: 2, attrs: { src: longAddress, alt: "Acme logo" } }))`, ""],
     ["one long address on the links around many images", `[{ name: "A", parent: 2, attrs: { href: longAddress } }, ...many(20000, (i) => ({ name: "IMG", parent: 3, attrs: { src: "/a" + i + ".png", alt: "acme" } }))]`, ""],
+    ["one link of slashes on many links", `many(40000, () => ({ name: "A", parent: 2, attrs: { href: slashes } }))`, ""],
+    ["one JSON-LD of many links of slashes", `[{ name: "SCRIPT", parent: 1, attrs: { type: "application/ld+json" } }, { name: "#text", parent: 3, text: JSON.stringify({ sameAs: many(7400, () => slashes) }) }]`, ""],
     ["many titles of spaces", `[...many(20000, () => ({ name: "TITLE", parent: 1 })), ...many(20000, (i) => ({ name: "#text", parent: 3 + i, text: spaces }))]`, ""],
     ["the same JSON-LD in many scripts", `[...many(3000, () => ({ name: "SCRIPT", parent: 1, attrs: { type: "application/ld+json" } })), ...many(3000, (i) => ({ name: "#text", parent: 3 + i, text: block }))]`, ""],
     ["links at the end of a long chain", `deep("DIV", 100000, (p, i) => ({ name: "A", parent: p, attrs: { href: "https://x.com/a" } }))`, ""],
@@ -384,6 +386,28 @@ test("a page built to keep the read of its snapshot busy holds neither the threa
     ]).then((page) => {
       if (page.siteName !== "Acme" || page.marks.length !== 1 || page.marks[0].src !== "https://acme.test/logo.png" || page.marks[0].where !== "header") throw new Error(JSON.stringify(page));
     });
+  `);
+});
+
+test("a link's run of slashes costs what its length does, wherever a link is read", () => {
+  assert.equal(noEndSlashes("/a/b//"), "/a/b");
+  assert.equal(noEndSlashes("/a//b"), "/a//b");
+  assert.equal(noEndSlashes("///"), "");
+  assert.equal(noEndSlashes(""), "");
+  const { brandLink } = require("../skills/easybrandkit/scripts/lib/logos");
+  assert.equal(brandLink("https://x.com/acme///", "https://acme.test/").url, "https://x.com/acme");
+  assert.equal(brandLink("https://acme.test///", "https://acme.test/"), null);
+  const { classify } = require("../skills/easybrandkit/scripts/lib/stores");
+  assert.deepEqual(classify("https://x.com/acme///"), { type: "x", url: "https://x.com/acme" });
+  assert.equal(classify("https://x.com///"), null);
+  // Each of these took minutes.
+  endsInTime(`
+    const { classify } = require(lib + "/stores.js");
+    const { brandLink } = require(lib + "/logos.js");
+    const long = "/x" + "/".repeat(1960) + "a";
+    for (let i = 0; i < 40000; i++) if (classify("https://x.com" + long + i).type !== "x") throw new Error("not x");
+    for (let i = 0; i < 40000; i++) if (brandLink("https://x.com" + long + i, "https://acme.test/").type !== "x") throw new Error("not x");
+    if (classify("https://x.com/x" + "/".repeat(300000) + "a").type !== "x") throw new Error("not x");
   `);
 });
 
