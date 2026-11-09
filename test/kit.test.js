@@ -786,6 +786,13 @@ test("the CLI explains itself and refuses a missing address", () => {
   const none = spawnSync(process.execPath, [CLI], { encoding: "utf8" });
   assert.equal(none.status, 2);
   assert.match(none.stderr, /Give one website address/);
+  // An empty value, as a shell variable with nothing in it gives, is no
+  // folder, in either form: the kit would go to the default folder.
+  for (const out of [["--out"], ["--out="]]) {
+    const empty = spawnSync(process.execPath, [CLI, "acme.example", ...out], { encoding: "utf8" });
+    assert.equal(empty.status, 2, out[0]);
+    assert.match(empty.stderr, /^easybrandkit: --out needs a value\n/, out[0]);
+  }
 });
 
 test("logos: the site's own marks on their real background, plus colors, fonts, icons, images and links", { skip: noBrowser }, async () => {

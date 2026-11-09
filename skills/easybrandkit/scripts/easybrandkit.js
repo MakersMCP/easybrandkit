@@ -60,8 +60,10 @@ function parse(argv) {
       if (!value || value.startsWith("-")) throw new Error(`${arg} needs a value`);
       if (arg === "--out") options.out = value;
       else options.timeout = Number(value);
-    } else if (arg.startsWith("--out=")) options.out = arg.slice(6);
-    else if (arg.startsWith("--timeout=")) options.timeout = Number(arg.slice(10));
+    } else if (arg.startsWith("--out=")) {
+      if (arg === "--out=") throw new Error("--out needs a value");
+      options.out = arg.slice(6);
+    } else if (arg.startsWith("--timeout=")) options.timeout = Number(arg.slice(10));
     else if (arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);
     else rest.push(arg);
   }
