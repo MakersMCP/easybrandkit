@@ -6,6 +6,7 @@
 
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const dns = require("node:dns");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
@@ -1187,6 +1188,185 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
   };
   const through = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(through.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+});
+
+// An address a page asks for that is answered when the test says so, for a
+// page that moves on at a step of the run the test picks: whichever comes
+// first, the page's request or the test's word.
+function held() {
+  let waiting = null;
+  let released = false;
+  return {
+    ask(res) {
+      if (released) res.writeHead(200).end();
+      else waiting = res;
+    },
+    release() {
+      released = true;
+      if (waiting) waiting.writeHead(200).end();
+      waiting = null;
+    },
+    reset() {
+      released = false;
+      waiting = null;
+    },
+  };
+}
+
+test("a deeper address whose home page fails is read as given and says so, and if it fails too the error names it", { skip: noBrowser }, async (t) => {
+  const answer = (status, body = brandPage("rgb(255,0,0)", "rgb(255,255,255)")) => (req, res) => res.writeHead(status, { "content-type": "text/html" }).end(body);
+  let home;
+  let deep = answer(200, brandPage("rgb(0,0,255)"));
+  const when = held();
+  const site = await serve((req, res) => {
+    if (req.url === "/") return home(req, res);
+    if (req.url === "/project/") return deep(req, res);
+    if (req.url === "/gone") return answer(410)(req, res);
+    if (req.url === "/when") return when.ask(res);
+    return res.writeHead(404).end();
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const url = `${site.origin}/`;
+  const asked = `${url}project/`;
+  const noteOf = (what) => `The home page, ${url}, could not be read: it ${what}. ${asked} was read as given, and its header and colors can differ from the home page's.`;
+  const kitNames = ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "screen-01.png"];
+  const cases = [
+    ["a 404", answer(404, ""), "answered 404"],
+    ["a 500 with a page of its own", answer(500), "answered 500"],
+    ["a bot check", answer(403, BOT_CHECK.replace("</body>", `<a href="/why">Why?</a></body>`)), `answered with a bot check ("Human Verification")`],
+    ["a connection dropped", (req) => req.socket.destroy(), "could not be opened (net::ERR_EMPTY_RESPONSE)"],
+    ["a move to a blank page", answer(200, `${brandPage("rgb(255,0,0)", "rgb(255,255,255)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`), "moved on to a blank page"],
+  ];
+  for (const [what, handler, told] of cases) {
+    home = handler;
+    const dir = path.join(parent, what.replace(/\W+/g, "-"));
+    const { kit } = await makeKit(asked, { dir, stores: false });
+    assert.equal(kit.url, asked, what);
+    assert.deepEqual(kit.notes, [noteOf(told)], what);
+    assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], what);
+    assert.deepEqual(fs.readdirSync(dir).sort(), kitNames, what);
+  }
+  // A home page that fails only once its two logos are cut leaves none of
+  // what it wrote: the page given has one logo.
+  home = answer(200, `${brandPage("rgb(255,0,0)", "rgb(255,255,255)")}<script>fetch("/when").then(() => location.replace("/gone"))</script>`);
+  const late = path.join(parent, "late");
+  const { kit } = await makeKit(asked, { dir: late, stores: false, log: (line) => line === "Taking the first screen" && when.release() });
+  assert.deepEqual(kit.notes, [noteOf(`led to ${site.origin}/gone, which answered 410`)]);
+  assert.deepEqual(fs.readdirSync(late).sort(), kitNames);
+
+  // The home page that works is read, as ever, and the page given is not.
+  home = answer(200);
+  const read = await makeKit(asked, { dir: path.join(parent, "home"), stores: false });
+  assert.equal(read.kit.url, url);
+  assert.deepEqual(read.kit.notes, [`${asked} is not the home page, so ${url} was read instead: the home page carries the brand's own header and colors.`]);
+
+  // Both fail: the error names the address given, and the earlier kit stays.
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  home = answer(404, "");
+  deep = answer(503, "<!doctype html><title>Down</title><h1>Down</h1>");
+  await assert.rejects(makeKit(asked, { dir, stores: false }), (err) => err.message === `${asked} answered 503, so no kit was made.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  // An address that is itself the home page is not read twice.
+  const asks = [];
+  home = (req, res) => {
+    asks.push(req.url);
+    return answer(404, "")(req, res);
+  };
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === `${url} answered 404, so no kit was made.`);
+  assert.deepEqual(asks, ["/"]);
+  assert.deepEqual(filesOf(dir), before);
+});
+
+test("a store listing whose website fails keeps what the listing gave and says so", { skip: noBrowser }, async (t) => {
+  const closed = await serve(() => {});
+  closed.server.close();
+  // The website the listing names, and a listing from a store that is not
+  // asked: what easybrandkit fetches from it itself is answered here.
+  let answers = (req, res) => res.writeHead(403, { "content-type": "text/html" }).end("<!doctype html><title>Forbidden</title><h1>Forbidden</h1>");
+  const site = await serve((req, res) => answers(req, res));
+  const png = Buffer.alloc(33);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(1024, 20);
+  const art = "https://is1-ssl.mzstatic.com/image/thumb";
+  let seller = `${site.origin}/app`;
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (url, ...rest) => {
+    const { hostname } = new URL(url);
+    if (hostname === "itunes.apple.com") return new Response(JSON.stringify({ results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, sellerUrl: seller, screenshotUrls: [`${art}/1.png/392x696bb.jpg`] }] }));
+    if (hostname.endsWith("mzstatic.com")) return new Response(png);
+    return realFetch(url, ...rest);
+  });
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const listing = "https://apps.apple.com/us/app/acme/id1234567890";
+  const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
+  const fromListing = ["BRAND.md", "_brand.yml", "appstore-icon.png", "appstore-shot-01.png", "brand.json"];
+  const bot = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(BOT_CHECK);
+  const blank = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`${brandPage("rgb(255,0,0)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`);
+  const cases = [
+    ["a 403", answers, `${site.origin}/app`, "answered 403"],
+    ["a closed port", answers, `${closed.origin}/`, "could not be opened (net::ERR_CONNECTION_REFUSED)"],
+    ["a bot check", bot, `${site.origin}/`, `answered with a bot check ("Human Verification")`],
+    ["a blank page", blank, `${site.origin}/`, "moved on to a blank page"],
+  ];
+  for (const [what, handler, website, told] of cases) {
+    answers = handler;
+    seller = website;
+    const dir = path.join(parent, what.replace(/\W+/g, "-"));
+    const { kit, facts } = await makeKit(listing, { dir, stores: false, facts: what === "a 403" });
+    assert.equal(kit.url, listing, what);
+    assert.equal(kit.name, "Acme", what);
+    assert.deepEqual(kit.stores[0].assets.map((asset) => asset.file), ["appstore-icon.png", "appstore-shot-01.png"], what);
+    assert.deepEqual(kit.logos, [], what);
+    assert.deepEqual(kit.notes, [noteOf(told), ...(what === "a 403" ? ["No facts were read: the website it names could not be read."] : [])], what);
+    assert.equal(facts, null, what);
+    assert.deepEqual(fs.readdirSync(dir).sort(), fromListing, what);
+    assert.ok(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8").includes(`- ${noteOf(told)}\n`), what);
+  }
+  // A page that shows nothing for as long as the run may wait costs the
+  // website, not the listing.
+  answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end("<!doctype html><title>Loading</title>");
+  seller = `${site.origin}/`;
+  const bare = await makeKit(listing, { dir: path.join(parent, "bare"), stores: false, timeLimit: 55_000 });
+  assert.deepEqual(bare.kit.notes, [noteOf("still shows no content after 30 s")]);
+  assert.deepEqual(fs.readdirSync(path.join(parent, "bare")).sort(), fromListing);
+
+  // A website that opens gives the rest of the kit.
+  answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  const whole = await makeKit(listing, { dir: path.join(parent, "whole"), stores: false });
+  assert.deepEqual(whole.kit.notes, [`${listing} is a store listing: its icon and screenshots come from the listing, the rest from the website it names, ${seller}.`]);
+  assert.deepEqual(whole.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(fs.existsSync(path.join(parent, "whole", "appstore-icon.png")));
+  // A listing that names no website.
+  seller = "";
+  const alone = await makeKit(listing, { dir: path.join(parent, "alone"), stores: false, facts: true });
+  assert.deepEqual(alone.kit.notes, [`${listing} is a store listing that names no website, so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts. Give the product's website for those.`, "No facts were read: the listing names no website."]);
+
+  // A browser that ends on the way, or that is not there, is no failure of
+  // the website's, and ends the run.
+  seller = `${site.origin}/`;
+  const gone = path.join(parent, "gone");
+  await assert.rejects(makeKit(listing, { dir: gone, stores: false, log: (line) => line === "Reading the page" && killBrowsers() }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again.");
+  assert.equal(fs.existsSync(gone), false);
+  const chrome = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = path.join(parent, "no-chrome");
+  t.after(() => {
+    if (chrome === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = chrome;
+  });
+  await assert.rejects(makeKit(listing, { dir: gone, stores: false }), /^Error: No Chrome, Chromium, Edge or Brave found/);
+  assert.equal(fs.existsSync(gone), false);
 });
 
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {

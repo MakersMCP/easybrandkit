@@ -450,6 +450,11 @@ function killBrowsers() {
   for (const entry of ending) removeTemps(entry);
 }
 
+// An error about a page and not about the run. Its pageFailed holds what the
+// page did, in words that can follow its address or "it", for a run that goes
+// on without a page it chose to read.
+const pageFailed = (message, what) => Object.assign(new Error(message), { pageFailed: what });
+
 function connect(wsUrl) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -561,12 +566,12 @@ async function navigate(cdp, url) {
   try {
     ({ errorText } = await cdp.send("Page.navigate", { url }));
   } catch (err) {
-    if (err.timedOut) throw new Error(`${url} did not answer`);
+    if (err.timedOut) throw pageFailed(`${url} did not answer`, "did not answer");
     throw err;
   }
   if (errorText) {
     if (cdp.answer.status >= 400) return url;
-    throw new Error(`Could not open ${url}: ${errorText}`);
+    throw pageFailed(`Could not open ${url}: ${errorText}`, `could not be opened (${errorText})`);
   }
   // The timer goes once the page has loaded, so it does not keep the
   // process up after the kit is done.
@@ -582,4 +587,4 @@ async function navigate(cdp, url) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, openPage, navigate };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, openPage, navigate, pageFailed };

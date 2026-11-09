@@ -28,7 +28,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { launch, openPage, navigate } = require("./chrome");
+const { launch, openPage, navigate, pageFailed } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture } = require("./page");
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
@@ -165,15 +165,12 @@ const errorPage = ({ status, unreachable, blank }) => status >= 400 || Boolean(u
 // from them would pass for the brand's.
 function refuseOtherPage(cdp, url, pageUrl, challenge) {
   if (challenge) {
-    throw new Error(`${pageUrl} answered with a bot check ("${challenge}") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`);
+    throw pageFailed(`${pageUrl} answered with a bot check ("${challenge}") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`, `answered with a bot check ("${challenge}")`);
   }
   const { status, url: at, unreachable, blank } = cdp.answer;
-  if (status >= 400) {
-    const led = at && at.split("#")[0] !== url.split("#")[0];
-    throw new Error(`${led ? `${url} led to ${at}, which` : url} answered ${status}, so no kit was made.`);
-  }
-  if (unreachable) throw new Error(`${url} led to ${unreachable}, which could not be opened, so no kit was made.`);
-  if (blank) throw new Error(`${url} moved on to a blank page, so no kit was made.`);
+  const led = at && at.split("#")[0] !== url.split("#")[0];
+  const what = status >= 400 ? `${led ? `led to ${at}, which ` : ""}answered ${status}` : unreachable ? `led to ${unreachable}, which could not be opened` : blank ? "moved on to a blank page" : "";
+  if (what) throw pageFailed(`${url} ${what}, so no kit was made.`, what);
 }
 
 async function readPage(url, dir, log, alsoNamed = "", facts = false) {
@@ -224,7 +221,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     // A page still showing its loader has no logo yet. An empty kit would
     // pass for a site without one.
     if (!logos.length && !loaded) {
-      throw new Error(`${pageUrl} still shows no content after 30 s, so nothing was read. Try again, or check the page in a browser.`);
+      throw pageFailed(`${pageUrl} still shows no content after 30 s, so nothing was read. Try again, or check the page in a browser.`, "still shows no content after 30 s");
     }
     log("Taking the first screen");
     const screenshots = await captureFirstScreen(cdp, dir);
@@ -254,7 +251,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     // the DevTools protocol.
     if (err.syscall) throw err;
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
-    if (err.timedOut) throw new Error(`The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.`);
+    if (err.timedOut) throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.`, "stopped answering");
     throw err;
   } finally {
     if (cdp) cdp.close();
@@ -388,23 +385,38 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       given = await readSource(listing, work);
       if (!given.ok) throw new Error(`${asked} could not be read: ${given.error}.`);
       page = siteOfListing(given.site || "");
-      notes.push(
-        page
-          ? `${asked} is a store listing: its icon and screenshots come from the listing, the rest from the website it names, ${page}.`
-          : `${asked} is a store listing that names no website, so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts. Give the product's website for those.`,
-      );
     } else {
-      const home = homePageOf(asked);
-      if (home) notes.push(`${asked} is not the home page, so ${home} was read instead: the home page carries the brand's own header and colors.`);
-      page = home || asked;
+      page = homePageOf(asked) || asked;
     }
     // The app's own name, up to a tagline ("Duolingo: Learn Languages").
     const appName = given ? String(given.name || "").split(/\s*[:|\u2013\u2014]\s*|\s+-\s+/)[0] : "";
-    if (page) read = await readPage(page, work, log, appName, facts);
+    // A page that fails ends the run when it is the address the user gave.
+    // When it is another page the kit chose to read, the run goes on with
+    // what it has: a listing keeps what the listing gave, and a deeper
+    // address is read as given, whose own failure then ends the run and
+    // names it. What the failed read wrote does not go into the kit.
+    let failed = "";
+    if (page) {
+      const had = fs.readdirSync(work);
+      try {
+        read = await readPage(page, work, log, appName, facts);
+      } catch (err) {
+        if (!err.pageFailed || page === asked) throw err;
+        failed = err.pageFailed;
+        for (const name of fs.readdirSync(work)) if (!had.includes(name)) fs.rmSync(path.join(work, name), { recursive: true, force: true });
+      }
+      if (failed && !listing) read = await readPage(asked, work, log, appName, facts);
+    }
+    const onlyListing = "so only the listing was read: the kit has the app icon and screenshots but no logos, colors or fonts.";
+    if (listing && read) notes.push(`${asked} is a store listing: its icon and screenshots come from the listing, the rest from the website it names, ${page}.`);
+    else if (listing && failed) notes.push(`${asked} is a store listing, and the website it names, ${page}, ${failed}, ${onlyListing} For those, give an address of the product's site that opens.`);
+    else if (listing) notes.push(`${asked} is a store listing that names no website, ${onlyListing} Give the product's website for those.`);
+    else if (failed) notes.push(`The home page, ${page}, could not be read: it ${failed}. ${asked} was read as given, and its header and colors can differ from the home page's.`);
+    else if (page !== asked) notes.push(`${asked} is not the home page, so ${page} was read instead: the home page carries the brand's own header and colors.`);
     const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
     if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
     if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
-    if (facts && !read) notes.push("No facts were read: the listing names no website.");
+    if (facts && !read) notes.push(failed ? "No facts were read: the website it names could not be read." : "No facts were read: the listing names no website.");
     const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : []) : [];
     const sources = [...(given ? [given] : []), ...others];
     for (const source of others) {
