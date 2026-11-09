@@ -1139,12 +1139,16 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
   closed.server.close();
   const page = brandPage("rgb(255,0,0)", "rgb(255,255,255)");
   const answer = (status, body = page, headers = {}) => (req, res) => res.writeHead(status, { "content-type": "text/html", ...headers }).end(body);
-  // A picture and a frame that answer 404 do not count: the first kit is
-  // made from a page that has both.
-  let home = answer(200, page.replace("</body>", `<img src="/missing.png" width="10" height="10"><iframe src="/missing"></iframe></body>`));
+  // A picture and frames that fail do not count, whether a frame answers
+  // 404, is on a closed port or may not be shown in a frame: the first kit
+  // is made from a page that has them all.
+  let home = answer(200, page.replace("</body>", `<img src="/missing.png" width="10" height="10"><iframe src="/missing"></iframe><iframe src="${closed.origin}/"></iframe><iframe src="/denied"></iframe></body>`));
+  const when = held();
   const site = await serve((req, res) => {
     if (req.url === "/") return home(req, res);
     if (req.url === "/gone") return answer(410)(req, res);
+    if (req.url === "/denied") return answer(200, "<h1>Denied</h1>", { "x-frame-options": "DENY" })(req, res);
+    if (req.url === "/when") return when.ask(res);
     return res.writeHead(404).end();
   });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
@@ -1158,25 +1162,48 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
   const good = filesOf(dir);
   const url = `${site.origin}/`;
   const moved = (script) => answer(200, `${page}<script>${script}</script>`);
+  const lastStep = (steps) => steps[steps.length - 1];
+  const opening = `Opening ${url}`;
+  // With the step each one gets to, for those that are told at one look.
   const cases = [
-    ["404", answer(404), `${url} answered 404, so no kit was made.`],
-    ["500", answer(500), `${url} answered 500, so no kit was made.`],
-    ["an error with no page of its own", answer(404, ""), `${url} answered 404, so no kit was made.`],
-    ["a redirect to a 410", answer(302, "", { location: "/gone" }), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`],
+    ["404", answer(404), `${url} answered 404, so no kit was made.`, opening],
+    ["500", answer(500), `${url} answered 500, so no kit was made.`, opening],
+    ["an error with no page of its own", answer(404, ""), `${url} answered 404, so no kit was made.`, opening],
+    ["a redirect to a 410", answer(302, "", { location: "/gone" }), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`, opening],
     ["a script that moves on to a closed port", answer(200, `<!doctype html><title>x</title><script>location.replace("${closed.origin}/")</script>`), `${url} led to ${closed.origin}/, which could not be opened, so no kit was made.`],
-    ["a script that moves on to a 410 while the page is read", moved(`setTimeout(() => location.replace("/gone"), 300)`), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`],
-    ["a script that moves on to a blank page while the page is read", moved(`setTimeout(() => location.replace("about:blank"), 1000)`), `${url} moved on to a blank page, so no kit was made.`],
-    ["a script that moves on to a blank page at once", answer(200, `<!doctype html><title>x</title><script>location.replace("about:blank")</script>`), `${url} moved on to a blank page, so no kit was made.`],
+    ["a script that moves on to a 410 while the page is read", moved(`setTimeout(() => location.replace("/gone"), 1000)`), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`, "Reading the page"],
+    ["a script that moves on to a blank page while the page is read", moved(`setTimeout(() => location.replace("about:blank"), 1000)`), `${url} moved on to a blank page, so no kit was made.`, "Reading the page"],
+    ["a script that moves on to a blank page at once", answer(200, `<!doctype html><title>x</title><script>location.replace("about:blank")</script>`), `${url} moved on to a blank page, so no kit was made.`, opening],
     ["a bot check with an error status", answer(403, BOT_CHECK.replace("</body>", `<a href="/why">Why?</a></body>`)), `${url} answered with a bot check ("Human Verification") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`],
   ];
-  for (const [what, handler, said] of cases) {
+  for (const [what, handler, said, last] of cases) {
     home = handler;
-    await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => {
+    const steps = [];
+    await assert.rejects(makeKit(site.origin, { dir, stores: false, log: (line) => steps.push(line) }), (err) => {
       assert.equal(err.message, said, what);
       assert.equal(err.earlierKit, dir, what);
       return true;
     });
+    if (last) assert.equal(lastStep(steps), last, what);
     assert.deepEqual(filesOf(dir), good, what);
+  }
+  // A page that moves on only once the run has got to a step: as the page is
+  // walked, it is told before its logos are cut, and as they are cut, after
+  // the first screen.
+  home = moved(`fetch("/when").then(() => location.replace("/gone"))`);
+  for (const [step, last] of [["Reading the page", "Reading the page"], ["Cutting out 2 logos", "Taking the first screen"]]) {
+    when.reset();
+    const steps = [];
+    const log = (line) => {
+      steps.push(line);
+      if (line === step) when.release();
+    };
+    await assert.rejects(makeKit(site.origin, { dir, stores: false, log }), (err) => {
+      assert.equal(err.message, `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`, step);
+      return true;
+    });
+    assert.equal(lastStep(steps), last, step);
+    assert.deepEqual(filesOf(dir), good, step);
   }
   // A bot check with an error status that lets the browser through is read
   // as the site it leads to.

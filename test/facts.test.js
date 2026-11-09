@@ -332,6 +332,46 @@ test("a menu page that fails is told once, in words, and one that answers an err
   assert.deepEqual(asked, ["https://acme.test/about Page.getLayoutMetrics"], "nothing more was read of the page that answered 404");
 });
 
+test("--facts: a menu page that cannot be opened, moves on or goes blank is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {
+  const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
+  const closed = http.createServer();
+  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const shut = `http://127.0.0.1:${closed.address().port}`;
+  await new Promise((resolve) => closed.close(resolve));
+  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="${shut}/customers">Customers</a> <a href="/security">Security</a> <a href="/integrations">Integrations</a> <a href="/about">About</a></nav></header>`;
+  const pageOf = (title, script = "") => `${head(title)}${nav}<main><h1>${title}</h1></main>${script ? `<script>${script}</script>` : ""}</body></html>`;
+  const pages = {
+    "/": pageOf("Acme"),
+    "/security": pageOf("Security", `location.replace("${shut}/")`),
+    "/integrations": pageOf("Integrations", `setTimeout(() => location.replace("about:blank"), 1000)`),
+    "/about": pageOf("About", `setTimeout(() => location.replace("/gone"), 1500)`),
+    "/gone": pageOf("Gone"),
+  };
+  const server = http.createServer((req, res) => {
+    const body = pages[req.url];
+    res.writeHead(req.url === "/gone" ? 503 : body ? 200 : 404, { "content-type": "text/html; charset=utf-8" });
+    res.end(body || "");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  t.after(() => {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const { facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true, timeLimit: 150_000 });
+  assert.deepEqual(facts.pages.map((p) => p.role), ["home"]);
+  assert.deepEqual(facts.skipped, [
+    { role: "pricing", url: `${origin}/pricing`, reason: "it answered 404" },
+    // Not told as the page before it was: each address starts afresh.
+    { role: "customers", url: `${shut}/customers`, reason: "it could not be opened (net::ERR_CONNECTION_REFUSED)" },
+    { role: "security", url: `${origin}/security`, reason: "it could not be opened" },
+    { role: "integrations", url: `${origin}/integrations`, reason: "it moved on to a blank page" },
+    { role: "about", url: `${origin}/about`, reason: "it answered 503" },
+  ]);
+  assert.deepEqual(fs.readdirSync(path.join(dir, "pages")), ["home.md"]);
+});
+
 test("--facts end to end: the home page and the pages it links to, as robots.txt allows", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} .big{font-size:48px} main{min-height:1200px}</style></head><body>`;
   const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/customers">Customers</a> <a href="/security">Security</a> <a href="/about">About</a></nav></header>`;
