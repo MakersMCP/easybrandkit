@@ -12,7 +12,7 @@ const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawn, spawnSync } = require("node:child_process");
-const { once } = require("node:events");
+const { EventEmitter, once } = require("node:events");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
@@ -541,6 +541,56 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.equal(ended(named), false, given ? "a handler that ran before the browser" : "a process that is no crash handler");
   }
+  // A handler that has ended since the browser started, whose pid another
+  // process has by now: /proc gives that pid another start time.
+  process.env.HANDLER_BIN = handlerBin;
+  delete process.env.HANDLER_GIVEN;
+  await launch({ width: 800, height: 600 });
+  const handler = Number(fs.readFileSync(process.env.HANDLER_PID, "utf8"));
+  started.push(handler, helperOf());
+  const read = fs.readFileSync;
+  const another = t.mock.method(fs, "readFileSync", function (file, ...rest) {
+    const text = read.call(this, file, ...rest);
+    if (file !== `/proc/${handler}/stat`) return text;
+    const at = text.lastIndexOf(")") + 2;
+    const fields = text.slice(at).split(" ");
+    fields[19] = String(Number(fields[19]) + 1);
+    return text.slice(0, at) + fields.join(" ");
+  });
+  killBrowsers();
+  another.mock.restore();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(ended(handler), false, "a pid that has come round again on another process");
+});
+
+test("a browser that has ended is not looked up by its pid, which can be another process's by now", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
+  // The browser's start, stood in for only to choose the pid of a browser
+  // that has ended: the process below has it now.
+  const other = spawn("sleep", ["30"], { stdio: "ignore" });
+  t.after(() => other.kill("SIGKILL"));
+  const childProcess = require("node:child_process");
+  t.mock.method(childProcess, "spawn", () => {
+    const browser = new EventEmitter();
+    Object.assign(browser, { pid: other.pid, exitCode: null, signalCode: null, kill: () => assert.fail("the browser has ended") });
+    setTimeout(() => {
+      browser.exitCode = 1;
+      browser.emit("exit", 1, null);
+    }, 20);
+    return browser;
+  });
+  const file = require.resolve("../skills/easybrandkit/scripts/lib/chrome");
+  const loaded = require.cache[file];
+  delete require.cache[file];
+  const given = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = process.execPath;
+  t.after(() => {
+    require.cache[file] = loaded;
+    if (given === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = given;
+  });
+  await assert.rejects(require(file).launch({ width: 800, height: 600 }), /did not start/);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(ended(other.pid), false);
 });
 
 // Stands in for Chrome on Linux and macOS, which keeps the socket that makes

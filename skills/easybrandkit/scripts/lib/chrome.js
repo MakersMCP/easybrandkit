@@ -141,9 +141,11 @@ function scan(tag = "") {
 }
 
 // A browser's processes on Linux: the browser and those that descend from
-// it. Other systems give none.
+// it. Other systems give none, and so does a browser that has ended, whose
+// pid can be another process's by now: its helpers are found by the profile
+// they name (see endAll).
 function processesOf(child) {
-  if (process.platform !== "linux" || !child.pid) return [];
+  if (process.platform !== "linux" || !child.pid || child.exitCode !== null || child.signalCode !== null) return [];
   const { parentOf } = scan();
   const found = new Set([child.pid]);
   for (let grew = true; grew; ) {
