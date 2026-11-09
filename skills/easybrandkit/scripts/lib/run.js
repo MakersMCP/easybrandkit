@@ -6,11 +6,12 @@
 // there already, and next to it when the run makes it. So the files are made
 // on the same disk and get the mode, the group and the default ACL they would
 // get in place. Only a run that ends well puts them there: the part folder
-// becomes the kit's folder, or the earlier kit's files are moved aside into
-// it, the new ones moved in, and the part folder removed with the earlier
-// kit in it. Runs that put their kits into the same folder take turns, with
-// a lock file in it. A run that fails, is refused or is stopped leaves the
-// folder as it was and adds nothing.
+// becomes the kit's folder, or, moved into the kit's folder first when it
+// is not in it, takes the earlier kit's files aside, the new ones are moved
+// in, and the part folder is removed with the earlier kit in it. Runs that
+// put their kits into the same folder take turns, with a lock file in it. A
+// run that fails, is refused or is stopped leaves the folder as it was and
+// adds nothing.
 
 const crypto = require("crypto");
 const fs = require("fs");
@@ -429,8 +430,22 @@ async function saveRun(run, earlierOf) {
 
 // The moves, under the lock.
 function swap(run, earlierNow) {
-  const { dir, target, work } = run;
+  const { dir, target } = run;
   const asWas = earlierNow.length ? "The kit already there is as it was." : "Nothing there was changed.";
+  // A part folder made next to the kit's folder, which came there while the
+  // site was read, goes into it first: a run killed in the middle of the
+  // moves then leaves the earlier kit's files in the kit's folder, where the
+  // next run looks for them. The folders the run made stay as they were.
+  if (path.dirname(run.work) !== target) {
+    const inside = path.join(target, path.basename(run.work));
+    try {
+      rename(run.work, inside);
+    } catch (err) {
+      throw new SaveError(`The new kit could not be put in ${dir}: ${why(Object.assign(err, { moving: "its files" }))}. ${asWas}`);
+    }
+    run.work = inside;
+  }
+  const work = run.work;
   const newNames = fs.readdirSync(work).filter((name) => name !== ".earlier");
   // pages/ is moved in and out only as a folder of the kit's folder: a link
   // there, say to a folder of the user's elsewhere, is never read or written
@@ -502,9 +517,10 @@ function swap(run, earlierNow) {
     const said = [`The new kit could not be put in ${dir}: ${why(err)}.`];
     if (!leftEarlier.length && !leftNew.length) said.push(asWas);
     if (leftEarlier.length) {
-      // What could not be put back stays, in a folder no run removes, or
-      // else in this part folder, which the sweep then keeps.
-      const kept = path.join(run.home, path.basename(work).replace(/^\.easybrandkit-part-/, "easybrandkit-kept-"));
+      // What could not be put back stays, in a folder of the kit's folder
+      // that no run removes, or else in this part folder, which the sweep
+      // then keeps.
+      const kept = path.join(target, path.basename(work).replace(/^\.easybrandkit-part-/, "easybrandkit-kept-"));
       let keptAt = kept;
       try {
         rename(aside, kept);

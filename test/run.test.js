@@ -353,6 +353,21 @@ test("a folder made while the run worked: a kit there is read again and replaced
   discardRun(third);
   assert.deepEqual(fs.readdirSync(late).sort(), ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "notes.txt"]);
   assert.deepEqual(fs.readdirSync(parent).sort(), ["acme", "late", "other"]);
+  // An empty folder made there meanwhile, by hand, and a move into it that
+  // fails: the run removes its part folder and the folder it made above, but
+  // not the one it did not make.
+  t.mock.restoreAll();
+  const byHand = path.join(parent, "new", "hand");
+  const fourth = startRun(byHand, checkDir(byHand));
+  writeFiles(fourth.work, FRESH);
+  fs.mkdirSync(byHand);
+  t.mock.method(fs, "renameSync", function (from, to) {
+    if (path.basename(String(from)) === "brand.json") throw Object.assign(new Error(`EIO: i/o error, rename '${from}' -> '${to}'`), { code: "EIO", syscall: "rename" });
+    return rename.call(this, from, to);
+  });
+  await assert.rejects(saveRun(fourth, earlierOf(byHand)), (err) => err.message === `The new kit could not be put in ${byHand}: brand.json could not be moved (EIO). Nothing there was changed.`);
+  discardRun(fourth);
+  assert.deepEqual(filesOf(path.join(parent, "new")), ["hand/"]);
 });
 
 test("two runs that put their kits in one folder at the same moment take turns", async (t) => {
@@ -745,8 +760,10 @@ test("a folder that a run killed while its files moved left without brand.json i
 
 // A run in a process of its own that kills itself (SIGKILL) in the middle of
 // its moves: right after the count-th file has gone aside into .earlier, or
-// has come into the kit's folder.
-function killedRun(parent, dir, files, { stage, count }) {
+// has come into the kit's folder. With earlier, the kit's folder is not
+// there as the run starts, so its part folder is made next to it, and that
+// kit comes into the folder while the run works, as another run's would.
+function killedRun(parent, dir, files, { stage, count, earlier = null }) {
   const script = path.join(parent, "killed.js");
   fs.writeFileSync(
     script,
@@ -755,9 +772,14 @@ function killedRun(parent, dir, files, { stage, count }) {
       'const path = require("path");',
       `const { startRun, saveRun } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/run"))});`,
       `const { checkDir } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/kit"))});`,
-      "const [dir, files, stage, count] = process.argv.slice(2);",
+      "const [dir, files, stage, count, earlier] = process.argv.slice(2);",
       "const run = startRun(dir, checkDir(dir));",
       "for (const [name, body] of Object.entries(JSON.parse(files))) fs.writeFileSync(path.join(run.work, name), body);",
+      "const theirs = JSON.parse(earlier);",
+      "if (theirs) {",
+      "  fs.mkdirSync(dir);",
+      "  for (const [name, body] of Object.entries(theirs)) fs.writeFileSync(path.join(dir, name), body);",
+      "}",
       "const rename = fs.renameSync;",
       "let left = Number(count);",
       "fs.renameSync = function (from, to) {",
@@ -770,7 +792,7 @@ function killedRun(parent, dir, files, { stage, count }) {
       "",
     ].join("\n"),
   );
-  const killed = spawnSync(process.execPath, [script, dir, JSON.stringify(files), stage, String(count)], { encoding: "utf8" });
+  const killed = spawnSync(process.execPath, [script, dir, JSON.stringify(files), stage, String(count), JSON.stringify(earlier)], { encoding: "utf8" });
   assert.equal(killed.signal, "SIGKILL", killed.stderr);
 }
 
@@ -833,6 +855,25 @@ test("a run killed outright once the earlier kit is aside leaves a folder the ne
   const moreAside = refusedAfterKill(more, "logo-02.png and logo-03.png");
   moveBack(more, moreAside, ["logo-02.png", "logo-03.png"]);
   assert.deepEqual(visible(more), asFiles({ ...earlier, "notes.txt": "mine" }));
+});
+
+test("a run that started before its kit's folder was there and is killed as its files move in leaves the earlier kit in that folder, where the next run finds it", (t) => {
+  const parent = tempParent(t);
+  // Its part folder is made next to the kit's folder, and another run's kit
+  // comes into that folder while the site is read.
+  const earlier = kitOf("earlier", ["logo-01.png"]);
+  const coming = kitOf("killed", ["logo-01.png", "logo-02.png"]);
+  const out = path.join(parent, "out");
+  fs.mkdirSync(out);
+  const dir = path.join(out, "kit");
+  for (const [stage, count, broughtIn] of [["aside", Object.keys(earlier).length, ""], ["in", Object.keys(coming).length - 1, "logo-02.png"]]) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    killedRun(parent, dir, coming, { stage, count, earlier });
+    assert.deepEqual(fs.readdirSync(out), ["kit"], `${stage}: nothing of the run's next to the kit's folder`);
+    const aside = refusedAfterKill(dir, broughtIn);
+    moveBack(dir, aside, broughtIn ? [broughtIn] : []);
+    assert.deepEqual(visible(dir), asFiles(earlier), stage);
+  }
 });
 
 test("a part folder this user may list but not look into stays, and does not fail a run whose kit is in place", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may look anywhere") }, async (t) => {
