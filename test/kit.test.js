@@ -194,6 +194,13 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   assert.equal(homePageOf("https://acme.com/en-us/"), null);
   assert.equal(homePageOf("https://acme.com/pricing"), "https://acme.com/");
   assert.equal(homePageOf("https://blog.acme.com/"), "https://acme.com/");
+  // Such a first label makes a side site only when a site is left after it.
+  assert.equal(homePageOf("https://docs.python.org/3/"), "https://python.org/");
+  assert.equal(homePageOf("https://news.bbc.co.uk/"), "https://bbc.co.uk/");
+  assert.equal(homePageOf("https://news.com/"), null);
+  assert.equal(homePageOf("https://support.co.uk/"), null);
+  assert.equal(homePageOf("https://help.com.tr/"), null);
+  assert.equal(homePageOf("https://news.com/world"), "https://news.com/");
   assert.equal(brandName("Acme", "Whatever", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "Acme\n\t-  Payments", "https://acme.com/"), "Acme");

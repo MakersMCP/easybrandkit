@@ -66,6 +66,15 @@ function normalizeUrl(raw) {
   return url.href;
 }
 
+// A blog or a help centre on a host of its own: a first label such as blog.
+// with a site left after it. news.com is a site of its own, and so is
+// support.co.uk, where what is left is a country's second level.
+function sideSite(hostname) {
+  if (!/^(blog|docs|help|support|news|community)\./i.test(hostname)) return false;
+  const rest = hostname.split(".").filter(Boolean).slice(1);
+  return rest.length >= 2 && !(rest.length === 2 && rest[1].length === 2 && /^(ac|co|com|edu|gov|net|or|org)$/i.test(rest[0]));
+}
+
 // The brand lives on the product's home page (a language path such as /tr
 // is fine). A blog, a help centre or a sub-page can wear another theme, with
 // other colours and another logo: read from a blog post, a blue product came
@@ -78,7 +87,7 @@ function homePageOf(raw) {
   } catch {
     return null;
   }
-  const side = /^(blog|docs|help|support|news|community)\./i.test(page.hostname);
+  const side = sideSite(page.hostname);
   const home = page.pathname
     .split("/")
     .filter(Boolean)
