@@ -30,6 +30,10 @@ Options:
   -h, --help       show this help
   -v, --version    show the version
 
+A home page that answers with an HTTP error (400 or above), also after a
+redirect, or that moves on to a page that cannot be opened, gets no kit: the
+run fails and says which address answered what.
+
 The new kit takes the place of an earlier one in the folder only once the
 run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
 or a kill leaves the folder as it was, and a folder it would have made is

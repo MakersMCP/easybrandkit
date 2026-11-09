@@ -161,6 +161,7 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 ## Limits
 
 - A site that answers with a bot check or a login wall gets no kit: easybrandkit stops and says so, instead of saving the check page's colors.
+- A home page that answers with an HTTP error (400 or above), also after a redirect, gets no kit, and neither does one that moves on to a page that cannot be opened: easybrandkit stops and says which address answered what, instead of saving the error page's logo and colors. With `--facts`, a menu page that answers with an error is skipped, and the notes say so.
 - Instagram, Facebook and TikTok serve nothing without a login, so they are not asked.
 - A logo drawn into a canvas or a WebGL scene is not found.
 - Colors come from what the home page shows. A main color used on one button of another page will not show up.

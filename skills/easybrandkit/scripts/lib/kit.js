@@ -154,6 +154,25 @@ async function captureFirstScreen(cdp, dir) {
   return [{ file: "screen-01.png", width: png.readUInt32BE(16), height: png.readUInt32BE(20) }];
 }
 
+const errorPage = ({ status, unreachable }) => status >= 400 || Boolean(unreachable);
+
+// Throws when the tab does not show the site's own page: a bot check, whatever
+// status it came with, or a page the server answered with an error or the
+// browser could not open. A CDN's 5xx page or a site's own 404 has a logo,
+// colors and fonts of its own, and a kit made from them would pass for the
+// brand's.
+function refuseOtherPage(cdp, url, pageUrl, challenge) {
+  if (challenge) {
+    throw new Error(`${pageUrl} answered with a bot check ("${challenge}") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`);
+  }
+  const { status, url: at, unreachable } = cdp.answer;
+  if (status >= 400) {
+    const led = at && at.split("#")[0] !== url.split("#")[0];
+    throw new Error(`${led ? `${url} led to ${at}, which` : url} answered ${status}, so no kit was made.`);
+  }
+  if (unreachable) throw new Error(`${url} led to ${unreachable}, which could not be opened, so no kit was made.`);
+}
+
 async function readPage(url, dir, log, alsoNamed = "", facts = false) {
   const chrome = await launch(SCREEN);
   let cdp;
@@ -162,6 +181,15 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     resetPictureWait();
     log(`Opening ${url}`);
     const pageUrl = await navigate(cdp, url);
+    // An error page is not waited for or walked. A bot check can come with
+    // an error status too, and is read like any page: it may let the browser
+    // through to the site.
+    if (errorPage(cdp.answer)) {
+      const challenge = await metrics(cdp)
+        .then((size) => findLogos(cdp, pageUrl, size.width, size.height, alsoNamed))
+        .then((page) => page.challenge, () => "");
+      if (!challenge) refuseOtherPage(cdp, url, pageUrl, "");
+    }
     // No overlay hiding before the logos: a fixed header that does not look
     // like page chrome would be hidden with the logo in it, and the cut-out
     // hides whatever paints over a mark anyway.
@@ -183,9 +211,8 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
       m = await metrics(cdp);
       found = await findLogos(cdp, pageUrl, m.width, m.height, alsoNamed);
     }
-    if (found.challenge) {
-      throw new Error(`${pageUrl} answered with a bot check ("${found.challenge}") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`);
-    }
+    // Also a page that has moved on to such a page since it loaded.
+    refuseOtherPage(cdp, url, pageUrl, found.challenge);
     // The words first, while the page is as the snapshot saw it.
     const { headings, ctas } = await readWords(cdp, found.wordTargets);
     const text = { title: found.title, description: found.description, headings, ctas };
@@ -198,6 +225,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     }
     log("Taking the first screen");
     const screenshots = await captureFirstScreen(cdp, dir);
+    refuseOtherPage(cdp, url, pageUrl, "");
     const name = brandName(found.siteName, found.title, pageUrl);
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");

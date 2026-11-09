@@ -512,6 +512,7 @@ async function openPage(base, { width, height }) {
   const target = await res.json();
   const cdp = await connect(target.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
+  cdp.answer = await watchAnswer(cdp);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
   const { userAgent = "" } = await cdp.send("Browser.getVersion").catch(() => ({}));
   if (userAgent.includes("HeadlessChrome")) {
@@ -520,13 +521,38 @@ async function openPage(base, { width, height }) {
   return cdp;
 }
 
+// What the tab's own page came from, kept up to date as the page moves on:
+// the status the server last answered its document with and that address,
+// after any redirect, and the address of a page the browser could not open
+// and shows its own error page for. Frames inside the page do not count. The
+// bodies of the responses are not wanted, so little of them is kept.
+async function watchAnswer(cdp) {
+  const { frameTree } = await cdp.send("Page.getFrameTree");
+  const answer = { status: 0, url: "", unreachable: "" };
+  cdp.on("Network.responseReceived", ({ type, frameId, response }) => {
+    if (type === "Document" && frameId === frameTree.frame.id && response) Object.assign(answer, { status: response.status, url: response.url });
+  });
+  cdp.on("Page.frameNavigated", ({ frame }) => {
+    if (!frame.parentId) answer.unreachable = /^chrome-error:/.test(frame.url) ? frame.unreachableUrl || frame.url : "";
+  });
+  await cdp.send("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 100_000 });
+  return answer;
+}
+
 // Opens the address and waits for its load event, at most 30 s: a page that
 // never finishes loading (a stuck tracking script) is read as it stands.
-// Returns the address the tab ended on, after any redirects.
+// Returns the address the tab ended on, after any redirects; cdp.answer says
+// what the server answered. An error status with no page of its own makes
+// Chrome give a net:: code, which says less than the status, so that is left
+// to cdp.answer too.
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
+  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "" });
   const { errorText } = await cdp.send("Page.navigate", { url });
-  if (errorText) throw new Error(`Could not open ${url}: ${errorText}`);
+  if (errorText) {
+    if (cdp.answer.status >= 400) return url;
+    throw new Error(`Could not open ${url}: ${errorText}`);
+  }
   // The timer goes once the page has loaded, so it does not keep the
   // process up after the kit is done.
   let timer;

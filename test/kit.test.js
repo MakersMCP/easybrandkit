@@ -1068,6 +1068,60 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   assert.deepEqual(tempLeft(), [], "runs that end well");
 });
 
+test("a home page that ends on an HTTP error or on a page that cannot be opened fails the run, says which, and the earlier kit stays", { skip: noBrowser }, async (t) => {
+  const closed = await serve(() => {});
+  closed.server.close();
+  const page = brandPage("rgb(255,0,0)", "rgb(255,255,255)");
+  const answer = (status, body = page, headers = {}) => (req, res) => res.writeHead(status, { "content-type": "text/html", ...headers }).end(body);
+  // A picture and a frame that answer 404 do not count: the first kit is
+  // made from a page that has both.
+  let home = answer(200, page.replace("</body>", `<img src="/missing.png" width="10" height="10"><iframe src="/missing"></iframe></body>`));
+  const site = await serve((req, res) => {
+    if (req.url === "/") return home(req, res);
+    if (req.url === "/gone") return answer(410)(req, res);
+    return res.writeHead(404).end();
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const { kit } = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  const good = filesOf(dir);
+  const url = `${site.origin}/`;
+  const moved = (script) => answer(200, `${page}<script>${script}</script>`);
+  const cases = [
+    ["404", answer(404), `${url} answered 404, so no kit was made.`],
+    ["500", answer(500), `${url} answered 500, so no kit was made.`],
+    ["an error with no page of its own", answer(404, ""), `${url} answered 404, so no kit was made.`],
+    ["a redirect to a 410", answer(302, "", { location: "/gone" }), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`],
+    ["a script that moves on to a closed port", answer(200, `<!doctype html><title>x</title><script>location.replace("${closed.origin}/")</script>`), `${url} led to ${closed.origin}/, which could not be opened, so no kit was made.`],
+    ["a script that moves on to a 410 while the page is read", moved(`setTimeout(() => location.replace("/gone"), 300)`), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`],
+    ["a bot check with an error status", answer(403, BOT_CHECK.replace("</body>", `<a href="/why">Why?</a></body>`)), `${url} answered with a bot check ("Human Verification") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`],
+  ];
+  for (const [what, handler, said] of cases) {
+    home = handler;
+    await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => {
+      assert.equal(err.message, said, what);
+      assert.equal(err.earlierKit, dir, what);
+      return true;
+    });
+    assert.deepEqual(filesOf(dir), good, what);
+  }
+  // A bot check with an error status that lets the browser through is read
+  // as the site it leads to.
+  let solved = false;
+  home = (req, res) => {
+    if (solved) return answer(200)(req, res);
+    solved = true;
+    return answer(403, BOT_CHECK.replace("</body>", `<a href="/why">Why?</a><script>setTimeout(() => location.reload(), 300)</script></body>`))(req, res);
+  };
+  const through = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(through.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+});
+
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
