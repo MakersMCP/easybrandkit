@@ -251,7 +251,11 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     // the DevTools protocol.
     if (err.syscall) throw err;
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
-    if (err.timedOut) throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.`, "stopped answering");
+    if (err.timedOut) {
+      // More time helps only a run that used up its own: one call's limit
+      // does not change with it.
+      throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${timeLeft() < 2_000 ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering");
+    }
     throw err;
   } finally {
     if (cdp) cdp.close();

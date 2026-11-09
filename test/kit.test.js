@@ -1369,6 +1369,63 @@ test("a store listing whose website fails keeps what the listing gave and says s
   assert.equal(fs.existsSync(gone), false);
 });
 
+// kit.js with a browser tab whose calls of method time out, for the first
+// stalled tabs opened or for all: a real wait for one takes half a minute.
+function withStalledTab(t, method, stalled = Infinity) {
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const realOpen = chrome.openPage;
+  let opened = 0;
+  t.mock.method(chrome, "openPage", async (...args) => {
+    const cdp = await realOpen(...args);
+    if (++opened > stalled) return cdp;
+    const send = cdp.send;
+    cdp.send = (name, ...rest) => (name === method ? Promise.reject(Object.assign(new Error(`${name} timed out`), { timedOut: true })) : send(name, ...rest));
+    return cdp;
+  });
+  const file = require.resolve("../skills/easybrandkit/scripts/lib/kit");
+  const loaded = require.cache[file];
+  delete require.cache[file];
+  const reloaded = require(file);
+  require.cache[file] = loaded;
+  return reloaded.makeKit;
+}
+
+test("a tab that stops answering is told in words, and more time is advised only to a run that used up its own", { skip: noBrowser }, async (t) => {
+  const page = brandPage("rgb(255,0,0)");
+  const dialog = page.replace("</body>", "<script>alert(1)</script></body>");
+  let html = page;
+  const site = await serve((req, res) => {
+    if (req.url === "/deep") return res.writeHead(200, { "content-type": "text/html" }).end(page);
+    res.writeHead(200, { "content-type": "text/html" }).end(html);
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const url = `${site.origin}/`;
+  // One call's own limit passed, with time to spare.
+  const stalledTab = withStalledTab(t, "Page.getLayoutMetrics");
+  await assert.rejects(stalledTab(site.origin, { dir, stores: false }), (err) => err.message === `The browser tab stopped answering while it read ${url}, so no kit was made. Try again.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before, "a call's own limit");
+  // A page that stops the tab with a dialog, in a run that has no time left
+  // for the next call.
+  html = dialog;
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before, "the run's own limit");
+
+  // A home page that stalls the tab is a page that failed like any other.
+  t.mock.restoreAll();
+  html = page;
+  const stalledOnce = withStalledTab(t, "Page.getLayoutMetrics", 1);
+  const asked = `${url}deep`;
+  const { kit } = await stalledOnce(asked, { dir: path.join(parent, "deep"), stores: false });
+  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its header and colors can differ from the home page's.`]);
+});
+
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
