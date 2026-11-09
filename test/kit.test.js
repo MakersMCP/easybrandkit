@@ -1260,6 +1260,26 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
 });
 
+test("files of someone's that come into a folder made during the run are refused, not taken for a kit", { skip: noBrowser }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  let came = false;
+  const site = await serve((req, res) => {
+    if (!came) {
+      came = true;
+      writeFiles(dir, { "notes.txt": "mine" });
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === `${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
+  assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), ["notes.txt"]);
+  assert.deepEqual(fs.readdirSync(parent), ["kit"]);
+});
+
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));

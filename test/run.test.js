@@ -149,6 +149,38 @@ test("a disk that fills up while a run makes the folders above its kit leaves no
   assert.deepEqual(filesOf(parent), ["a/", "a/b/", `a/b/theirs.txt ${hash("theirs")}`]);
 });
 
+test("the earlier kit goes as .replaced, so a part folder that could not be removed is no earlier kit left in pieces", async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const run = startRun(dir, checkDir(dir));
+  writeFiles(run.work, FRESH);
+  // A file in it is held open, as can happen on Windows.
+  const rm = fs.rmSync;
+  const held = t.mock.method(fs, "rmSync", function (at, ...rest) {
+    if (at === run.work) throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+    return rm.call(this, at, ...rest);
+  });
+  await saveRun(run, earlierOf(dir));
+  held.mock.restore();
+  discardRun(run);
+  assert.deepEqual(fs.readdirSync(run.work).sort(), [".coming", ".replaced"]);
+  // Once its process has gone and it is old, the next run removes it.
+  const left = path.join(dir, `.easybrandkit-part-${endedPid()}-0a1b2c3d`);
+  fs.renameSync(run.work, left);
+  const old = new Date(Date.now() - STALE - 60_000);
+  const age = (at, depth) => {
+    if (depth > 0 && fs.lstatSync(at).isDirectory()) for (const name of fs.readdirSync(at)) age(path.join(at, name), depth - 1);
+    fs.lutimesSync(at, old, old);
+  };
+  age(left, 3);
+  const next = startRun(dir, checkDir(dir));
+  writeFiles(next.work, FRESH);
+  await saveRun(next, earlierOf(dir));
+  discardRun(next);
+  assert.equal(fs.existsSync(left), false);
+});
+
 test("a run that does not end well removes its part folder and the folders it made", (t) => {
   const parent = tempParent(t);
   const run = startRun(path.join(parent, "new", "brand", "acme"), null);
@@ -495,7 +527,7 @@ test("a run stopped while it waits for the lock is not saved, and the wait gives
   assert.deepEqual(filesOf(dir), before);
 });
 
-test("of two runs that find a lock left by a run that has ended, one removes it, and a lock taken since is never removed", async (t) => {
+test("of two runs that find a lock left by a run that has ended, one removes it and the other takes its turn", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "kit");
   writeFiles(dir, kitOf("earlier", ["logo-01.png"]));
@@ -505,31 +537,51 @@ test("of two runs that find a lock left by a run that has ended, one removes it,
   const b = startRun(dir, checkDir(dir));
   writeFiles(a.work, kitOf("A", ["logo-01.png"]));
   writeFiles(b.work, kitOf("B", ["logo-01.png"]));
-  // A third run takes the lock as soon as it is gone, and holds it.
-  const theirs = JSON.stringify({ pid: livePid(t), host: os.hostname(), token: "c0ffee00" });
   const unlink = fs.unlinkSync;
-  let started = false;
   let second = null;
-  let removedTheirs = false;
   t.mock.method(fs, "unlinkSync", function (at, ...rest) {
-    if (at === lock) {
-      // A has read the lock again and is about to remove it: B looks at it now.
-      if (!started) {
-        started = true;
-        second = saveRun(b, earlierOf(dir));
-        if (!fs.existsSync(lock)) fs.writeFileSync(lock, theirs);
-      }
-      if (fs.existsSync(lock) && fs.readFileSync(lock, "utf8") === theirs) removedTheirs = true;
-    }
+    // A has read the lock again and is about to remove it: B looks at it now.
+    if (at === lock && !second) second = saveRun(b, earlierOf(dir));
     return unlink.call(this, at, ...rest);
   });
   await saveRun(a, earlierOf(dir));
   await second;
   discardRun(a);
   discardRun(b);
-  assert.equal(removedTheirs, false, "the third run's lock was removed");
   // B waited first and went first; A's kit, put in after it, is the one left, whole.
   assert.deepEqual(filesOf(dir), [`BRAND.md ${hash("A")}`, `_brand.yml ${hash("A")}`, `brand.json ${hash(kitOf("A", ["logo-01.png"])["brand.json"])}`, `card.png ${hash("A")}`, `logo-01.png ${hash("A")}`]);
+});
+
+test("a lock taken since a run found the one left by a run that has ended is not removed, and is waited for", async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, kitOf("earlier", ["logo-01.png"]));
+  const lock = path.join(dir, LOCK);
+  fs.writeFileSync(lock, JSON.stringify({ pid: endedPid(), host: os.hostname(), token: "0a1b2c3d" }));
+  const run = startRun(dir, checkDir(dir));
+  writeFiles(run.work, kitOf("new", ["logo-01.png"]));
+  // Another run has taken the lock since this one read it, as this one makes
+  // the marker it takes over with.
+  const theirs = JSON.stringify({ pid: livePid(t), host: os.hostname(), token: "c0ffee00" });
+  const open = fs.openSync;
+  let changed = false;
+  t.mock.method(fs, "openSync", function (at, ...rest) {
+    const fd = open.call(this, at, ...rest);
+    if (!changed && String(at).endsWith("-takeover")) {
+      changed = true;
+      fs.writeFileSync(lock, theirs);
+    }
+    return fd;
+  });
+  const saving = saveRun(run, earlierOf(dir));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(changed, true, "the marker was made");
+  assert.equal(fs.existsSync(lock) && fs.readFileSync(lock, "utf8"), theirs, "the other run's lock is still there");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8")).tag, "earlier", "the run waits for it");
+  fs.unlinkSync(lock);
+  await saving;
+  discardRun(run);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8")).tag, "new");
 });
 
 test("a folder read between two other runs' saves is not taken for one a killed run left in pieces", (t) => {
@@ -989,6 +1041,19 @@ test("a run that started before its kit's folder was there and is killed as its 
     moveBack(dir, aside, broughtIn ? [broughtIn] : []);
     assert.deepEqual(visible(dir), asFiles(earlier), stage);
   }
+});
+
+test("the list of files a killed run brought in names nothing outside the kit's folder", (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  const part = path.join(dir, `.easybrandkit-part-${endedPid()}-0a1b2c3d`);
+  writeFiles(part, { ".earlier/brand.json": kitOf("earlier", ["logo-01.png"])["brand.json"], ".coming": JSON.stringify(["../outside.txt", "pages/../../outside.txt", ".hidden", 7, "logo-02.png"]) });
+  writeFiles(dir, { "logo-02.png": "theirs", ".hidden": "x" });
+  writeFiles(parent, { "outside.txt": "mine" });
+  assert.throws(() => checkDir(dir), (err) => {
+    assert.match(err.message, /, remove logo-02\.png, which that run brought in too, and run again\.$/);
+    return true;
+  });
 });
 
 test("a part folder this user may list but not look into stays, and does not fail a run whose kit is in place", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may look anywhere") }, async (t) => {
