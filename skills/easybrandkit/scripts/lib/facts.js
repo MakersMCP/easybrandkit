@@ -491,7 +491,8 @@ function pageLines(model) {
 }
 
 function pageMarkdown(page, generator) {
-  const body = [`Title: ${page.model.title || ""}`, "", ...pageLines(page.model)].join("\n");
+  // The page model has no control characters in it, but it is still the page's.
+  const body = noControls([`Title: ${page.model.title || ""}`, "", ...pageLines(page.model)].join("\n"));
   let longest = 2;
   for (const [ticks] of body.matchAll(/`+/g)) longest = Math.max(longest, ticks.length);
   const fence = "`".repeat(longest + 1);
@@ -611,7 +612,7 @@ async function writeFacts(dir, { name, site, generator, pages = [], skipped = []
   for (const page of pages) {
     const file = `pages/${page.role}.md`;
     fs.writeFileSync(path.join(dir, file), pageMarkdown(page, generator));
-    listed.push({ role: page.role, url: page.url, readAt: page.readAt, title: page.model.title || "", file });
+    listed.push({ role: page.role, url: page.url, readAt: page.readAt, title: noControls(page.model.title || ""), file });
   }
   let { claims, error } = await claimsOf(pages);
   if (error) {

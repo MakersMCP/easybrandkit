@@ -840,8 +840,10 @@ const SVG_FILE = `function (text, base) {
     [].slice.call(el.attributes).forEach(function (at) {
       if (/^on/i.test(at.name)) { el.removeAttribute(at.name); return; }
       if (!/(^|:)href$/.test(at.name) || at.value.charAt(0) === "#") return;
-      if (/^\\s*(javascript|vbscript):/i.test(at.value)) { el.removeAttribute(at.name); return; }
-      try { at.value = new URL(at.value, base).href; } catch (e) {}
+      var href = at.value;
+      try { href = new URL(at.value, base).href; } catch (e) {}
+      if (/^\\s*(javascript|vbscript):/i.test(href)) { el.removeAttribute(at.name); return; }
+      at.value = href;
     });
   });
   return new XMLSerializer().serializeToString(root);
@@ -863,6 +865,23 @@ async function svgSource(cdp, src) {
   }
 }
 
+// An SVG file's comments, CDATA sections and tags, each tag with its name and
+// its attributes: a value in quotes can hold a ">".
+const SVG_PART = /<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<([^\s/>"'!?][^\s/>"']*)((?:[^>"']+|"[^"]*"|'[^']*')*)/g;
+
+// Whether an SVG file still holds a script element or an event handler. What
+// comes back from the page is still the page's, so the file is read here too,
+// where nothing of the page's can change the answer. Only tags count: a
+// logo's title or a picture embedded in it can hold the same letters.
+function holdsCode(svg) {
+  for (const [, name, attrs] of svg.matchAll(SVG_PART)) {
+    if (!name) continue;
+    if (name.slice(name.lastIndexOf(":") + 1).toLowerCase() === "script") return true;
+    if (/(^|[\s/])on[a-z]+\s*=/i.test(attrs.replace(/"[^"]*"|'[^']*'/g, " "))) return true;
+  }
+  return false;
+}
+
 // Writes the mark's vector as file in dir when the page draws it as SVG (an
 // inline <svg>, or an <img> of an SVG file). The file name, or "".
 const SVG_LIMIT = 2_000_000;
@@ -880,7 +899,7 @@ async function saveVector(cdp, mark, dir, file) {
       returnByValue: true,
     });
     const svg = String((result && result.value) || "");
-    if (!svg.startsWith("<svg") || svg.length > SVG_LIMIT) return "";
+    if (!svg.startsWith("<svg") || svg.length > SVG_LIMIT || holdsCode(svg)) return "";
     fs.writeFileSync(path.join(dir, file), svg + "\n");
     return file;
   } catch (err) {
@@ -1067,4 +1086,4 @@ function groundOf(png, band, sides = { top: true, right: true, bottom: true, lef
   return { hex: "#" + middle.map((v) => v.toString(16).padStart(2, "0")).join(""), solid: near >= samples.length * 0.9 };
 }
 
-module.exports = { findLogos, captureLogos, readWords, brandLink, brandTokens, tagPng, logoInk, groundOf, CHALLENGE_TITLE };
+module.exports = { findLogos, captureLogos, saveVector, readWords, brandLink, brandTokens, tagPng, logoInk, groundOf, CHALLENGE_TITLE };

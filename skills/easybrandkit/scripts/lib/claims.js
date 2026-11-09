@@ -455,7 +455,8 @@ function listedCards(page) {
     seen.add(node.href);
     const actions = actionLines(page, node);
     const lines = linesOf(page, node).filter((line) => !CTA.test(line) && !(actions.has(line) && line.length < 25));
-    cards.push({ name: logo, first: lines[0] || "", headline: lines.reduce((a, b) => (b.length > a.length ? b : a), ""), link: node.href, node });
+    // As the URL parser writes it: no line break or angle bracket is left.
+    cards.push({ name: logo, first: lines[0] || "", headline: lines.reduce((a, b) => (b.length > a.length ? b : a), ""), link: new URL(node.href).href, node });
   }
   return cards;
 }

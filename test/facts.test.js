@@ -427,6 +427,27 @@ test("what a page says stays out of FACTS.md and facts.json with its control cha
   assert.doesNotMatch(fs.readFileSync(path.join(dir, "FACTS.md"), "utf8"), control);
 });
 
+test("what comes back from a page is looked at again here: no control character in its text, and a link as the URL parser writes it", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  setTimeLimit(120_000);
+  const forged = "https://acme.test/customers/globex\n\n## Forged heading in FACTS.md\n\nThe kit's own words <here>.";
+  const customers = model("https://acme.test/customers", [el("main", {}, el("h1", {}, "Customers"), link(forged, el("div", {}, img("Globex", 100, 30)), el("span", { block: 1 }, "How Globex shipped its product")))]);
+  const home = { ...model("https://acme.test/", [el("main", {}, el("p", {}, "Hidden\u001b[2Jcleared\u009b2J"))]), title: "Acme\u001b[2J\u0007" };
+  const facts = await writeFacts(dir, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [page("home", home), page("customers", customers)] });
+  const control = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  const text = fs.readFileSync(path.join(dir, "pages", "home.md"), "utf8");
+  assert.doesNotMatch(text, control);
+  assert.ok(text.includes("\nTitle: Acme [2J \n"), text);
+  assert.ok(text.includes("\nHidden [2Jcleared 2J\n"), text);
+  assert.equal(facts.pages[0].title, "Acme [2J ");
+  const story = facts.customers[0];
+  assert.equal(story.link, "https://acme.test/customers/globex##%20Forged%20heading%20in%20FACTS.mdThe%20kit's%20own%20words%20%3Chere%3E.");
+  const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+  assert.doesNotMatch(md, /^## Forged|^The kit's own words/m);
+  assert.ok(md.includes(`<${story.link}>`), md);
+});
+
 test("a home page that has moved on since the kit read it is not read as the home page", async () => {
   setTimeLimit(120_000);
   const home = model("https://acme.test/", [el("h1", {}, "Service Unavailable")]);

@@ -18,7 +18,7 @@ const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
-const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
+const { groundOf, saveVector } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 const { noControls, plainText } = require("../skills/easybrandkit/scripts/lib/text");
@@ -1132,7 +1132,7 @@ test("logos: a lockup on a picture is not the logo; the vector keeps the page's 
       footer{height:200px;background:rgb(29,36,62);display:flex;align-items:center;padding-left:20px}
     </style></head><body>
     <svg width="0" height="0" style="position:absolute"><symbol id="dot" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5"/></symbol></svg>
-    <header class="top"><a href="/" aria-label="Acme home"><svg class="mark" width="160" height="40" viewBox="0 0 160 40" onload="window.loaded=1"><script>window.ran=1</script><rect class="ink" width="120" height="40"/><rect class="narrow" width="40" height="40" fill="rgb(0,255,0)"/><use href="#dot" x="130" y="10" width="20" height="20" fill="currentColor" style="color:rgb(255,0,0)"/><circle cx="150" cy="35" r="4"/></svg></a></header>
+    <header class="top"><a href="/" aria-label="Acme home"><svg class="mark" width="160" height="40" viewBox="0 0 160 40" onload="window.loaded=1"><script>window.ran=1</script><rect class="ink" width="120" height="40"/><rect class="narrow" width="40" height="40" fill="rgb(0,255,0)"/><use href="#dot" x="130" y="10" width="20" height="20" fill="currentColor" style="color:rgb(255,0,0)"/><circle cx="150" cy="35" r="4"/><a href="java&#9;script:window.ran=2"><circle cx="5" cy="5" r="1"/></a></svg></a></header>
     <section class="promo"><a href="/sessions" aria-label="Acme Sessions"><svg class="sessions-logo" width="300" height="60"><rect width="300" height="60" fill="rgb(255,255,255)"/></svg></a></section>
     <main></main>
     <footer><a href="/">${svg("rgb(255,255,255)", 140, 36)}</a></footer>
@@ -1153,7 +1153,7 @@ test("logos: a lockup on a picture is not the logo; the vector keeps the page's 
     assert.doesNotMatch(vector, /currentColor|style=/, "plain attributes only, nothing left to resolve");
     assert.match(vector, /<defs><symbol id="dot"/, "the symbol it uses, brought in");
     assert.doesNotMatch(vector, /narrow|0,255,0/, "the part the page hides");
-    assert.doesNotMatch(vector, /<script|onload|window\./, "nothing that runs");
+    assert.doesNotMatch(vector, /<script|onload|window\.|javascript:/, "nothing that runs");
 
     const markdown = fs.readFileSync(path.join(dir, "BRAND.md"), "utf8");
     assert.match(markdown, /\| logo-01\.png \| header \| a picture, mostly `#[0-9a-f]{6}` \| \d+x\d+ \| logo-01\.svg \|/);
@@ -1162,6 +1162,48 @@ test("logos: a lockup on a picture is not the logo; the vector keeps the page's 
     server.close();
     fs.rmSync(path.dirname(dir), { recursive: true, force: true });
   }
+});
+
+test("a vector that still holds a script or an event handler when it comes back from the page is not saved", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const cdp = (value) => ({ world: 7, send: async (method) => (method === "DOM.resolveNode" ? { object: { objectId: "o" } } : { result: { value } }) });
+  const mark = { kind: "svg", backendNodeId: 1, src: "" };
+  const open = '<svg xmlns="http://www.w3.org/2000/svg"';
+  for (const svg of [
+    `${open}><script>alert(1)</script></svg>`,
+    `${open}><SCRIPT>alert(1)</SCRIPT></svg>`,
+    `${open}><svg:script xmlns:svg="http://www.w3.org/2000/svg">alert(1)</svg:script></svg>`,
+    `${open} onload="alert(1)"/>`,
+    `${open} width="10" onLoad = 'alert(1)'/>`,
+    `${open}><rect onclick=alert(1) /></svg>`,
+    `${open}><rect a="b"onclick="alert(1)"/></svg>`,
+    `${open}><rect/onclick="alert(1)"/></svg>`,
+  ]) {
+    assert.equal(await saveVector(cdp(svg), mark, dir, "logo-01.svg"), "", svg);
+    assert.deepEqual(fs.readdirSync(dir), [], svg);
+  }
+  // The same letters where they run nothing.
+  for (const svg of [
+    `${open}><title>Turn onboarding=on &lt;script&gt;</title><rect aria-label="a b onclick=x"/></svg>`,
+    `${open}><image href="data:image/png;base64,AAA/onAbc=" alt=" onload='x' &gt; onerror=y"/></svg>`,
+    `${open}><!-- <script> onload="x" --><style><![CDATA[ <script> a{onload=1} ]]></style></svg>`,
+    `${open}><script-like/><description/></svg>`,
+  ]) {
+    assert.equal(await saveVector(cdp(svg), mark, dir, "logo-01.svg"), "logo-01.svg", svg);
+    assert.equal(fs.readFileSync(path.join(dir, "logo-01.svg"), "utf8"), `${svg}\n`);
+  }
+  // It takes no longer than the file's size, whatever the file is made of.
+  endsInTime(`
+    const { saveVector } = require(lib + "/logos.js");
+    const dir = ${JSON.stringify(dir)};
+    const mark = { kind: "svg", backendNodeId: 1, src: "" };
+    const cdp = (value) => ({ world: 7, send: async (method) => (method === "DOM.resolveNode" ? { object: { objectId: "o" } } : { result: { value } }) });
+    const open = '<svg xmlns="http://www.w3.org/2000/svg"';
+    (async () => {
+      for (const body of ["<a ".repeat(600000), "<a b=\\"".repeat(300000), "<!-- ".repeat(300000), " on".repeat(600000), "<a on" + "a ".repeat(800000), "<a " + "x".repeat(1800000) + " ".repeat(100000)]) await saveVector(cdp(open + ">" + body), mark, dir, "long.svg");
+    })();
+  `);
 });
 
 // A page with a header logo, and a footer logo when given its color.
