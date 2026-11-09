@@ -11,6 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { findClaims } = require("../skills/easybrandkit/scripts/lib/claims");
+const { spawnSync } = require("node:child_process");
 const { pickPages, robotsRules, robotsAllow, pageLines, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome } = require("../skills/easybrandkit/scripts/lib/chrome");
@@ -246,6 +247,89 @@ test("robots.txt: easybrandkit's own group, else every crawler's; the longest ru
   assert.equal(robotsAllow(own.rules, "https://acme.test/pricing"), true);
   assert.equal(robotsAllow(robotsRules("").rules, "https://acme.test/pricing"), true);
   assert.equal(robotsAllow(robotsRules("User-agent: *\nDisallow:\n").rules, "https://acme.test/pricing"), true);
+});
+
+test("robots.txt: * stands for any run of characters, a last $ for the end of the address, and the rest is taken as written", () => {
+  const blocked = (rule, url) => !robotsAllow([{ allow: false, path: rule }], `https://acme.test${url}`);
+  for (const [rule, url, want] of [
+    ["/a", "/a", true],
+    ["/a", "/ab/c", true],
+    ["/a", "/b/a", false],
+    ["/a$", "/a", true],
+    ["/a$", "/ab", false],
+    ["/*.pdf", "/x/y.pdf?z=1", true],
+    ["/*.pdf$", "/x/y.pdf", true],
+    ["/*.pdf$", "/x/y.pdf?z=1", false],
+    ["/*/b/*/d", "/a/b/c/d/e", true],
+    ["/*/b/*/d", "/a/c/b/d", false],
+    ["/a*a*a$", "/aXaXa", true],
+    ["/a*a*a$", "/aa", false],
+    ["/a*b$", "/ab", true],
+    ["/a*ab$", "/ab", false],
+    ["/*$", "/anything", true],
+    ["*", "/anything", true],
+    ["/a.c", "/abc", false],
+    ["/a+c", "/aac", false],
+    ["/a(b", "/a(b", true],
+    ["/$x", "/$x", true],
+  ]) {
+    assert.equal(blocked(rule, url), want, `${rule} on ${url}`);
+  }
+});
+
+// Runs code in a process of its own, and fails when it has not ended in time:
+// a pattern stuck on a site's text cannot be interrupted from here.
+function endsInTime(code, ms = 20_000) {
+  const lib = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
+  const done = spawnSync(process.execPath, ["-e", `const lib = ${JSON.stringify(lib)};\n${code}`], { encoding: "utf8", timeout: ms, killSignal: "SIGKILL" });
+  assert.equal(done.signal, null, `still running after ${ms} ms: ${code}`);
+  assert.equal(done.status, 0, done.stderr);
+}
+
+test("what a site writes in robots.txt and its links takes no more time than its size", () => {
+  const require_ = `const { robotsRules, robotsAllow, pickPages, pageLines } = require(lib + "/facts.js");`;
+  // A rule with many wildcards, on an address it nearly matches.
+  endsInTime(`${require_}
+    if (robotsAllow([{ allow: false, path: "/" + "*a".repeat(24) + "b$" }], "https://acme.test/pricing?" + "a".repeat(400)) !== true) throw new Error("matched");
+    if (robotsAllow([{ allow: false, path: "/" + "*a".repeat(250000) + "b$" }], "https://acme.test/" + "a".repeat(2000000)) !== true) throw new Error("matched");
+  `);
+  // A line a pattern would go back and forth over.
+  endsInTime(`${require_}
+    robotsRules("User-agent: *\\n" + "#".repeat(499000) + "\\u2028");
+    robotsRules("User-agent: *\\nDisallow:" + " ".repeat(240000) + "x".repeat(240000) + "\\u2028y");
+    const { rules } = robotsRules("User-agent: *\\n" + "Disallow:/*a*b*c\\n".repeat(29000));
+    for (let i = 0; i < 5; i++) robotsAllow(rules, "https://acme.test/" + "ab".repeat(1000));
+  `);
+  // A link of slashes, words of digits, a page of text.
+  const link = (href, kid) => `{ tag: "body", block: 1, kids: [{ tag: "a", href: ${href}, kids: [${kid}] }] }`;
+  endsInTime(`${require_}
+    const home = "https://acme.test/";
+    const model = (tree) => ({ url: home, title: "", jsonLd: [], tree });
+    pickPages(model(${link(`home + "/".repeat(300000) + "pricing"`, `"Pricing"`)}), home);
+    pickPages(model(${link(`home + "pricing"`, `"1".repeat(800000)`)}), home);
+    pageLines({ tree: { tag: "p", block: 1, kids: ["1".repeat(800000)] } });
+  `);
+  // A link inside a link inside a link, all the page's text at the bottom.
+  endsInTime(`${require_}
+    const home = "https://acme.test/";
+    let node = { tag: "a", href: home + "x", kids: ["w ".repeat(400000)] };
+    for (let i = 0; i < 3000; i++) node = { tag: "a", href: home + "x" + i, kids: [node] };
+    pickPages({ url: home, title: "", jsonLd: [], tree: { tag: "body", block: 1, kids: [node] } }, home);
+  `);
+});
+
+test("robots.txt: a line or a list too long for any real site is not read", () => {
+  const long = `/${"a".repeat(3000)}`;
+  assert.deepEqual(robotsRules(`User-agent: *\nDisallow: ${long}\nDisallow: /b\n`).rules, [{ allow: false, path: "/b" }]);
+  assert.equal(robotsRules(`User-agent: *\n${"Disallow: /x\n".repeat(12000)}`).rules.length, 10000);
+  // Still read as ever.
+  assert.deepEqual(robotsRules("  USER-agent :  *  # all\n  disallow : /a # not /b\nnot a line\n: /c\n").rules, [{ allow: false, path: "/a" }]);
+});
+
+test("a menu link no one would write is not picked", () => {
+  const home = "https://acme.test/";
+  const body = [link(`${home}pricing?${"a".repeat(3000)}`, "Pricing"), link(`${home}about`, "x ".repeat(300), "About")];
+  assert.deepEqual(pickPages(model(home, body), home), [{ role: "about", url: `${home}about` }]);
 });
 
 test("the files: page text stays data, fenced and quoted, never Markdown of its own", (t) => {

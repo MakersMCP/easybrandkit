@@ -20,7 +20,7 @@ const path = require("path");
 const { navigate } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
-const { findClaims, pageOf, lineOf, regionOf, tidy } = require("./claims");
+const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
 const { sleep, timeLeft } = require("./time");
 const { noControls } = require("./text");
 const version = require("./version");
@@ -208,6 +208,11 @@ const hostOf = (raw) => {
   }
 };
 
+// No menu link is this long, and a page can make one long to keep the
+// patterns on its address and its words busy.
+const LONG_LINK = 2_000;
+const LONG_WORDS = 400;
+
 // One page for each subject from the links the home page shows, on the
 // same site. A link whose words and address both fit wins, then one in the
 // menu or the footer, then the shorter address.
@@ -216,7 +221,7 @@ function pickPages(model, home) {
   const homePath = new URL(home).pathname.replace(/\/+$/, "");
   const best = new Map();
   for (const node of page.all) {
-    if (node.tag !== "a" || !node.href || node.hidden) continue;
+    if (node.tag !== "a" || !node.href || node.href.length > LONG_LINK || node.hidden) continue;
     let url;
     let last;
     try {
@@ -228,7 +233,7 @@ function pickPages(model, home) {
     }
     if (hostOf(url.href) !== hostOf(home) || url.pathname.replace(/\/+$/, "") === homePath) continue;
     if (/\.(pdf|zip|png|jpe?g|gif|svg|webp|mp4|dmg|exe)$/i.test(url.pathname)) continue;
-    const text = lineOf(page, node);
+    const text = textOf(page, node).length > LONG_WORDS ? "" : lineOf(page, node);
     for (const [role, byText, byPath] of ROLES) {
       const score = (text.length <= 40 && byText.test(text) ? 2 : 0) + (byPath.test(last) ? 2 : 0);
       if (!score) continue;
@@ -251,15 +256,23 @@ function pickPages(model, home) {
 // crawler; the longest rule that matches the path wins, Allow on a tie.
 const AGENT = "easybrandkit";
 
+// The size of what is read: no address the kit reads is this long, and no
+// site has this many rules.
+const LONG_RULE = 2_048;
+const MANY_RULES = 10_000;
+
 function robotsRules(text) {
   const groups = [];
   let group = null;
   let agentLine = false;
   for (const raw of String(text || "").split(/\r\n|\r|\n/)) {
-    const m = raw.replace(/#.*$/, "").trim().match(/^([A-Za-z-]+)\s*:\s*(.*)$/);
-    if (!m) continue;
-    const key = m[1].toLowerCase();
-    const value = m[2].trim();
+    if (raw.length > LONG_RULE) continue;
+    const comment = raw.indexOf("#");
+    const line = comment === -1 ? raw : raw.slice(0, comment);
+    const colon = line.indexOf(":");
+    const key = line.slice(0, colon === -1 ? 0 : colon).trim().toLowerCase();
+    if (!/^[a-z-]+$/.test(key)) continue;
+    const value = line.slice(colon + 1).trim();
     if (key === "user-agent") {
       if (!agentLine) groups.push((group = { agents: [], rules: [], delay: 0 }));
       group.agents.push(value.toLowerCase().split("/")[0].trim());
@@ -273,7 +286,28 @@ function robotsRules(text) {
   }
   const own = groups.filter((g) => g.agents.includes(AGENT));
   const chosen = own.length ? own : groups.filter((g) => g.agents.includes("*"));
-  return { rules: chosen.flatMap((g) => g.rules), delay: Math.max(0, ...chosen.map((g) => g.delay)) };
+  return { rules: chosen.flatMap((g) => g.rules).slice(0, MANY_RULES), delay: chosen.reduce((longest, g) => Math.max(longest, g.delay), 0) };
+}
+
+// Whether a rule matches a path, from its start: "*" stands for any run of
+// characters, and a "$" at the end for the path's end. Each piece is looked
+// for once, after the one before it, so a rule with many wildcards costs what
+// a plain one does. A site's rule made into a regular expression can run for
+// ever, on the one thread that answers Ctrl-C and the run's own time limit.
+function ruleMatches(rule, target) {
+  const anchored = rule.endsWith("$");
+  const pieces = (anchored ? rule.slice(0, -1) : rule).split("*");
+  const first = pieces.shift();
+  if (!target.startsWith(first)) return false;
+  let at = first.length;
+  if (!pieces.length) return !anchored || at === target.length;
+  const last = pieces.pop();
+  for (const piece of pieces) {
+    const found = target.indexOf(piece, at);
+    if (found === -1) return false;
+    at = found + piece.length;
+  }
+  return anchored ? target.length - last.length >= at && target.endsWith(last) : target.includes(last, at);
 }
 
 function robotsAllow(rules, raw) {
@@ -288,10 +322,7 @@ function robotsAllow(rules, raw) {
     } catch {
       // Kept as written.
     }
-    const anchored = rulePath.endsWith("$");
-    const body = anchored ? rulePath.slice(0, -1) : rulePath;
-    const pattern = body.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*");
-    if (!new RegExp(`^${pattern}${anchored ? "$" : ""}`).test(target)) continue;
+    if (!ruleMatches(rulePath, target)) continue;
     if (!best || rule.path.length > best.path.length || (rule.path.length === best.path.length && rule.allow)) best = rule;
   }
   return !best || best.allow;
@@ -450,7 +481,9 @@ function pageLines(model) {
 
 function pageMarkdown(page, generator) {
   const body = [`Title: ${page.model.title || ""}`, "", ...pageLines(page.model)].join("\n");
-  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+  let longest = 2;
+  for (const [ticks] of body.matchAll(/`+/g)) longest = Math.max(longest, ticks.length);
+  const fence = "`".repeat(longest + 1);
   return [
     `# Page text: ${page.role}`,
     "",

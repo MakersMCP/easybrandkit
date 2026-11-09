@@ -23,6 +23,7 @@ const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run
 const { noControls, plainText } = require("../skills/easybrandkit/scripts/lib/text");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
+const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
 
 // Minimal PNG reader for 8-bit RGB/RGBA, non-interlaced (what Chrome writes).
@@ -193,6 +194,7 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   assert.equal(homePageOf("https://blog.acme.com/"), "https://acme.com/");
   assert.equal(brandName("Acme", "Whatever", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/"), "Acme");
+  assert.equal(brandName("", "Acme\n\t-  Payments", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "", "https://www.acme.com/"), "Acme");
 });
 
@@ -203,6 +205,68 @@ test("text a site wrote: control characters out, line breaks kept only where ask
   assert.equal(plainText("a   b", 2), "a");
   assert.equal(plainText(undefined), "");
   assert.equal(noControls(null), "");
+});
+
+// Runs code in a process of its own, and fails when it has not ended in time:
+// a pattern stuck on a long run of one character cannot be interrupted from
+// here, and would hold up every test.
+function endsInTime(code, ms = 20_000) {
+  const done = spawnSync(process.execPath, ["-e", `const lib = ${JSON.stringify(LIB)};\n${code}`], { encoding: "utf8", timeout: ms, killSignal: "SIGKILL" });
+  assert.equal(done.signal, null, `still running after ${ms} ms: ${code}`);
+  assert.equal(done.status, 0, done.stderr);
+  return done.stdout;
+}
+
+// findLogos on a page that is one DOM snapshot, built from the elements given.
+const HOSTILE_PAGE = String.raw`
+const { findLogos } = require(lib + "/logos.js");
+const read = async (elements) => {
+  const strings = [""];
+  const id = (text) => strings.push(text) - 1;
+  const nodes = { nodeName: [], parentIndex: [], attributes: [], nodeValue: [], backendNodeId: [] };
+  const layout = { nodeIndex: [], bounds: [], styles: [] };
+  const style = ["visible", "1", "rgba(0, 0, 0, 0)", "visible", "visible", "rgb(0, 0, 0)", "Arial"].map(id);
+  [{ name: "HTML", parent: -1 }, { name: "HEAD", parent: 0 }, { name: "BODY", parent: 0 }, ...elements].forEach((el, i) => {
+    nodes.nodeName.push(id(el.name));
+    nodes.parentIndex.push(el.parent);
+    nodes.attributes.push(Object.entries(el.attrs || {}).flatMap(([key, value]) => [id(key), id(value)]));
+    nodes.nodeValue.push(id(el.text || ""));
+    nodes.backendNodeId.push(i + 1);
+    layout.nodeIndex.push(i);
+    layout.bounds.push([0, 0, 100, 40]);
+    layout.styles.push(style);
+  });
+  const snap = { documents: [{ baseURL: id("https://acme.test/"), documentURL: id("https://acme.test/"), nodes, layout }], strings };
+  return findLogos({ send: async () => snap }, "https://acme.test/", 1600, 900);
+};
+`;
+
+test("a page's text cannot hold the thread that answers Ctrl-C and the run's own time limit", () => {
+  // A long run of spaces between two words of a title.
+  endsInTime(`
+    const { brandName } = require(lib + "/kit.js");
+    const name = brandName("", "Acme" + " ".repeat(300000) + "Pay", "https://acme.test/");
+    if (name !== "Acme Pay") throw new Error(name);
+  `);
+  for (const [what, elements, check] of [
+    ["a title of spaces", `[{ name: "TITLE", parent: 1 }, { name: "#text", parent: 3, text: "a" + " ".repeat(300000) + "b" }]`, `if (page.title.length > 300) throw new Error("long");`],
+    ["a class that is one long word", `[{ name: "DIV", parent: 2, attrs: { class: "logo-".repeat(100000) + "!" } }]`, ""],
+    ["an app id of dots", `[{ name: "META", parent: 1, attrs: { name: "al:android:package", content: ".".repeat(300000) + "!" } }]`, ""],
+    ["a link of slashes", `[{ name: "A", parent: 2, attrs: { href: "https://x.com/" + "/".repeat(300000) + "a" } }]`, ""],
+    ["a site name of many words", `[{ name: "META", parent: 1, attrs: { property: "og:site_name", content: Array.from({ length: 100000 }, (_, i) => "w" + i).join(" ") } }, ...Array.from({ length: 3000 }, (_, i) => ({ name: "IMG", parent: 2, attrs: { alt: "x".repeat(200) + i, src: "/a" + i + ".png" } }))]`, `if (page.siteName.length > 200) throw new Error("long");`],
+    ["many links", `Array.from({ length: 100000 }, (_, i) => ({ name: "A", parent: 2, attrs: { href: "https://x.com/u" + i } }))`, `if (page.links.length !== 100000) throw new Error(String(page.links.length));`],
+  ]) {
+    assert.doesNotThrow(() => endsInTime(`${HOSTILE_PAGE}\nread(${elements}).then((page) => { ${check} });`), what);
+  }
+});
+
+test("a logo's alt text and an icon's sizes come in without control characters", () => {
+  endsInTime(`${HOSTILE_PAGE}
+    read([{ name: "LINK", parent: 1, attrs: { rel: "icon", sizes: "16x16\\u001b[2J", href: "/i.png" } }, { name: "HEADER", parent: 2 }, { name: "IMG", parent: 4, attrs: { alt: "Acme logo\\u001b[2J", src: "/logo.png" } }]).then((page) => {
+      if (page.icons[0].sizes !== "16x16 [2J") throw new Error(JSON.stringify(page.icons));
+      if (page.marks[0].alt !== "Acme logo [2J") throw new Error(JSON.stringify(page.marks));
+    });
+  `);
 });
 
 test("stores and social networks: a listing leads to its website, a profile is refused before anything runs", async () => {
@@ -1616,6 +1680,47 @@ test("what a page says reaches no terminal with its control characters, and a no
   assert.equal(refused.code, 1);
   assert.doesNotMatch(refused.stderr, CONTROL, "the error");
   assert.match(refused.stderr, /answered with a bot check \("Just a moment \[2J \[Hcleared by it"\)/);
+});
+
+test("a robots.txt rule built to keep a matcher busy cannot keep a run from being stopped", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
+  let robots = false;
+  const stars = "*a".repeat(24);
+  const site = await serve((req, res) => {
+    if (req.url === "/robots.txt") {
+      robots = true;
+      return res.writeHead(200, { "content-type": "text/plain" }).end(`User-agent: *\nDisallow: /${stars}b$\n`);
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<nav><a href="/pricing?${"a".repeat(400)}">Pricing</a></nav></body>`));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let child;
+  t.after(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", "--facts", "--timeout", "120"], { detached: true, stdio: ["ignore", "ignore", "pipe"] });
+  const closed = once(child, "close");
+  let said = "";
+  child.stderr.on("data", (chunk) => (said += chunk));
+  for (let waited = 0; waited < 60_000 && !robots; waited += 50) await wait(50);
+  assert.ok(robots, `the run got as far as the site's robots.txt: ${said}`);
+  // By now the rule has been tried on the link, or the run is past it.
+  await wait(300);
+  process.kill(child.pid, "SIGTERM");
+  const ended = await Promise.race([closed, wait(15_000).then(() => null)]);
+  assert.ok(ended, `still running 15 s after SIGTERM: ${said}`);
+  assert.equal(ended[1], "SIGTERM");
+  assert.equal(said.trim().split("\n").pop(), `easybrandkit: stopped by SIGTERM. The kit already in ${dir} is as it was.`);
+  assert.deepEqual(filesOf(dir), before);
 });
 
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {

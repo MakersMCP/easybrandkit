@@ -29,7 +29,9 @@ const THIRD_PARTY = /partner|client|customer|reference|sponsor|testimonial|marqu
 const HEADER_TOKEN = /^(site-|page-|main-|global-)?(header|navbar|nav-bar|topbar|top-bar|masthead)([_-].*)?$/i;
 const FOOTER_TOKEN = /^(site-|page-|main-|global-)?footer([_-].*)?$/i;
 const MARK_TOKEN = /^([a-z0-9]+[_-]+)*(logo|brand)([_-]+[a-z0-9]+)*$/i;
-const hasToken = (hint, pattern) => hint.split(/\s+/).some((token) => pattern.test(token));
+// No class or id this long names a logo, and a site can write one to keep
+// these patterns busy for minutes.
+const hasToken = (hint, pattern) => hint.split(/\s+/).some((token) => token.length <= 100 && pattern.test(token));
 const BRAND_STOPWORDS = new Set(["home", "the", "and", "www", "site", "app", "official", "web"]);
 const IMAGE_META = new Set([
   "og:image", "og:image:url", "og:image:secure_url", "og:logo",
@@ -95,8 +97,11 @@ function cssColorToHex(color) {
 }
 
 // An app store listing or a social profile, as one canonical URL; share and
-// intent links and bare home pages are not the brand's own pages.
+// intent links and bare home pages are not the brand's own pages, and neither
+// is a link no one would write, which a site can make long to keep the
+// patterns here busy.
 function brandLink(raw, base) {
+  if (String(raw || "").length > 2_000) return null;
   let url;
   try {
     url = new URL(String(raw || "").trim(), base);
@@ -188,13 +193,19 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
   let challengeScript = false;
   let description = "";
   let ogDescription = "";
+  const imageUrls = new Set();
+  const linkUrls = new Set();
   const addImage = (property, raw) => {
     const url = absoluteUrl(raw, base);
-    if (url && !images.some((image) => image.url === url)) images.push({ property, url });
+    if (!url || imageUrls.has(url)) return;
+    imageUrls.add(url);
+    images.push({ property, url });
   };
   const addLink = (raw, from) => {
     const link = brandLink(raw, base);
-    if (link && !links.some((known) => known.url === link.url)) links.push({ ...link, from });
+    if (!link || linkUrls.has(link.url)) return;
+    linkUrls.add(link.url);
+    links.push({ ...link, from });
   };
   const ldJson = [];
   names.forEach((name, i) => {
@@ -214,7 +225,7 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
       if (key === "description" && !description) description = plainText(content, 2_000);
       if (key === "og:description" && !ogDescription) ogDescription = plainText(content, 2_000);
       if (IMAGE_META.has(key)) addImage(key, content);
-      const appId = (content.match(/app-id=([\w.]+)/) || [])[1] || content.trim();
+      const appId = content.length > 300 ? "" : (content.match(/app-id=([\w.]+)/) || [])[1] || content.trim();
       if ((key === "apple-itunes-app" || key === "al:ios:app_store_id" || key === "twitter:app:id:iphone") && /^\d{5,}$/.test(appId)) {
         addLink(`https://apps.apple.com/app/id${appId}`, "meta");
       }

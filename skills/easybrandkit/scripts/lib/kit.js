@@ -117,8 +117,10 @@ function prepareDir(dir) {
 // The site's name: og:site_name, else the title up to its first separator
 // ("Acme | Payments for teams" is Acme), else the host name.
 function brandName(siteName, title, url) {
-  if (siteName.trim()) return siteName.trim();
-  const first = String(title || "").split(/\s+[|·•:\u2013\u2014-]\s+/)[0].trim();
+  const own = plainText(siteName, 200);
+  if (own) return own;
+  // By now one space stands between two words, whatever the page wrote.
+  const first = plainText(title).split(/ [|·•:\u2013\u2014-] /)[0];
   if (first && first.length <= 40) return first;
   const label = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
   return label.charAt(0).toUpperCase() + label.slice(1);

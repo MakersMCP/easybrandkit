@@ -61,7 +61,14 @@ function linesOf(page, node) {
   }
   return lines;
 }
-const tidy = (text) => text.replace(/\s+/g, " ").replace(/(^|\s)(\S*\d\S*)(?:\s\2)+(?=\s|$)/g, "$1$2").trim();
+// With single spaces, and a word with a digit in it that a ticker draws twice
+// said once. Word by word, since a pattern for it takes minutes on a very
+// long word of digits, and this also runs on the thread that answers Ctrl-C.
+function tidy(text) {
+  const kept = [];
+  for (const word of text.split(/\s+/)) if (word && !(word === kept[kept.length - 1] && /\d/.test(word))) kept.push(word);
+  return kept.join(" ");
+}
 const lineOf = (page, node) => tidy(linesOf(page, node).join(" "));
 
 function* ancestors(page, node) {
