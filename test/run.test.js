@@ -1228,7 +1228,7 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   }
   assert.deepEqual(filesOf(dir), before);
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
-  assert.match(help.stdout, /\nA home page that answers with an HTTP error \(400 or above\), also after a\nredirect, or that moves on to a page that cannot be opened, gets no kit: the\nrun fails and says which address answered what\.\n/);
+  assert.match(help.stdout, /\nAn address that answers with an HTTP error \(400 or above\), also after a\nredirect, or that moves on to a page that cannot be opened or to a blank\npage, gets no kit: the run fails and says which address answered what\. When\nthe page that fails is one the kit chose to read, the home page of a deeper\naddress or the website a store listing names, the run goes on with what it\nhas and says so in the kit's notes\.\n/);
   assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails, is refused, or is stopped with Ctrl-C\nor a kill leaves the folder as it was, and a folder it would have made is\nnot made\. A run killed outright, as kill -9, taskkill \/F or a power cut do,\ncan leave a hidden \.easybrandkit-part- folder in the folder or next to it,\nand its browser running, with its profile and its own folders in the temp\nfolder; the README says what is left and what removes it\.\n/);
 });
 

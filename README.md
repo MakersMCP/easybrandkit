@@ -178,7 +178,7 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 
 ## How it works
 
-1. Opens the home page in a headless browser on a 1600x900 desktop screen. An address deeper in the site is read from the home page, because a blog or a help center often wears another theme.
+1. Opens the home page in a headless browser on a 1600x900 desktop screen. An address deeper in the site is read from the home page, because a blog or a help center often wears another theme. When the home page cannot be read, the address given is read instead.
 2. Scrolls to the bottom and back, so lazy sections and footer logos load.
 3. Reads one DOM snapshot with layout and computed styles. Logo candidates are images, outermost SVGs and elements named "logo" or "brand". They are kept only in the page header, in the page footer, inside a link to the home page, or when they are named after the brand.
 4. Brings each logo to the middle of the screen, finishes its fade-in, hides whatever paints over it (a popup backdrop, the next line of text) and cuts it out with a margin of its own background. The background is read from that margin's pixels, not from the CSS. A logo drawn as SVG is also written out as a vector, with the page's styles on it and its scripts removed.
@@ -189,7 +189,9 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 ## Limits
 
 - A site that answers with a bot check or a login wall gets no kit: easybrandkit stops and says so, instead of saving the check page's colors.
-- A home page that answers with an HTTP error (400 or above), also after a redirect, gets no kit, and neither does one that moves on to a page that cannot be opened: easybrandkit stops and says which address answered what, instead of saving the error page's logo and colors. With `--facts`, a menu page that answers with an error is skipped, and the notes say so.
+- An address that answers with an HTTP error (400 or above), also after a redirect, gets no kit, and neither does one that cannot be opened or that moves on to a page that cannot be opened or to a blank page: easybrandkit stops and says which address answered what, instead of saving the error page's logo and colors.
+- Those refusals are for the address you give. When the page that fails is one easybrandkit chose to read, the run goes on with what it has and the kit's notes say so. A store listing whose website answers with an error, cannot be opened or answers with a bot check keeps the app icon and screenshots from the listing, with no logos, colors or fonts, as a listing that names no website does. An address deeper in a site whose home page fails that way is read as given, and if that fails too, the error names the address you gave. A run that goes on like this has ended well, so its kit takes the place of an earlier one in the folder.
+- With `--facts`, a menu page that answers with an error is skipped, and `FACTS.md` and the summary name it.
 - Instagram, Facebook and TikTok serve nothing without a login, so they are not asked.
 - A logo drawn into a canvas or a WebGL scene is not found.
 - Colors come from what the home page shows. A main color used on one button of another page will not show up.
