@@ -9,7 +9,7 @@
 const fs = require("fs");
 const path = require("path");
 const { FACT_FILES } = require("./facts");
-const { PART, KEPT, isRunName, swapping, shownFrom } = require("./run");
+const { PART, KEPT, COMING, isRunName, swapping, shownFrom } = require("./run");
 
 // The files an earlier kit lists, by name only: a brand.json someone edited
 // cannot point a new kit's move outside the folder, or at a hidden file.
@@ -54,17 +54,23 @@ function earlierAside(target) {
   return "";
 }
 
-// The files that a run killed while its files moved in had already brought
-// into the folder under names the earlier kit's files it set aside do not
-// have: moving those back leaves these, and a later run would take them for
-// the user's own. Its brand.json moves in last, so it is still in its part
-// folder and lists them: the pictures that have left the part folder. The
-// fixed names, like FACTS.md, are any kit's and go with the next kit.
+// What a run killed while its files moved in had brought into the folder
+// under names the folder did not hold before: moving the earlier kit's
+// files back leaves these, and a later run would take them for the user's
+// own. The run wrote those names down in its part folder before its first
+// move, so a file of the earlier kit's or of the user's is never among
+// them, also once some were moved back by hand: those named are the ones
+// that are in the folder and no longer in the part folder, "pages/" for a
+// pages folder that moved in whole.
 function broughtIn(target, aside) {
   if (path.basename(aside) !== ".earlier") return [];
   const part = path.dirname(aside);
-  const kit = readKit(part);
-  if (!kit) return [];
+  let names;
+  try {
+    names = JSON.parse(fs.readFileSync(path.join(part, COMING), "utf8"));
+  } catch {
+    return [];
+  }
   const there = (at) => {
     try {
       return Boolean(fs.lstatSync(at, { throwIfNoEntry: false }));
@@ -72,7 +78,19 @@ function broughtIn(target, aside) {
       return false;
     }
   };
-  return kitFiles(kit).filter((name, i, all) => all.indexOf(name) === i && !there(path.join(part, name)) && there(path.join(target, name)) && !there(path.join(aside, name)));
+  // Only names of the kind a run writes down, none that leads out of the
+  // folder.
+  const plain = (name) => typeof name === "string" && (name === "pages/" || /^(pages\/)?[^./\\][^/\\]*$/.test(name));
+  return [].concat(names).filter((name, i, all) => plain(name) && all.indexOf(name) === i && there(path.join(target, name)) && !there(path.join(part, name)));
+}
+
+// Whether a folder holds a file.
+function holdsFile(at) {
+  try {
+    return fs.readdirSync(at, { withFileTypes: true }).some((entry) => !entry.isDirectory());
+  } catch {
+    return false;
+  }
 }
 
 // "a", "a and b", "a, b and c".
@@ -109,13 +127,14 @@ function look(at, dir) {
 // anything else is refused, so a run never mixes into or overwrites
 // someone's own files, and so is a path that is not a folder or below a
 // file; the refusal of a folder whose earlier kit a run left in pieces says
-// where its brand.json is, and which files that run brought in. A link to a
-// folder counts as that folder, and a link to nothing is refused. The part
-// folders and the lock of runs do not count, and nothing is changed. With
-// facts, a pages there that is not a folder is refused, since the kit does
-// not write through it. A folder whose brand.json is away while another run
-// puts its kit in counts as a kit (saving is false before a run, when the
-// folder is read again under the run's own lock).
+// where its brand.json and its page texts are, and which files that run
+// brought in. A link to a folder counts as that folder, and a link to
+// nothing is refused. The part folders and the lock of runs do not count,
+// and nothing is changed. With facts, a pages there that is not a folder is
+// refused, since the kit does not write through it. A folder whose
+// brand.json is away while another run puts its kit in counts as a kit
+// (saving is false before a run, when the folder is read again under the
+// run's own lock).
 function checkDir(dir, { facts = false, saving = false } = {}) {
   const target = path.resolve(dir);
   for (let at = target; ; at = path.dirname(at)) {
@@ -167,9 +186,16 @@ function checkDir(dir, { facts = false, saving = false } = {}) {
     // would leave that kit in pieces for good.
     const aside = earlierAside(target);
     if (aside) {
+      const shown = shownFrom(dir, aside);
       const theirs = broughtIn(target, aside);
       const remove = theirs.length ? `remove ${listed(theirs)}, which that run brought in too, ` : "";
-      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shownFrom(dir, aside)}, with the files it had moved aside. Move them back into ${dir}, replacing any files of the same name there, which are that run's, ${remove}and run again.`);
+      // The earlier kit's page texts wait in a pages folder of their own: a
+      // folder cannot be moved over the kit's pages folder, which holds that
+      // run's page texts or the user's files.
+      const back = holdsFile(path.join(aside, "pages"))
+        ? `Move the files in ${path.join(shown, "pages")} back into ${path.join(dir, "pages")}, and the other files in ${shown} back into ${dir}`
+        : `Move them back into ${dir}`;
+      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shown}, with the files it had moved aside. ${back}, replacing any files of the same name there, which are that run's, ${remove}and run again.`);
     }
     if (names.length === 0) return null;
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);

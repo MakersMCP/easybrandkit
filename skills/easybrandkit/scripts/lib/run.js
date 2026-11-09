@@ -27,6 +27,10 @@ const KEPT = /^easybrandkit-kept-\d+-[0-9a-f]{8}$/;
 // run killed outright left.
 const LOCK = ".easybrandkit-swap";
 const TAKEOVER = `${LOCK}-takeover`;
+// In a part folder, as its files start to move: the names the new kit brings
+// into the kit's folder that the folder did not hold then, "pages/" for a
+// pages folder that moves in whole.
+const COMING = ".coming";
 // The names a run makes in a kit's folder and removes again.
 const isRunName = (name) => PART.test(name) || name === LOCK || name === TAKEOVER;
 // A run killed outright (kill -9, a power cut) cannot remove its part
@@ -446,7 +450,7 @@ function swap(run, earlierNow) {
     run.work = inside;
   }
   const work = run.work;
-  const newNames = fs.readdirSync(work).filter((name) => name !== ".earlier");
+  const newNames = fs.readdirSync(work).filter((name) => name !== ".earlier" && name !== COMING);
   // pages/ is moved in and out only as a folder of the kit's folder: a link
   // there, say to a folder of the user's elsewhere, is never read or written
   // through, and the earlier kit's page texts are not looked for in it.
@@ -455,13 +459,29 @@ function swap(run, earlierNow) {
   if (newNames.includes("pages") && pagesThere && !pagesFolder) {
     throw new SaveError(`The new kit could not be put in ${dir}: pages there is ${pagesThere.isSymbolicLink() ? "a link" : "a file"}, where the new kit has a folder of page texts. ${asWas}`);
   }
+  // What the new kit brings in under names the folder does not hold now,
+  // written down in the part folder before the first move. A run killed
+  // while its files move leaves the earlier kit's files aside, and the next
+  // run names these, and only these, as files to remove (see folder.js):
+  // none of them holds a file of the earlier kit or of the user's.
+  const bringing = [];
+  for (const name of newNames) {
+    if (name !== "pages") {
+      if (!lstat(path.join(target, name))) bringing.push(name);
+    } else if (!pagesThere) bringing.push("pages/");
+    else for (const page of fs.readdirSync(path.join(work, "pages"))) if (!lstat(path.join(target, "pages", page))) bringing.push(`pages/${page}`);
+  }
   const aside = path.join(work, ".earlier");
+  // .earlier holds a pages folder only once a page text goes aside, so that
+  // when none does, the earlier kit's files can be moved back in one go.
+  const asidePages = path.join(aside, "pages");
   // Each move as [from, to, name, whether it moved a new file in].
   const moved = [];
   const move = (from, to, name, coming) => {
     // rename(2) would replace a file without a word: a file is replaced only
     // by moveIn, which moves it aside first.
     if (lstat(to)) throw new Error(`${name} came there while the new kit was put in`);
+    if (path.dirname(to) === asidePages && !lstat(asidePages)) fs.mkdirSync(asidePages);
     try {
       rename(from, to);
     } catch (err) {
@@ -473,9 +493,9 @@ function swap(run, earlierNow) {
   // holds a brand.json that does not match the files next to it.
   const last = (names) => [...names.filter((name) => name !== "brand.json"), ...names.filter((name) => name === "brand.json")];
   try {
+    fs.writeFileSync(path.join(work, COMING), JSON.stringify(bringing.sort()));
     // Not with recursive: a part folder that is gone is not made again.
     fs.mkdirSync(aside);
-    fs.mkdirSync(path.join(aside, "pages"));
     for (const name of last(earlierNow).reverse()) {
       if (name.startsWith("pages/") && !pagesFolder) continue;
       const at = lstat(path.join(target, name));
@@ -610,4 +630,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, KEPT, LOCK, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
+module.exports = { PART, KEPT, LOCK, COMING, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
