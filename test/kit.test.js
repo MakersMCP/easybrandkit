@@ -1782,8 +1782,39 @@ test("a browser killed while the page is read fails the run at once and says so,
   await assert.rejects(makeKit(site.origin, { dir, stores: false, log: (line) => line === "Reading the page" && killBrowsers() }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again." && err.earlierKit === dir);
   assert.ok(Date.now() - started < 15_000, `told after ${Date.now() - started} ms`);
   assert.deepEqual(filesOf(dir), before, "a browser killed");
-  await assert.rejects(makeKit(silent.origin, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `${silent.origin}/ did not answer` && err.earlierKit === dir);
+  await assert.rejects(makeKit(silent.origin, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `${silent.origin}/ did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before, "a server that never answers");
+  // One call's own limit passed, with time to spare: more time would not help.
+  const stalled = withStalledTab(t, "Page.navigate");
+  await assert.rejects(stalled(silent.origin, { dir, stores: false }), (err) => err.message === `${silent.origin}/ did not answer` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before, "one call's own limit");
+});
+
+test("a home page the run used up its time on ends the run, with the advice to give it more time, and the address given is not read past the limit", { skip: noBrowser }, async (t) => {
+  const asked = [];
+  const site = await serve((req, res) => {
+    asked.push(req.url);
+    // Takes the connection and never answers, but for the deeper page.
+    if (req.url === "/project/") res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.closeAllConnections();
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const home = `${site.origin}/`;
+  const deeper = `${home}project/`;
+  await assert.rejects(makeKit(deeper, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `${home} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
+  assert.deepEqual(asked.filter((url) => url !== "/favicon.ico"), ["/"]);
+  assert.deepEqual(filesOf(dir), before);
+  // With time to spare, a home page that does not answer is a page that failed.
+  const stalledOnce = withStalledTab(t, "Page.navigate", 1);
+  const { kit } = await stalledOnce(deeper, { dir: path.join(parent, "deeper"), stores: false });
+  assert.deepEqual(kit.notes, [`The home page, ${home}, could not be read: it did not answer. ${deeper} was read as given, and its header and colors can differ from the home page's.`]);
 });
 
 test("a browser killed while the page loads is told at once, not after the wait for the page's load event", { skip: noBrowser }, async (t) => {

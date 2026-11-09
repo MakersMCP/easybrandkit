@@ -35,7 +35,7 @@ const { renderCard } = require("./card");
 const { brandYml } = require("./brandyml");
 const { readFactPages, writeFacts } = require("./facts");
 const { classify, readSource } = require("./stores");
-const { setTimeLimit, timeLeft, sleep } = require("./time");
+const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
 const { SaveError, toldPlainly, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
 const { plainText } = require("./text");
@@ -255,9 +255,8 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     if (err.syscall) throw err;
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
     if (err.timedOut) {
-      // More time helps only a run that used up its own: one call's limit
-      // does not change with it.
-      throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${timeLeft() < 2_000 ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering");
+      const spent = outOfTime();
+      throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent);
     }
     throw err;
   } finally {
@@ -399,18 +398,19 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     }
     // The app's own name, up to a tagline ("Duolingo: Learn Languages").
     const appName = given ? String(given.name || "").split(/\s*[:|\u2013\u2014]\s*|\s+-\s+/)[0] : "";
-    // A page that fails ends the run when it is the address the user gave.
-    // When it is another page the kit chose to read, the run goes on with
-    // what it has: a listing keeps what the listing gave, and a deeper
-    // address is read as given, whose own failure then ends the run and
-    // names it. What the failed read wrote does not go into the kit.
+    // A page that fails ends the run when it is the address the user gave,
+    // or when the run has used up its time on it. When it is another page
+    // the kit chose to read, the run goes on with what it has: a listing
+    // keeps what the listing gave, and a deeper address is read as given,
+    // whose own failure then ends the run and names it. What the failed read
+    // wrote does not go into the kit.
     let failed = "";
     if (page) {
       const had = fs.readdirSync(work);
       try {
         read = await readPage(page, work, log, appName, facts);
       } catch (err) {
-        if (!err.pageFailed || page === asked) throw err;
+        if (!err.pageFailed || page === asked || err.outOfTime) throw err;
         failed = err.pageFailed;
         for (const name of fs.readdirSync(work)) if (!had.includes(name)) fs.rmSync(path.join(work, name), { recursive: true, force: true });
       }

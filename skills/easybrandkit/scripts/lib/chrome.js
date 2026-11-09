@@ -8,7 +8,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
-const { timeLeft, sleep } = require("./time");
+const { timeLeft, outOfTime, sleep } = require("./time");
 
 const MAC = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -461,8 +461,9 @@ function killBrowsers() {
 
 // An error about a page and not about the run. Its pageFailed holds what the
 // page did, in words that can follow its address or "it", for a run that goes
-// on without a page it chose to read.
-const pageFailed = (message, what) => Object.assign(new Error(message), { pageFailed: what });
+// on without a page it chose to read. Its outOfTime says the page got no more
+// of the run's time, where more of it can help: such a run does not go on.
+const pageFailed = (message, what, spent = false) => Object.assign(new Error(message), { pageFailed: what, outOfTime: spent });
 
 function connect(wsUrl) {
   return new Promise((resolve, reject) => {
@@ -585,8 +586,9 @@ async function navigate(cdp, url) {
   try {
     ({ errorText } = await cdp.send("Page.navigate", { url }));
   } catch (err) {
-    if (err.timedOut) throw pageFailed(`${url} did not answer`, "did not answer");
-    throw err;
+    if (!err.timedOut) throw err;
+    if (outOfTime()) throw pageFailed(`${url} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`, "did not answer", true);
+    throw pageFailed(`${url} did not answer`, "did not answer");
   }
   if (errorText) {
     if (cdp.answer.status >= 400) return url;
