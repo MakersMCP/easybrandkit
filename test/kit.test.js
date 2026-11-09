@@ -760,6 +760,14 @@ test("a browser that cannot start because the temp folder's path is too long for
   const said = `chrome did not start: the path of the temp folder, ${deep}, is too long for the socket the browser makes in it, whose path would be ${length} bytes where Linux allows 107. Set TMPDIR to a folder whose path is at least ${length - 107} bytes shorter.`;
   await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === said);
   assert.deepEqual(fs.readdirSync(deep), [], "nothing is left in the temp folder");
+  // One byte too long.
+  const socket = Buffer.byteLength(path.join(parent, "", "com.google.Chrome.XXXXXX", "SingletonSocket"));
+  if (socket < 107) {
+    const near = path.join(parent, "n".repeat(108 - socket - 1));
+    fs.mkdirSync(near);
+    process.env.TMPDIR = near;
+    await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message.endsWith("whose path would be 108 bytes where Linux allows 107. Set TMPDIR to a folder whose path is at least 1 byte shorter."));
+  }
   // In a temp folder short enough for the socket, the browser ended for
   // another reason.
   if (env.TMPDIR === undefined) delete process.env.TMPDIR;

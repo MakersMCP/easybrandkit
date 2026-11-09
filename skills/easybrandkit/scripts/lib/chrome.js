@@ -359,7 +359,7 @@ async function launch({ width, height }) {
   const tooLong = exited ? socketTooLong(temp, before) : 0;
   await close();
   if (tooLong) {
-    throw new Error(`${path.basename(binary)} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} bytes shorter.`);
+    throw new Error(`${path.basename(binary)} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
   }
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
 }
