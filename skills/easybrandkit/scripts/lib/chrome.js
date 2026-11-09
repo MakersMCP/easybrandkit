@@ -159,9 +159,12 @@ function processesOf(child) {
 }
 
 // The crash handler a browser's processes name, on Linux, which Chrome starts
-// apart from them: it is no child of theirs, and its command line does not
-// name the profile. Ctrl-\ reaches the browser's helpers too, each of them
-// asks it for a crash report, and it takes hold of each one to write it. A
+// apart from them: it is no child of theirs, so it is found by the pid
+// their --crashpad-handler-pid gives. Since its reports go into the profile,
+// its --database names the profile too, and so endAll, which looks for the
+// processes that name the profile, also finds it and the process that
+// watches it. Ctrl-\ reaches the browser's helpers too, each of them asks
+// it for a crash report, and it takes hold of each one to write it. A
 // helper killed while it is held stays until the handler lets go of it,
 // which it can fail to do for good. So it goes with them: the one named,
 // only when it is a crash handler by the name /proc gives it (the first 15

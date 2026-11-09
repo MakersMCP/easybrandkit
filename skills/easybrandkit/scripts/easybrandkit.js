@@ -35,8 +35,8 @@ run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
 or a kill leaves the folder as it was, and a folder it would have made is
 not made. A run killed outright, as kill -9, taskkill /F or a power cut do,
 can leave a hidden .easybrandkit-part- folder in the folder or next to it,
-and its browser running, with its profile in the temp folder; the README
-says what is left and what removes it.
+and its browser running, with its profile and its own folders in the temp
+folder; the README says what is left and what removes it.
 
 Needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set CHROME_PATH
 to pick the browser.`;
@@ -126,7 +126,8 @@ function stopOnSignals(json) {
       const stopped = discardRuns();
       const saved = savedRuns();
       // A stop in the moment between the save and the end of the process
-      // keeps the new kit, whose summary has been printed already.
+      // keeps the new kit. Its summary or brand.json may not have reached
+      // stdout, as when nobody reads it, so the message names its folder.
       const after = !stopped.length && saved.length > 0;
       const messages = stopped.length
         ? stopped.map((run) => `stopped by ${signal}. ${run.earlier ? `The kit already in ${run.dir} is as it was.` : "No kit was saved."}`)
