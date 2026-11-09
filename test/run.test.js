@@ -127,6 +127,28 @@ test("a part folder gets the mode any folder made there gets, so a default ACL i
   assert.equal(mode(fresh), want, "the kit's folder it becomes");
 });
 
+test("a disk that fills up while a run makes the folders above its kit leaves none of them", (t) => {
+  const parent = tempParent(t);
+  const out = path.join(parent, "a", "b", "c", "kit");
+  const mkdir = fs.mkdirSync;
+  let theirs = false;
+  const failing = t.mock.method(fs, "mkdirSync", function (at, options) {
+    if (!options || !options.recursive || at !== path.dirname(out)) return mkdir.call(this, at, options);
+    // Made one level at a time, the kernel refuses the last one.
+    mkdir(path.join(parent, "a", "b"), { recursive: true });
+    if (theirs) fs.writeFileSync(path.join(parent, "a", "b", "theirs.txt"), "theirs");
+    throw Object.assign(new Error(`ENOSPC: no space left on device, mkdir '${at}'`), { code: "ENOSPC", syscall: "mkdir", path: at });
+  });
+  const said = `The disk that holds ${parent} is full (ENOSPC), so ${out} cannot be made there. Pick a folder you can write in with --out.`;
+  assert.throws(() => startRun(out, checkDir(out)), (err) => err.message === said);
+  assert.deepEqual(fs.readdirSync(parent), []);
+  // A folder that something else has put a file in stays.
+  theirs = true;
+  assert.throws(() => startRun(out, checkDir(out)));
+  failing.mock.restore();
+  assert.deepEqual(filesOf(parent), ["a/", "a/b/", `a/b/theirs.txt ${hash("theirs")}`]);
+});
+
 test("a run that does not end well removes its part folder and the folders it made", (t) => {
   const parent = tempParent(t);
   const run = startRun(path.join(parent, "new", "brand", "acme"), null);

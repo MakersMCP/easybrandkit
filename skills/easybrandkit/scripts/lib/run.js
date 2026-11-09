@@ -153,9 +153,19 @@ function startRun(dir, earlier) {
   // The folders made for the part folder, removed again when the run does
   // not end well.
   let made;
+  const above = firstThere(home);
   try {
     made = there ? undefined : fs.mkdirSync(home, { recursive: true });
   } catch (err) {
+    // Made one level at a time: those that came before the one that failed
+    // stay unless they are removed, deepest first.
+    for (let at = home; at !== above; at = path.dirname(at)) {
+      try {
+        fs.rmdirSync(at);
+      } catch (e) {
+        if (e.code !== "ENOENT") break;
+      }
+    }
     throw notMade(dir, err);
   }
   const run = { dir, target, home, made: made && path.resolve(made), work: "", earlier: Boolean(earlier && earlier.length) };
