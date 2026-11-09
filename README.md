@@ -120,6 +120,8 @@ Moving its files into place takes a moment. Killed in that moment, a run leaves 
 2. Remove the files the refusal names as that run's. The run wrote those names down before its first move, as names the folder did not hold, so none of them is a file of the earlier kit or of yours.
 3. Run again.
 
+A folder that held no kit when that run began has no earlier files to move back. A later run refuses it and names the files that run left there: remove them and run again.
+
 A move into place that fails and cannot be undone is rare; its error names the folder that holds the earlier kit's files.
 
 ## The site's own claims

@@ -84,6 +84,23 @@ function broughtIn(target, aside) {
   return [].concat(names).filter((name, i, all) => plain(name) && all.indexOf(name) === i && there(path.join(target, name)) && !there(path.join(part, name)));
 }
 
+// What a run killed while its files moved in left behind in a folder that
+// held no kit, so that it moved nothing aside: the names its part folder
+// wrote down, as in broughtIn.
+function leftByKilled(target) {
+  let names = [];
+  try {
+    names = fs.readdirSync(target).filter((name) => PART.test(name)).sort();
+  } catch {
+    return [];
+  }
+  for (const name of names) {
+    const theirs = broughtIn(target, path.join(target, name, ".earlier"));
+    if (theirs.length) return theirs;
+  }
+  return [];
+}
+
 // Whether a folder holds a file.
 function holdsFile(at) {
   try {
@@ -205,6 +222,8 @@ function checkDir(dir, { facts = false, saving = false } = {}) {
       throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shown}, with the files it had moved aside. ${back}, replacing any files of the same name there, which are that run's, ${remove}and run again.`);
     }
     if (names.length === 0) return null;
+    const theirs = leftByKilled(target);
+    if (theirs.length) throw new Error(`${dir} holds no earlier brand kit, only what a run that did not finish putting its kit in place left there: ${listed(theirs)}. Remove ${theirs.length === 1 ? "it" : "them"} and run again, or pick another folder with --out.`);
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
   }
   const pages = facts && fs.lstatSync(path.join(target, "pages"), { throwIfNoEntry: false });

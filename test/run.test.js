@@ -1024,6 +1024,33 @@ test("a run with --facts killed outright as its files move in: the refusal says 
   assert.deepEqual(visible(without), asFiles(plain));
 });
 
+test("a run killed as its files move into a folder that held no kit is refused by the files it left, and with those removed the folder is free", (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  fs.mkdirSync(dir);
+  const coming = kitOf("killed", ["logo-01.png", "logo-02.png"]);
+  // Killed after its first two moves: no earlier kit waits anywhere, so
+  // there is none to name.
+  killedRun(parent, dir, coming, { stage: "in", count: 2 });
+  const left = fs.readdirSync(dir).filter((name) => !name.startsWith(".")).sort();
+  assert.equal(left.length, 2, left.join(" "));
+  assert.ok(!left.includes("brand.json"), "brand.json comes in last");
+  const said = `${dir} holds no earlier brand kit, only what a run that did not finish putting its kit in place left there: ${left.join(" and ")}. Remove them and run again, or pick another folder with --out.`;
+  const before = filesOf(dir);
+  const cli = spawnSync(process.execPath, [CLI, "acme.example", "--out", dir], { encoding: "utf8", env: { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") } });
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.equal(cli.stderr, `easybrandkit: ${said}\n`);
+  assert.deepEqual(filesOf(dir), before);
+  // One file left to name.
+  fs.rmSync(path.join(dir, left[1]));
+  assert.throws(() => checkDir(dir), (err) => err.message.endsWith(`left there: ${left[0]}. Remove it and run again, or pick another folder with --out.`));
+  fs.rmSync(path.join(dir, left[0]));
+  assert.equal(checkDir(dir), null, "only the killed run's part folder and lock are left");
+  // A file of someone else's is told as before, also next to a part folder.
+  writeFiles(dir, { "notes.txt": "mine" });
+  assert.throws(() => checkDir(dir), (err) => err.message === `${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
+});
+
 test("a run that started before its kit's folder was there and is killed as its files move in leaves the earlier kit in that folder, where the next run finds it", (t) => {
   const parent = tempParent(t);
   // Its part folder is made next to the kit's folder, and another run's kit
