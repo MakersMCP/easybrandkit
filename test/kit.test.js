@@ -14,7 +14,8 @@ const zlib = require("node:zlib");
 const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
-const { makeKit, normalizeUrl, homePageOf, siteOfListing, checkDir, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
+const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
+const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 const { findChrome, launch, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
@@ -330,6 +331,10 @@ test("a temp folder with no room left for the browser's profile is told as the t
 
 test("the skill folder carries its own version, the same as the package's", () => {
   assert.equal(require("../skills/easybrandkit/scripts/lib/version"), require("../package.json").version);
+});
+
+test("code that requires the package gets the functions 0.4.0 gave it, and no others", () => {
+  assert.deepEqual(Object.keys(require("..")), ["makeKit", "normalizeUrl", "homePageOf", "siteOfListing", "prepareDir", "brandName"]);
 });
 
 test("a cut's ground comes from its pixels: one color, or a picture", () => {

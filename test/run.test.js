@@ -14,7 +14,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const test = require("node:test");
 const { startRun, discardRun, discardRuns, saveRun, toldPlainly, SaveError, STALE, LOCK, LOCK_STALE } = require("../skills/easybrandkit/scripts/lib/run");
-const { checkDir } = require("../skills/easybrandkit/scripts/lib/kit");
+const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -771,7 +771,7 @@ function killedRun(parent, dir, files, { stage, count, earlier = null }) {
       'const fs = require("fs");',
       'const path = require("path");',
       `const { startRun, saveRun } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/run"))});`,
-      `const { checkDir } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/kit"))});`,
+      `const { checkDir } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/folder"))});`,
       "const [dir, files, stage, count, earlier] = process.argv.slice(2);",
       "const run = startRun(dir, checkDir(dir));",
       "for (const [name, body] of Object.entries(JSON.parse(files))) fs.writeFileSync(path.join(run.work, name), body);",
