@@ -253,6 +253,11 @@ async function launch({ width, height }) {
   const temp = os.tmpdir();
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
+  // Chrome on Linux has its crash handler write the reports of its processes
+  // into the user's own browser's folder (~/.config/google-chrome/Crash
+  // Reports), where nothing removes them; Ctrl-\ asks for one from each of
+  // its helpers. BREAKPAD_DUMP_LOCATION puts them in the throwaway profile.
+  const env = { ...process.env, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
   const child = spawn(
     binary,
     [
@@ -272,7 +277,7 @@ async function launch({ width, height }) {
       ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
       "about:blank",
     ],
-    { stdio: "ignore" },
+    { stdio: "ignore", env },
   );
   let exited = false;
   child.on("exit", () => (exited = true));

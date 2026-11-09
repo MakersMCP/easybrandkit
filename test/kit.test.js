@@ -543,12 +543,14 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
 // linked from the profile. Ctrl-C reaches the browser too, and Chrome's own
 // shutdown then removes the profile's links first and that folder a moment
 // later: this one removes the links and goes on running, as a browser that
-// the kit kills in that moment leaves them.
+// the kit kills in that moment leaves them. It also says where it was told
+// to write its crash reports.
 const WITH_SOCKET = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
 done
 echo $$ > "$STAND_IN_PID"
+printf '%s' "$BREAKPAD_DUMP_LOCATION" > "$STAND_IN_DUMPS"
 socket=$(mktemp -d "$TMPDIR/com.google.Chrome.XXXXXX")
 echo x > "$socket/SingletonSocket"
 ln -s 1234567890 "$socket/SingletonCookie"
@@ -564,7 +566,7 @@ function withSocket(t) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
-  const names = ["CHROME_PATH", "TMPDIR", "STAND_IN_PID"];
+  const names = ["CHROME_PATH", "TMPDIR", "STAND_IN_PID", "STAND_IN_DUMPS"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   const started = [];
   t.after(() => {
@@ -577,7 +579,7 @@ function withSocket(t) {
   });
   const chrome = path.join(parent, "chrome");
   fs.writeFileSync(chrome, WITH_SOCKET, { mode: 0o755 });
-  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, STAND_IN_PID: path.join(parent, "chrome.pid") });
+  Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, STAND_IN_PID: path.join(parent, "chrome.pid"), STAND_IN_DUMPS: path.join(parent, "dumps") });
   return {
     temp,
     // The profile of the browser that runs, and the browser's pid.
@@ -605,6 +607,15 @@ test("a browser killed as it begins to quit on Ctrl-C leaves no folder of its ow
     assert.ok(ended(pid), `the browser ${end}`);
     assert.deepEqual(fs.readdirSync(temp), [], `a browser ${end}`);
   }
+});
+
+test("a browser's crash reports go into its throwaway profile, not into the user's own browser's folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+  const { temp, started } = withSocket(t);
+  await launch({ width: 800, height: 600 });
+  const { profile } = started();
+  assert.equal(fs.readFileSync(process.env.STAND_IN_DUMPS, "utf8"), path.join(profile, "Crash Reports"));
+  killBrowsers();
+  assert.deepEqual(fs.readdirSync(temp), []);
 });
 
 test("what Chrome's component updater was fetching goes once a browser has ended, and only what came while it ran", (t) => {
