@@ -424,6 +424,37 @@ test("what a page says stays out of FACTS.md and facts.json with its control cha
   assert.doesNotMatch(fs.readFileSync(path.join(dir, "FACTS.md"), "utf8"), control);
 });
 
+test("a home page that has moved on since the kit read it is not read as the home page", async () => {
+  setTimeLimit(120_000);
+  const home = model("https://acme.test/", [el("h1", {}, "Service Unavailable")]);
+  const tab = (model_, after) => {
+    const cdp = {
+      answer: { status: 200, url: "https://acme.test/", unreachable: "", blank: false },
+      closed: new Promise(() => {}),
+      on: () => {},
+      send: async (method, params = {}) => {
+        if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+          if (after) after(cdp.answer);
+          return { result: { value: model_ } };
+        }
+        return { result: { value: "" } };
+      },
+    };
+    return cdp;
+  };
+  const skippedOf = async (cdp) => {
+    const read = await readFactPages(cdp, "https://acme.test/", () => {});
+    assert.deepEqual(read.pages, []);
+    return read.skipped.map((one) => [one.role, one.url, one.reason]);
+  };
+  const url = "https://acme.test/";
+  assert.deepEqual(await skippedOf(tab(home, (answer) => (answer.status = 503))), [["home", url, "it answered 503"]]);
+  assert.deepEqual(await skippedOf(tab(home, (answer) => (answer.blank = true))), [["home", url, "it moved on to a blank page"]]);
+  assert.deepEqual(await skippedOf(tab(home, (answer) => (answer.unreachable = "http://acme.test:9/"))), [["home", url, "it could not be opened"]]);
+  assert.deepEqual(await skippedOf(tab({ url, title: "", jsonLd: [], tree: null })), [["home", url, "its text could not be read"]]);
+  assert.deepEqual(await skippedOf(tab(null)), [["home", url, "its text could not be read"]]);
+});
+
 test("page text: headings, list items and quotes marked, the menu bar and the footer left out", () => {
   assert.deepEqual(pageLines(PRICING).slice(0, 6), ["# Pricing", "### Free", "$0", "Free forever", "- 3 projects", "- Community support"]);
   assert.ok(!pageLines(HOME).includes("Pricing"));

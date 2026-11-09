@@ -354,17 +354,19 @@ async function readRobots(origin) {
 async function readFactPages(cdp, home, log) {
   const pages = [];
   const skipped = [];
+  // A page the server answered with an error, or that the browser could not
+  // open, also after it has moved on: its text is not the site's page.
+  const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "");
   log("Reading the page's claims");
   const model = await readModel(cdp).catch(() => null);
-  if (!model || !model.tree) return { pages, skipped };
+  // A home page that has moved on since the kit read it is not read as one.
+  const notHome = notThePage() || (model && model.tree ? "" : "its text could not be read");
+  if (notHome) return { pages, skipped: [{ role: "home", url: home, reason: notHome }] };
   pages.push({ role: "home", url: home, readAt: new Date().toISOString(), model });
   const picks = pickPages(model, home);
   if (!picks.length) return { pages, skipped };
   const robots = await readRobots(new URL(home).origin);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
-  // A page the server answered with an error, or that the browser could not
-  // open, also after it has moved on: its text is not the site's page.
-  const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "");
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });
