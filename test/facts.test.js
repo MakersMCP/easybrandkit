@@ -12,7 +12,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { findClaims } = require("../skills/easybrandkit/scripts/lib/claims");
 const { spawnSync } = require("node:child_process");
-const { pickPages, robotsRules, robotsAllow, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
+const { pickPages, robotsRules, robotsAllow, readRobots, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome, launch, openPage, navigate, inOwnWorld } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
@@ -327,6 +327,54 @@ test("robots.txt: a line or a list too long for any real site is not read", () =
   assert.equal(robotsRules(`User-agent: *\n${"Disallow: /x\n".repeat(12000)}`).rules.length, 10000);
   // Still read as ever.
   assert.deepEqual(robotsRules("  USER-agent :  *  # all\n  disallow : /a # not /b\nnot a line\n: /c\n").rules, [{ allow: false, path: "/a" }]);
+});
+
+test("robots.txt: a server that never stops sending costs what the kit reads of it and no more", async (t) => {
+  setTimeLimit(120_000);
+  let written = 0;
+  let closed;
+  const gone = new Promise((resolve) => (closed = resolve));
+  const line = Buffer.from("Disallow: /x\n".repeat(4096));
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.on("close", closed);
+    const more = () => {
+      while (!res.destroyed && res.write(line)) written += line.length;
+      if (!res.destroyed) {
+        written += line.length;
+        res.once("drain", more);
+      }
+    };
+    res.write("User-agent: *\nCrawl-delay: 3\n");
+    more();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const started = Date.now();
+  const robots = await readRobots(`http://127.0.0.1:${server.address().port}`);
+  assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started} ms`);
+  assert.equal(robots.delay, 3);
+  assert.equal(robots.rules.length, 10_000);
+  assert.deepEqual(robots.rules[0], { allow: false, path: "/x" });
+  // The connection is given up as soon as enough has come.
+  assert.equal(await Promise.race([gone.then(() => "closed"), new Promise((resolve) => setTimeout(resolve, 8_000, "still open"))]), "closed");
+  assert.ok(written < 20_000_000, `${written} bytes were sent`);
+});
+
+test("robots.txt: what fits is read whole, one with no body is empty, and one cut off reads as far as it came", async (t) => {
+  setTimeLimit(120_000);
+  const fake = t.mock.method(globalThis, "fetch", async () => new Response("User-agent: *\nDisallow: /a\n"));
+  assert.deepEqual(await readRobots("https://acme.test"), { rules: [{ allow: false, path: "/a" }], delay: 0 });
+  fake.mock.mockImplementation(async () => new Response("\uFEFFUser-agent: *\nDisallow: /a\n"));
+  assert.deepEqual((await readRobots("https://acme.test")).rules, [{ allow: false, path: "/a" }], "a byte order mark is not part of the first line");
+  fake.mock.mockImplementation(async () => new Response(null));
+  assert.deepEqual(await readRobots("https://acme.test"), { rules: [], delay: 0 });
+  fake.mock.mockImplementation(async () => new Response(`User-agent: *\nDisallow: /a\n${"#".repeat(600_000)}\nDisallow: /b\n`));
+  assert.deepEqual((await readRobots("https://acme.test")).rules, [{ allow: false, path: "/a" }]);
+  fake.mock.mockImplementation(async () => new Response("no", { status: 503 }));
+  assert.deepEqual(await readRobots("https://acme.test"), { error: "its robots.txt answered with an error (HTTP 503)" });
+  fake.mock.mockImplementation(async () => new Response("no", { status: 404 }));
+  assert.deepEqual(await readRobots("https://acme.test"), { rules: [], delay: 0 });
 });
 
 test("a menu link no one would write is not picked", () => {

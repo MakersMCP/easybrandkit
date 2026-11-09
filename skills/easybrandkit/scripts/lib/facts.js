@@ -331,6 +331,25 @@ function robotsAllow(rules, raw) {
   return !best || best.allow;
 }
 
+// The start of a response, this many bytes at most: the rest of it is not
+// asked for, so a server that never stops sending costs no more than that.
+async function firstBytes(res, limit) {
+  const chunks = [];
+  let size = 0;
+  const reader = res.body.getReader();
+  try {
+    while (size < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      size += value.length;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks).subarray(0, limit).toString("utf8");
+}
+
 // A robots.txt the site does not have (4xx) lets every page be read; one
 // that cannot be read (5xx, no answer) lets none.
 async function readRobots(origin) {
@@ -341,7 +360,7 @@ async function readRobots(origin) {
     });
     if (res.status >= 500) return { error: `its robots.txt answered with an error (HTTP ${res.status})` };
     if (!res.ok) return { rules: [], delay: 0 };
-    return robotsRules((await res.text()).slice(0, 500_000));
+    return robotsRules(res.body ? await firstBytes(res, 500_000) : "");
   } catch {
     return { error: "its robots.txt could not be read" };
   }
@@ -641,4 +660,4 @@ async function writeFacts(dir, { name, site, generator, pages = [], skipped = []
 // pages/ is not one of them.
 const FACT_FILES = ["FACTS.md", "facts.json", ...PAGE_FILES.map((name) => `pages/${name}`)];
 
-module.exports = { readModel, readFactPages, pickPages, robotsRules, robotsAllow, pageLines, writeFacts, FACT_FILES };
+module.exports = { readModel, readFactPages, pickPages, robotsRules, robotsAllow, readRobots, pageLines, writeFacts, FACT_FILES };
