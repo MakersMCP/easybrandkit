@@ -480,6 +480,23 @@ test("a page built to keep the rules busy costs its claims, and the run stays fr
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "facts.json"), "utf8")).claimsError, "the rules took too long");
 });
 
+test("with no page read the rules have nothing to go through, so no thread of theirs can be told as failing", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  try {
+    endsInTime(`require("worker_threads").Worker = class { constructor() { throw new Error("no thread"); } };
+      const { writeFacts } = require(lib + "/facts.js");
+      writeFacts(${JSON.stringify(dir)}, { name: "Acme", site: "https://acme.test/", generator: "easybrandkit 0.0.0", pages: [], skipped: [{ role: "home", url: "https://acme.test/", reason: "it answered 500" }] }).then((facts) => {
+        if ("claimsError" in facts || facts.pages.length) throw new Error(JSON.stringify(facts));
+      });
+    `);
+    const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+    assert.match(md, /No page could be read\./);
+    assert.doesNotMatch(md, /could not be listed/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a page that trips the rules costs its claims, and a page of many backticks gets a fence", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -638,7 +638,9 @@ async function writeFacts(dir, { name, site, generator, pages = [], skipped = []
     fs.writeFileSync(path.join(dir, file), pageMarkdown(page, generator));
     listed.push({ role: page.role, url: page.url, readAt: page.readAt, title: noControls(page.model.title || ""), file });
   }
-  const { claims, error } = await claimsOf(pages);
+  // With no page read there is nothing for the rules to go through, and so
+  // nothing to tell of them.
+  const { claims, error } = pages.length ? await claimsOf(pages) : { claims: findClaims([]) };
   // Rules that did not finish say nothing about the pages, which were read:
   // what is told of them is not told as a page that was not.
   const facts = {
