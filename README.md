@@ -32,12 +32,12 @@ easybrandkit-linear.app/
   pages/pricing.md       with --facts: the text of each page read
 ```
 
-- **Logos** come from the header, the footer and links to the home page, as the browser paints them: SVG, image or CSS. Partner strips, customer logos, payment badges and closed menus are skipped. Each cut is at least 240 px on its short side and has no transparency, so it can go straight into an image model or a video. When the page draws a logo as SVG, inline or as an SVG file, the vector is saved next to the cut with the page's colors written into it and no background. A logo in the page body that sits on a photo is skipped: that is an event's or a campaign's lockup, not the brand's logo.
-- **Colors** are the solid colors of the site's buttons, headings, text links, header, footer and large surfaces, plus the color the logo itself is drawn in. Tints, grey buttons and white language switches do not count.
-- **Fonts** are the families the page uses for headings and body text.
-- **Words**: the page title and description, its headings in reading order and what its buttons say, so copy can start from the product's own words instead of made-up claims.
-- **App stores and profiles**: when the site links to its App Store or Google Play listing, easybrandkit saves the app icon at 1024 px and up to five screenshots. Linked X, YouTube and LinkedIn accounts give their profile pictures.
-- **Icons, preview images, the web manifest and social links** are listed with their URLs.
+- Logos come from the header, the footer and links to the home page, as the browser paints them: SVG, image or CSS. Partner strips, customer logos, payment badges and closed menus are skipped. Each cut is at least 240 px on its short side and has no transparency, so it can go straight into an image model or a video. When the page draws a logo as SVG, inline or as an SVG file, the vector is saved next to the cut with the page's colors written into it and no background. A logo in the page body that sits on a photo is skipped: that is an event's or a campaign's lockup, not the brand's logo.
+- Colors are the solid colors of the site's buttons, headings, text links, header, footer and large surfaces, plus the color the logo itself is drawn in. Tints, grey buttons and white language switches do not count.
+- Fonts are the families the page uses for headings and body text.
+- The words are the page title and description, its headings in reading order and what its buttons say, so copy can start from the product's own words instead of made-up claims.
+- When the site links to its App Store or Google Play listing, easybrandkit saves the app icon at 1024 px and up to five screenshots. Linked X, YouTube and LinkedIn accounts give their profile pictures.
+- Icons, preview images, the web manifest and social links are listed with their URLs.
 
 | | |
 | --- | --- |
