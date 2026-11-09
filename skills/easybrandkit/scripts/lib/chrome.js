@@ -350,8 +350,28 @@ async function launch({ width, height }) {
     }
     await sleep(100);
   }
+  // Told before close, which removes the folder the browser made.
+  const tooLong = exited ? socketTooLong(temp, before) : 0;
   await close();
+  if (tooLong) {
+    throw new Error(`${path.basename(binary)} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} bytes shorter.`);
+  }
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
+}
+
+// A socket's path on Linux holds 108 bytes, the last of them a zero.
+const SOCKET_MAX = 107;
+
+// Chrome on Linux makes the folder that holds its socket in the temp folder
+// as it starts, and ends at once when the socket's path in it is longer
+// than a socket's path can be. The length of that path, for a folder of
+// Chrome's kind that came while the browser started, when it is too long;
+// 0 when it is not, or when no such folder came.
+function socketTooLong(temp, before) {
+  if (process.platform !== "linux") return 0;
+  const made = [...tempNames(temp)].filter((name) => !before.has(name) && !FETCHING.test(name));
+  const longest = Math.max(0, ...made.map((name) => Buffer.byteLength(path.join(temp, name, "SingletonSocket"))));
+  return longest > SOCKET_MAX ? longest : 0;
 }
 
 // Chrome keeps the socket that makes it one browser per profile in a folder

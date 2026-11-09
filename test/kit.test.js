@@ -688,6 +688,39 @@ test("a browser that is slow to answer still runs; one that refuses its port or 
   assert.equal(await browser.alive(), false, "ended");
 });
 
+test("a browser that cannot start because the temp folder's path is too long for its socket says so", { skip: process.platform !== "linux" && "told on Linux only" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
+  t.after(() => {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // Stands in for Chrome, which makes the folder of its socket in the temp
+  // folder as it starts and ends at once when the socket's path is too long.
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\nmktemp -d "$TMPDIR/com.google.Chrome.XXXXXX" > /dev/null\nexit 134\n`, { mode: 0o755 });
+  process.env.CHROME_PATH = chrome;
+  const deep = path.join(parent, "t".repeat(80));
+  fs.mkdirSync(deep);
+  process.env.TMPDIR = deep;
+  const length = Buffer.byteLength(path.join(deep, "com.google.Chrome.XXXXXX", "SingletonSocket"));
+  const said = `chrome did not start: the path of the temp folder, ${deep}, is too long for the socket the browser makes in it, whose path would be ${length} bytes where Linux allows 107. Set TMPDIR to a folder whose path is at least ${length - 107} bytes shorter.`;
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === said);
+  assert.deepEqual(fs.readdirSync(deep), [], "nothing is left in the temp folder");
+  // In a temp folder short enough for the socket, the browser ended for
+  // another reason.
+  if (env.TMPDIR === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = env.TMPDIR;
+  const temp = ownTemp(t);
+  if (!temp) return;
+  process.env.TMPDIR = temp;
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === "chrome did not start. Try again, or point CHROME_PATH at another browser.");
+  assert.deepEqual(fs.readdirSync(temp), []);
+});
+
 test("the CLI explains itself and refuses a missing address", () => {
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
