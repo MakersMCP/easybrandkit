@@ -371,7 +371,7 @@ async function readFactPages(cdp, home, log) {
       }
       pages.push({ role: pick.role, url: at, readAt: new Date().toISOString(), model: read });
     } catch (err) {
-      skipped.push({ ...pick, reason: String(err.message || err) });
+      skipped.push({ ...pick, reason: err.timedOut ? "it stopped answering" : String(err.message || err) });
     }
   }
   return { pages, skipped };

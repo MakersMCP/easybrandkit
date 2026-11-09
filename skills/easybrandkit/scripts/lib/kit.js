@@ -154,6 +154,8 @@ async function captureFirstScreen(cdp, dir) {
   return [{ file: "screen-01.png", width: png.readUInt32BE(16), height: png.readUInt32BE(20) }];
 }
 
+const BROWSER_GONE = "The browser was closed or crashed before the kit was done, so no kit was made. Try again.";
+
 const errorPage = ({ status, unreachable }) => status >= 400 || Boolean(unreachable);
 
 // Throws when the tab does not show the site's own page: a bot check, whatever
@@ -234,7 +236,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
       // A file that cannot be written fails the run: what it has of the file
       // would otherwise go into the kit.
       if (err.syscall) throw err;
-      cardError = String(err.message || err);
+      cardError = err.timedOut ? "the browser tab stopped answering" : String(err.message || err);
       return null;
     });
     // The claims last, from the page as the kit leaves it and the pages it
@@ -243,8 +245,16 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     // A browser that was killed or crashed on the way has left the kit
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.
-    if (!(await chrome.alive())) throw new Error("The browser was closed or crashed before the kit was done, so no kit was made. Try again.");
+    if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
     return { pageUrl, found, name, colors, text, logos, screenshots, card, cardError: card ? "" : cardError, factPages };
+  } catch (err) {
+    // A browser that ended on the way is told as that, whichever call was
+    // waiting for it; a call it never answered is not told by its name in
+    // the DevTools protocol.
+    if (err.syscall) throw err;
+    if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
+    if (err.timedOut) throw new Error(`The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.`);
+    throw err;
   } finally {
     if (cdp) cdp.close();
     await chrome.close();

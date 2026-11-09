@@ -483,11 +483,14 @@ function connect(wsUrl) {
     ws.onopen = () =>
       resolve({
         send(method, params = {}, timeoutMs = 30_000) {
+          // On a connection that has closed the message would be dropped
+          // without a word, and only the timer would end the wait.
+          if (ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("The browser connection closed."));
           const id = ++nextId;
           return new Promise((res, rej) => {
             const timer = setTimeout(() => {
               pending.delete(id);
-              rej(new Error(`${method} timed out`));
+              rej(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
             }, Math.max(1_000, Math.min(timeoutMs, timeLeft())));
             pending.set(id, { resolve: res, reject: rej, timer });
             ws.send(JSON.stringify({ id, method, params }));
@@ -548,7 +551,13 @@ async function watchAnswer(cdp) {
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   Object.assign(cdp.answer, { status: 0, url: "", unreachable: "" });
-  const { errorText } = await cdp.send("Page.navigate", { url });
+  let errorText;
+  try {
+    ({ errorText } = await cdp.send("Page.navigate", { url }));
+  } catch (err) {
+    if (err.timedOut) throw new Error(`${url} did not answer`);
+    throw err;
+  }
   if (errorText) {
     if (cdp.answer.status >= 400) return url;
     throw new Error(`Could not open ${url}: ${errorText}`);

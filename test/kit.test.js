@@ -16,7 +16,7 @@ const { once } = require("node:events");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
-const { findChrome, launch, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 
@@ -1163,6 +1163,38 @@ fs.writeFileSync = function (file, data, ...rest) {
   assert.deepEqual(filesOf(dir), before, "the card");
 });
 
+test("a browser killed while the page is read fails the run at once and says so, and a server that never answers is told as that", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
+  // Takes the connection and never answers.
+  const silent = await serve(() => {});
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    silent.server.closeAllConnections();
+    silent.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const started = Date.now();
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, log: (line) => line === "Reading the page" && killBrowsers() }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again." && err.earlierKit === dir);
+  assert.ok(Date.now() - started < 15_000, `told after ${Date.now() - started} ms`);
+  assert.deepEqual(filesOf(dir), before, "a browser killed");
+  await assert.rejects(makeKit(silent.origin, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `${silent.origin}/ did not answer` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before, "a server that never answers");
+});
+
+test("a call on the connection to a browser that has ended fails at once", { skip: noBrowser }, async () => {
+  const browser = await launch({ width: 800, height: 600 });
+  const cdp = await openPage(browser.base, { width: 800, height: 600 });
+  killBrowsers();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const started = Date.now();
+  await assert.rejects(cdp.send("Page.getLayoutMetrics"), /^Error: The browser connection closed\.$/);
+  assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
+});
+
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
@@ -1185,8 +1217,9 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   assert.deepEqual(filesOf(dir), before);
 
   // While the browser runs, the kit is saved without its card, and says so.
+  let drawn = new Error("the first screen could not be read.");
   t.mock.method(fs, "readFileSync", function (file, ...rest) {
-    if (drawing(file)) throw new Error("the first screen could not be read.");
+    if (drawing(file)) throw drawn;
     return read.call(this, file, ...rest);
   });
   const { kit } = await makeKit(site.origin, { dir, stores: false });
@@ -1194,6 +1227,11 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   assert.deepEqual(kit.notes, ["The card could not be drawn: the first screen could not be read."]);
   assert.equal(fs.existsSync(path.join(dir, "card.png")), false);
   assert.match(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8"), /\n## Notes\n\n- The card could not be drawn: the first screen could not be read\.\n$/);
+  // A tab that stops answering is told in words, not by a call's name in
+  // the DevTools protocol.
+  drawn = Object.assign(new Error("Page.captureScreenshot timed out"), { timedOut: true });
+  const stalled = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(stalled.kit.notes, ["The card could not be drawn: the browser tab stopped answering."]);
 });
 
 test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {
