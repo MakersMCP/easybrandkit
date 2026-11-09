@@ -461,6 +461,8 @@ function connect(wsUrl) {
     const pending = new Map();
     const listeners = new Map();
     let nextId = 0;
+    let markClosed;
+    const closed = new Promise((done) => (markClosed = done));
     ws.onmessage = (event) => {
       let msg;
       try {
@@ -486,9 +488,12 @@ function connect(wsUrl) {
         waiter.reject(new Error("The browser connection closed."));
       }
       pending.clear();
+      markClosed();
     };
     ws.onopen = () =>
       resolve({
+        // Settles once the connection has closed, as when the browser ends.
+        closed,
         send(method, params = {}, timeoutMs = 30_000) {
           // On a connection that has closed the message would be dropped
           // without a word, and only the timer would end the wait.
@@ -577,7 +582,9 @@ async function navigate(cdp, url) {
   // process up after the kit is done.
   let timer;
   const late = new Promise((resolve) => (timer = setTimeout(resolve, Math.max(1_000, Math.min(30_000, timeLeft() - 60_000)))));
-  await Promise.race([loaded, late]);
+  // A browser that ends while the page loads sends no load event: the calls
+  // that follow find the connection closed and say so at once.
+  await Promise.race([loaded, late, cdp.closed]);
   clearTimeout(timer);
   try {
     const { currentIndex, entries } = await cdp.send("Page.getNavigationHistory");

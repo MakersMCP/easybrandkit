@@ -1489,6 +1489,35 @@ test("a browser killed while the page is read fails the run at once and says so,
   assert.deepEqual(filesOf(dir), before, "a server that never answers");
 });
 
+test("a browser killed while the page loads is told at once, not after the wait for the page's load event", { skip: noBrowser }, async (t) => {
+  let killedAt = 0;
+  const site = await serve((req, res) => {
+    // Never answered: the page's load event never comes. The browser is
+    // killed once the kit has heard that the page was opened.
+    if (req.url === "/slow.png") {
+      setTimeout(() => {
+        killBrowsers();
+        killedAt = Date.now();
+      }, 300);
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="/slow.png" width="10" height="10"></body>`));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.closeAllConnections();
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again." && err.earlierKit === dir);
+  assert.ok(killedAt > 0, "the page asked for its picture");
+  assert.ok(Date.now() - killedAt < 15_000, `told after ${Date.now() - killedAt} ms`);
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("a call on the connection to a browser that has ended fails at once", { skip: noBrowser }, async () => {
   const browser = await launch({ width: 800, height: 600 });
   const cdp = await openPage(browser.base, { width: 800, height: 600 });
