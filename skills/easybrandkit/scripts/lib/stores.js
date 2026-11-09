@@ -14,6 +14,7 @@ const path = require("path");
 const net = require("net");
 const { promises: dns } = require("dns");
 const { timeLeft } = require("./time");
+const { noControls, plainText } = require("./text");
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
@@ -313,7 +314,7 @@ async function readSource(link, dir) {
     }
     if (!plan) throw new Error("the page has no listing or profile data (removed, private or behind a login)");
     const { images, ...facts } = plan;
-    Object.assign(source, facts);
+    Object.assign(source, facts, { name: plainText(facts.name, 200), by: plainText(facts.by, 200), category: plainText(facts.category, 100), description: noControls(facts.description) });
     let shot = 0;
     for (const image of images) {
       let body;

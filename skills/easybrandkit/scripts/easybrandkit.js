@@ -6,6 +6,7 @@ const os = require("os");
 const { makeKit } = require("./lib/kit");
 const { discardRuns, savedRuns } = require("./lib/run");
 const { killBrowsers } = require("./lib/chrome");
+const { noControls } = require("./lib/text");
 const version = require("./lib/version");
 
 const USAGE = `Usage: easybrandkit <url> [options]
@@ -204,11 +205,11 @@ async function main() {
       log: options.json ? () => {} : (line) => process.stderr.write(`${line}...\n`),
     });
     savedIn = result.dir;
-    process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : summary(result) + "\n");
+    process.stdout.write(options.json ? JSON.stringify(result.kit, null, 2) + "\n" : noControls(summary(result)) + "\n");
   } catch (err) {
     // A stopped run has said so, and ends by its signal.
     if (stopping) return;
-    const reason = String(err.message).trim();
+    const reason = noControls(err.message).trim();
     const message = err.earlierKit ? `${reason}${/[.!?]$/.test(reason) ? "" : "."} The kit already in ${err.earlierKit} is as it was.` : reason;
     if (options.json) process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
     process.stderr.write(`easybrandkit: ${message}\n`);

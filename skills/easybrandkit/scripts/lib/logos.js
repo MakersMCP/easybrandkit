@@ -19,6 +19,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { capture, metrics } = require("./page");
 const { sleep } = require("./time");
+const { plainText } = require("./text");
 
 const LOGO_MAX = 6;
 const LOGO_MARGIN = 12;
@@ -203,15 +204,15 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
       const href = absoluteUrl(a.href, base);
       if (!href) return;
       if (/(^|\s)(icon|apple-touch-icon(-precomposed)?|mask-icon)(\s|$)/.test(rel)) {
-        icons.push({ rel, href, sizes: a.sizes || "" });
+        icons.push({ rel: plainText(rel, 100), href, sizes: plainText(a.sizes, 100) });
       }
       if (/(^|\s)manifest(\s|$)/.test(rel)) manifest = href;
     } else if (name === "META") {
       const key = (a.property || a.name || a.itemprop || "").toLowerCase();
       const content = a.content || "";
-      if (key === "og:site_name") siteName = content;
-      if (key === "description" && !description) description = content.replace(/\s+/g, " ").trim();
-      if (key === "og:description" && !ogDescription) ogDescription = content.replace(/\s+/g, " ").trim();
+      if (key === "og:site_name") siteName = plainText(content, 200);
+      if (key === "description" && !description) description = plainText(content, 2_000);
+      if (key === "og:description" && !ogDescription) ogDescription = plainText(content, 2_000);
       if (IMAGE_META.has(key)) addImage(key, content);
       const appId = (content.match(/app-id=([\w.]+)/) || [])[1] || content.trim();
       if ((key === "apple-itunes-app" || key === "al:ios:app_store_id" || key === "twitter:app:id:iphone") && /^\d{5,}$/.test(appId)) {
@@ -223,7 +224,7 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     } else if (name === "#text" && parents[i] >= 0 && names[parents[i]] === "SCRIPT") {
       if (/ld\+json/i.test(attrs(parents[i]).type || "")) ldJson.push(str((nodes.nodeValue || [])[i]));
     } else if (name === "#text" && parents[i] >= 0 && names[parents[i]] === "TITLE" && !title) {
-      title = str((nodes.nodeValue || [])[i]).trim();
+      title = plainText(str((nodes.nodeValue || [])[i]));
     } else if ((name === "SCRIPT" || name === "IFRAME") && CHALLENGE_SRC.test(a.src || "")) {
       challengeScript = true;
     }
@@ -351,7 +352,7 @@ async function findLogos(cdp, pageUrl, pageWidth, pageHeight, alsoNamed = "") {
     // last word (captureLogos): CSS says white under a logo on a hero photo.
     let background = "";
     for (let p = i; p >= 0 && !background; p = parents[p]) background = cssColorToHex(styleOf(p, 2));
-    candidates.push({ kind, where, x, y, w, h, src, alt: own.alt || "", background: background || "#ffffff", backendNodeId: (nodes.backendNodeId || [])[i] });
+    candidates.push({ kind, where, x, y, w, h, src, alt: plainText(own.alt), background: background || "#ffffff", backendNodeId: (nodes.backendNodeId || [])[i] });
   });
 
   // Header marks first, then the footer, then the page, each top to bottom.
@@ -420,7 +421,7 @@ function brandLook(names, parents, attrs, boxOf, styleOf, pageWidth, pageHeight)
     if (!tally.has(role)) tally.set(role, new Map());
     tally.get(role).set(hex, (tally.get(role).get(hex) || 0) + weight);
   };
-  const family = (css) => String(css || "").split(",")[0].replace(/["']/g, "").trim();
+  const family = (css) => plainText(String(css || "").split(",")[0].replace(/["']/g, ""), 200);
   const fonts = {};
   let header = "";
   let footer = "";
@@ -532,7 +533,7 @@ async function readWords(cdp, targets) {
       const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: target.backendNodeId });
       if (!object || !object.objectId) continue;
       const { result } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: INNER_TEXT, returnByValue: true });
-      text = sayOnce(String((result && result.value) || "").replace(/\s+/g, " ").trim()).slice(0, 200);
+      text = sayOnce(plainText((result && result.value) || "", 2_000)).slice(0, 200);
     } catch {
       // A node the page has replaced since the snapshot: its words are skipped.
       continue;

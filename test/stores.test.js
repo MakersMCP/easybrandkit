@@ -176,3 +176,13 @@ test("a picture that does not come is skipped, a host that cannot be found is to
   assert.equal(unknown.ok, false);
   assert.match(unknown.error, /ENOTFOUND/);
 });
+
+test("what a listing says comes in without control characters, and its description keeps its lines", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const lookup = { results: [{ trackName: "Acme\u001b[2J App", sellerName: "Acme\u0007 Inc", primaryGenreName: "Tools\u009b", description: "One\u001b[31m\nTwo" }] };
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(lookup)));
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
+  const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir);
+  assert.deepEqual([source.name, source.by, source.category, source.description], ["Acme [2J App", "Acme Inc", "Tools", "One [31m\nTwo"]);
+});

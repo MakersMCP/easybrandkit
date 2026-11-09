@@ -285,6 +285,23 @@ test("the files: page text stays data, fenced and quoted, never Markdown of its 
   assert.deepEqual(FACT_FILES, ["FACTS.md", "facts.json", "pages/home.md", "pages/pricing.md", "pages/customers.md", "pages/security.md", "pages/integrations.md", "pages/about.md"]);
 });
 
+test("what a page says stays out of FACTS.md and facts.json with its control characters", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  setTimeLimit(120_000);
+  const ld = { "@type": "Organization", name: "Acme\u001b[2J Inc\u009b", legalName: "Acme\u0007, Inc." };
+  const facts = await writeFacts(dir, {
+    name: "Acme\u001b[2J",
+    site: "https://acme.test/",
+    generator: "easybrandkit 0.0.0",
+    pages: [page("home", model("https://acme.test/", [el("h1", {}, "Hello")], [ld]))],
+    skipped: [{ role: "about", url: "https://acme.test/about", reason: "it said\u001b[2J no" }],
+  });
+  assert.deepEqual(facts.company.map((item) => item.value), ["Acme [2J Inc", "Acme , Inc."]);
+  const control = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/;
+  assert.doesNotMatch(fs.readFileSync(path.join(dir, "FACTS.md"), "utf8"), control);
+});
+
 test("page text: headings, list items and quotes marked, the menu bar and the footer left out", () => {
   assert.deepEqual(pageLines(PRICING).slice(0, 6), ["# Pricing", "### Free", "$0", "Free forever", "- 3 projects", "- Community support"]);
   assert.ok(!pageLines(HOME).includes("Pricing"));

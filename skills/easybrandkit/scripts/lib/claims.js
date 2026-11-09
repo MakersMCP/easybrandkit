@@ -8,6 +8,8 @@
 // the page it came from. Nothing is reworded or added: a claim the rules
 // cannot pin to a name, a label or a price is left out.
 
+const { noControls } = require("./text");
+
 const isNode = (n) => n !== null && typeof n === "object";
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
 
@@ -621,7 +623,7 @@ function jsonLdObjects(model) {
 
 const typeOf = (value) => [].concat(value["@type"] || []).map(String);
 const plain = (value) =>
-  String(value === undefined || value === null ? "" : value)
+  noControls(value)
     .replace(/<[^>]*>/g, " ")
     .replace(/&nbsp;/g, " ")
     .replace(/&quot;/g, '"')
@@ -632,7 +634,7 @@ const plain = (value) =>
     .replace(/\s+/g, " ")
     .trim();
 const nameOf = (value) => (isNode(value) ? plain(value.name) : plain(value));
-const excerpt = (object) => clip(JSON.stringify(object), 300);
+const excerpt = (object) => clip(noControls(JSON.stringify(object)), 300);
 
 function ldRatings(page) {
   return jsonLdObjects(page.model)

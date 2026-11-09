@@ -22,16 +22,18 @@ const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, lineOf, regionOf, tidy } = require("./claims");
 const { sleep, timeLeft } = require("./time");
+const { noControls } = require("./text");
 const version = require("./version");
 
 // The page as data, read in the page once it has settled: the elements a
 // visitor can see, each with its tag, the few attributes the rules read and
 // its text, plus the page's JSON-LD. Scripts, styles, frames and form fields
-// are left out, and so are characters that do not show (zero width, bidi
-// controls, Unicode tags), which can hide words from a reader.
+// are left out, and so are characters that do not show (control characters,
+// zero width, bidi controls, Unicode tags), which can hide words from a
+// reader.
 const PAGE_MODEL = `(() => {
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO", "SELECT", "TEXTAREA", "INPUT", "HEAD"]);
-  const INVISIBLE = /[\\u00AD\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]|[\\u{E0000}-\\u{E007F}]/gu;
+  const INVISIBLE = /[\\u0000-\\u0008\\u000E-\\u001F\\u007F-\\u009F\\u00AD\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]|[\\u{E0000}-\\u{E007F}]/gu;
   const clean = (s) => String(s || "").replace(INVISIBLE, "").replace(/\\s+/g, " ");
   const abs = (v) => { try { const u = new URL(v, document.baseURI); return /^https?:$/.test(u.protocol) ? u.href : ""; } catch (e) { return ""; } };
   const docHeight = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
@@ -383,7 +385,7 @@ async function readFactPages(cdp, home, log) {
 // Page text set into Markdown as plain text: no link, emphasis, HTML or
 // table cell of its own can come out of it.
 const md = (text) =>
-  String(text || "")
+  noControls(text)
     .replace(/\s+/g, " ")
     .trim()
     .replace(/[\\`*_[\]<>|#~]/g, "\\$&");

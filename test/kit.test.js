@@ -20,6 +20,7 @@ const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf } = require("../skills/easybrandkit/scripts/lib/logos");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
+const { noControls, plainText } = require("../skills/easybrandkit/scripts/lib/text");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
@@ -193,6 +194,15 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   assert.equal(brandName("Acme", "Whatever", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "", "https://www.acme.com/"), "Acme");
+});
+
+test("text a site wrote: control characters out, line breaks kept only where asked, cut to its length", () => {
+  const raw = "A\x1b]0;title\x07 \x1b[31mRED\u009b2J\n\tEnd";
+  assert.equal(plainText(raw), "A ]0;title [31mRED 2J End");
+  assert.equal(noControls("one\x1b[2J\ntwo\x07"), "one [2J\ntwo ");
+  assert.equal(plainText("a   b", 2), "a");
+  assert.equal(plainText(undefined), "");
+  assert.equal(noControls(null), "");
 });
 
 test("stores and social networks: a listing leads to its website, a profile is refused before anything runs", async () => {
@@ -1560,6 +1570,52 @@ test("a download no connection refuses goes into the throwaway profile, not the 
   assert.ok(inProfile.length >= 1, "the page's files went into the profile");
   assert.deepEqual(site.downloads(), []);
   assert.deepEqual(fs.readdirSync(temp), [], "and went with it");
+});
+
+test("what a page says reaches no terminal with its control characters, and a note stays on one line", { skip: noBrowser }, async (t) => {
+  const ESC = "\x1b";
+  const bot = `<!doctype html><title>Just a moment ${ESC}[2J${ESC}[Hcleared\n\nby it</title><h1>x</h1><a href="/w">w</a>`;
+  const named = brandPage("rgb(255,0,0)").replace("<title>Acme</title>", `<meta charset="utf-8"><title>Acme</title><meta property="og:site_name" content="A${ESC}]0;set-by-site${ESC}\\${ESC}[31mRED\u009b2J${ESC}[0m"><meta name="description" content="Words${ESC}[2Jhere">`).replace("<h1>Acme</h1>", `<h1>Hello${ESC}[2Jthere</h1>`);
+  const site = await serve((req, res) => {
+    const html = (status, body) => res.writeHead(status, { "content-type": "text/html; charset=utf-8" }).end(body);
+    if (req.url === "/tr") return html(200, named);
+    if (req.url === "/project/") return html(200, brandPage("rgb(255,0,0)"));
+    html(403, bot);
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // A control character, raw or as JSON writes one.
+  const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]|\\u00[0189][0-9a-f]/i;
+  const run = (url, folder, ...rest) => runCli([url, "--out", path.join(parent, folder), "--no-stores", ...rest], process.env);
+
+  // The site's own name, the words on its page. A language path counts as a
+  // home page, so it is read as given.
+  const made = await run(`${site.origin}/tr`, "named");
+  assert.equal(made.code, 0, made.stderr);
+  assert.match(made.stdout, /^Saved the A \]0;set-by-site \\ \[31mRED 2J \[0m brand kit to /);
+  assert.doesNotMatch(made.stdout, CONTROL, "the summary");
+  for (const file of ["BRAND.md", "brand.json", "_brand.yml"]) assert.doesNotMatch(fs.readFileSync(path.join(parent, "named", file), "utf8"), CONTROL, file);
+  const json = await run(`${site.origin}/tr`, "named", "--json");
+  assert.equal(json.code, 0, json.stderr);
+  assert.doesNotMatch(json.stdout, CONTROL, "--json");
+
+  // A bot check's title, in a note for a page the kit chose.
+  const went = await run(`${site.origin}/project/`, "kit");
+  assert.equal(went.code, 0, went.stderr);
+  assert.doesNotMatch(went.stdout, CONTROL, "the note");
+  const note = `The home page, ${site.origin}/, could not be read: it answered with a bot check ("Just a moment [2J [Hcleared by it"). ${site.origin}/project/ was read as given, and its header and colors can differ from the home page's.`;
+  assert.ok(went.stdout.includes(`  Note    ${note}\n`), went.stdout);
+  assert.ok(fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8").endsWith(`## Notes\n\n- ${note}\n`));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8")).notes, [note]);
+
+  // And in the error for the address given.
+  const refused = await run(site.origin, "bot");
+  assert.equal(refused.code, 1);
+  assert.doesNotMatch(refused.stderr, CONTROL, "the error");
+  assert.match(refused.stderr, /answered with a bot check \("Just a moment \[2J \[Hcleared by it"\)/);
 });
 
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {

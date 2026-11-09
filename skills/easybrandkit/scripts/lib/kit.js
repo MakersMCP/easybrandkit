@@ -38,6 +38,7 @@ const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, sleep } = require("./time");
 const { SaveError, toldPlainly, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
+const { plainText } = require("./text");
 const version = require("./version");
 
 // Logos are read from the desktop layout: a narrow screen shows the mobile
@@ -447,7 +448,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       manifest: found.manifest,
       links: found.links,
       stores: sources,
-      notes,
+      notes: notes.map((note) => plainText(note, 2_000)),
     };
     fs.writeFileSync(path.join(work, "brand.json"), JSON.stringify(kit, null, 2) + "\n");
     writeMarkdown(kit, work);
