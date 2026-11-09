@@ -128,6 +128,30 @@ function earlierAside(target) {
   return "";
 }
 
+// The files that a run killed while its files moved in had already brought
+// into the folder under names the earlier kit's files it set aside do not
+// have: moving those back leaves these, and a later run would take them for
+// the user's own. Its brand.json moves in last, so it is still in its part
+// folder and lists them: the pictures that have left the part folder. The
+// fixed names, like FACTS.md, are any kit's and go with the next kit.
+function broughtIn(target, aside) {
+  if (path.basename(aside) !== ".earlier") return [];
+  const part = path.dirname(aside);
+  const kit = readKit(part);
+  if (!kit) return [];
+  const there = (at) => {
+    try {
+      return Boolean(fs.lstatSync(at, { throwIfNoEntry: false }));
+    } catch {
+      return false;
+    }
+  };
+  return kitFiles(kit).filter((name, i, all) => all.indexOf(name) === i && !there(path.join(part, name)) && there(path.join(target, name)) && !there(path.join(aside, name)));
+}
+
+// "a", "a and b", "a, b and c".
+const listed = (names) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
+
 const mayNotOpen = (dir, at, code) => new Error(`This user may not open ${shownFrom(dir, at)} (${code}). Pick a folder you can write in with --out.`);
 
 // lstat, with a folder this user may not look into told plainly: the first
@@ -159,13 +183,13 @@ function look(at, dir) {
 // anything else is refused, so a run never mixes into or overwrites
 // someone's own files, and so is a path that is not a folder or below a
 // file; the refusal of a folder whose earlier kit a run left in pieces says
-// where its brand.json is. A link to a folder counts as that folder, and a
-// link to nothing is refused. The part folders and the lock of runs do not
-// count, and nothing is changed. With facts, a pages there that is not a
-// folder is refused, since the kit does not write through it. A folder
-// whose brand.json is away while another run puts its kit in counts as a
-// kit (saving is false before a run, when the folder is read again under
-// the run's own lock).
+// where its brand.json is, and which files that run brought in. A link to a
+// folder counts as that folder, and a link to nothing is refused. The part
+// folders and the lock of runs do not count, and nothing is changed. With
+// facts, a pages there that is not a folder is refused, since the kit does
+// not write through it. A folder whose brand.json is away while another run
+// puts its kit in counts as a kit (saving is false before a run, when the
+// folder is read again under the run's own lock).
 function checkDir(dir, { facts = false, saving = false } = {}) {
   const target = path.resolve(dir);
   for (let at = target; ; at = path.dirname(at)) {
@@ -217,7 +241,9 @@ function checkDir(dir, { facts = false, saving = false } = {}) {
     // would leave that kit in pieces for good.
     const aside = earlierAside(target);
     if (aside) {
-      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shownFrom(dir, aside)}, with the files it had moved aside. Move them back into ${dir}, replacing any files of the same name there, which are that run's, and run again.`);
+      const theirs = broughtIn(target, aside);
+      const remove = theirs.length ? `remove ${listed(theirs)}, which that run brought in too, ` : "";
+      throw new Error(`${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${shownFrom(dir, aside)}, with the files it had moved aside. Move them back into ${dir}, replacing any files of the same name there, which are that run's, ${remove}and run again.`);
     }
     if (names.length === 0) return null;
     throw new Error(`${dir} is not empty and holds no earlier brand kit. Pick another folder with --out.`);

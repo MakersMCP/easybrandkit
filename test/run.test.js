@@ -743,13 +743,10 @@ test("a folder that a run killed while its files moved left without brand.json i
   assert.throws(() => checkDir(other), (err) => err.message === `${other} is not empty and holds no earlier brand kit. Pick another folder with --out.`);
 });
 
-test("a run killed outright once the earlier kit is aside leaves a folder the next run refuses, and the files moved back make it that kit again", async (t) => {
-  const parent = tempParent(t);
-  const dir = path.join(parent, "kit");
-  const earlier = kitOf("earlier", ["logo-01.png"]);
-  writeFiles(dir, earlier);
-  // The run, in a process of its own that kills itself right after the
-  // last of the earlier kit's files has gone aside.
+// A run in a process of its own that kills itself (SIGKILL) in the middle of
+// its moves: right after the count-th file has gone aside into .earlier, or
+// has come into the kit's folder.
+function killedRun(parent, dir, files, { stage, count }) {
   const script = path.join(parent, "killed.js");
   fs.writeFileSync(
     script,
@@ -758,40 +755,84 @@ test("a run killed outright once the earlier kit is aside leaves a folder the ne
       'const path = require("path");',
       `const { startRun, saveRun } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/run"))});`,
       `const { checkDir } = require(${JSON.stringify(require.resolve("../skills/easybrandkit/scripts/lib/kit"))});`,
-      "const [dir, files, aside] = process.argv.slice(2);",
+      "const [dir, files, stage, count] = process.argv.slice(2);",
       "const run = startRun(dir, checkDir(dir));",
       "for (const [name, body] of Object.entries(JSON.parse(files))) fs.writeFileSync(path.join(run.work, name), body);",
       "const rename = fs.renameSync;",
-      "let left = Number(aside);",
+      "let left = Number(count);",
       "fs.renameSync = function (from, to) {",
       "  rename.call(this, from, to);",
-      '  if (path.basename(path.dirname(String(to))) === ".earlier" && --left === 0) process.kill(process.pid, "SIGKILL");',
+      '  const aside = path.basename(path.dirname(String(to))) === ".earlier";',
+      '  const coming = path.dirname(String(to)) === path.resolve(dir) && /^\\.easybrandkit-part-/.test(path.basename(path.dirname(String(from))));',
+      '  if ((stage === "aside" ? aside : coming) && --left === 0) process.kill(process.pid, "SIGKILL");',
       "};",
       "saveRun(run, () => checkDir(dir, { saving: true }) || []);",
       "",
     ].join("\n"),
   );
-  const killed = spawnSync(process.execPath, [script, dir, JSON.stringify(kitOf("new", ["logo-01.png"])), String(Object.keys(earlier).length)], { encoding: "utf8" });
+  const killed = spawnSync(process.execPath, [script, dir, JSON.stringify(files), stage, String(count)], { encoding: "utf8" });
   assert.equal(killed.signal, "SIGKILL", killed.stderr);
-  assert.deepEqual(fs.readdirSync(dir).filter((name) => !name.startsWith(".")), [], "nothing of a kit in sight");
-  const aside = path.join(dir, fs.readdirSync(dir).find((name) => name.startsWith(".easybrandkit-part-")), ".earlier");
-  const said = `${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${aside}, with the files it had moved aside. Move them back into ${dir}, replacing any files of the same name there, which are that run's, and run again.`;
-  // Refused before the site is read, with nothing changed: a run that went
-  // on would have left that kit hidden for good.
+}
+
+// What the next run says of a folder such a run left: refused before the
+// site is read, with nothing changed, the earlier kit's brand.json named
+// where it waits, and the files the killed run brought in that moving those
+// back would leave.
+function refusedAfterKill(dir, broughtIn = "") {
+  const part = fs.readdirSync(dir).find((name) => name.startsWith(".easybrandkit-part-"));
+  assert.ok(part, `a part folder in ${dir}: ${fs.readdirSync(dir).join(" ")}`);
+  const aside = path.join(dir, part, ".earlier");
+  const remove = broughtIn ? `remove ${broughtIn}, which that run brought in too, ` : "";
+  const said = `${dir} holds no brand.json: a run that did not finish putting its kit in place left the earlier kit's brand.json in ${aside}, with the files it had moved aside. Move them back into ${dir}, replacing any files of the same name there, which are that run's, ${remove}and run again.`;
   const before = filesOf(dir);
-  const cli = spawnSync(process.execPath, [CLI, "acme.example", "--out", dir], { encoding: "utf8", env: { ...process.env, CHROME_PATH: path.join(parent, "no-chrome") } });
-  assert.equal(cli.status, 1);
+  const cli = spawnSync(process.execPath, [CLI, "acme.example", "--out", dir], { encoding: "utf8", env: { ...process.env, CHROME_PATH: path.join(path.dirname(dir), "no-chrome") } });
+  assert.equal(cli.status, 1, cli.stderr);
   assert.equal(cli.stderr, `easybrandkit: ${said}\n`);
   assert.deepEqual(filesOf(dir), before);
+  return aside;
+}
+
+// The earlier kit's files moved back as the refusal says, replacing those of
+// the same name, and the files it names removed.
+function moveBack(dir, aside, remove = []) {
+  for (const name of fs.readdirSync(aside)) if (fs.lstatSync(path.join(aside, name)).isFile()) fs.renameSync(path.join(aside, name), path.join(dir, name));
+  for (const name of remove) fs.rmSync(path.join(dir, name));
+}
+
+const visible = (dir) => filesOf(dir).filter((line) => !line.startsWith("."));
+const asFiles = (files) => Object.keys(files).sort().map((name) => `${name} ${hash(files[name])}`);
+
+test("a run killed outright once the earlier kit is aside leaves a folder the next run refuses, and the files moved back make it that kit again", async (t) => {
+  const parent = tempParent(t);
+  const dir = path.join(parent, "kit");
+  const earlier = kitOf("earlier", ["logo-01.png"]);
+  writeFiles(dir, earlier);
+  // Killed right after the last of the earlier kit's files has gone aside.
+  killedRun(parent, dir, kitOf("new", ["logo-01.png"]), { stage: "aside", count: Object.keys(earlier).length });
+  assert.deepEqual(fs.readdirSync(dir).filter((name) => !name.startsWith(".")), [], "nothing of a kit in sight");
+  // A run that went on would have left that kit hidden for good.
+  const aside = refusedAfterKill(dir);
   // Moved back as the error says, they are the earlier kit, which the next
   // run replaces.
-  for (const name of fs.readdirSync(aside)) if (fs.lstatSync(path.join(aside, name)).isFile()) fs.renameSync(path.join(aside, name), path.join(dir, name));
-  assert.deepEqual(filesOf(dir).filter((line) => !line.startsWith(".")), Object.keys(earlier).sort().map((name) => `${name} ${hash(earlier[name])}`));
+  moveBack(dir, aside);
+  assert.deepEqual(visible(dir), asFiles(earlier));
   const next = startRun(dir, checkDir(dir));
   writeFiles(next.work, kitOf("next", ["logo-01.png"]));
   await saveRun(next, earlierOf(dir));
   discardRun(next);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8")).tag, "next");
+
+  // Killed once every file of its own but brand.json has come in: the
+  // refusal also names the pictures it brought in under names the earlier
+  // kit has not, which moving the earlier files back would leave, and with
+  // those removed the folder is the earlier kit again.
+  const more = path.join(parent, "more");
+  writeFiles(more, { ...earlier, "notes.txt": "mine" });
+  const coming = kitOf("killed", ["logo-01.png", "logo-02.png", "logo-03.png"]);
+  killedRun(parent, more, coming, { stage: "in", count: Object.keys(coming).length - 1 });
+  const moreAside = refusedAfterKill(more, "logo-02.png and logo-03.png");
+  moveBack(more, moreAside, ["logo-02.png", "logo-03.png"]);
+  assert.deepEqual(visible(more), asFiles({ ...earlier, "notes.txt": "mine" }));
 });
 
 test("a part folder this user may list but not look into stays, and does not fail a run whose kit is in place", { skip: posixOnly || (process.getuid && process.getuid() === 0 && "root may look anywhere") }, async (t) => {
