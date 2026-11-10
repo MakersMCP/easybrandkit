@@ -40,6 +40,10 @@ has and says so in the kit's notes. It fails instead when it has used up its
 --timeout on that page, or when none of a listing's pictures could be
 downloaded either.
 
+A page on this machine or a private network is read only when the address
+given is on that host and port: one a site leads to there is not read, and
+one the kit would choose there is not opened.
+
 The new kit takes the place of an earlier one in the folder only once the
 run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
 or a kill leaves the folder as it was, and a folder it would have made is
