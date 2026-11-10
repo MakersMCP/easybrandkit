@@ -2115,6 +2115,27 @@ test("a deeper address whose home page fails is read as given and says so, and i
   assert.deepEqual(filesOf(dir), before);
 });
 
+// An HTTP proxy on this machine, as a local one for a VPN or a firewall
+// is, that takes every page from this machine's port its address names,
+// whatever its name. Through it the browser says only that a page came
+// through a proxy, so the kit's own lookup says where the page is. hosts
+// lists the hosts it was asked for.
+async function proxyOf(t) {
+  const hosts = [];
+  const proxy = await serve((req, res) => {
+    const url = new URL(req.url);
+    hosts.push(url.host);
+    const upstream = http.request({ host: "127.0.0.1", port: url.port || 80, path: url.pathname + url.search, method: req.method, headers: req.headers }, (answer) => {
+      res.writeHead(answer.statusCode, answer.headers);
+      answer.pipe(res);
+    });
+    upstream.on("error", () => res.writeHead(502).end());
+    req.pipe(upstream);
+  });
+  t.after(() => proxy.server.close());
+  return Object.assign(proxy, { hosts });
+}
+
 test("a store listing whose website fails keeps what the listing gave and says so", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const closed = await serve(() => {});
   closed.server.close();
@@ -2122,9 +2143,10 @@ test("a store listing whose website fails keeps what the listing gave and says s
   // asked: what easybrandkit fetches from it itself is answered here.
   let answers = (req, res) => res.writeHead(403, { "content-type": "text/html" }).end("<!doctype html><title>Forbidden</title><h1>Forbidden</h1>");
   const site = await serve((req, res) => answers(req, res));
-  // The website by a name of its own, which the browser finds on this
-  // machine and the lookup below puts on a public address, as a listing's
-  // website is: one on this machine or a private network is not opened.
+  // The website by a name of its own, which the lookup below puts on a
+  // public address, as a listing's website is, reached through a proxy:
+  // one on this machine or a private network is not opened. closed.test is
+  // found on this machine by the browser itself, where nothing listens.
   const named = site.origin.replace("127.0.0.1", "site.test");
   const closedNamed = closed.origin.replace("127.0.0.1", "closed.test");
   const png = Buffer.alloc(33);
@@ -2151,7 +2173,8 @@ test("a store listing whose website fails keeps what the listing gave and says s
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  const proxy = await proxyOf(t);
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=closed.test"]);
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
   const fromListing = ["BRAND.md", "_brand.yml", "appstore-icon.png", "appstore-shot-01.png", "brand.json"];
@@ -2267,14 +2290,27 @@ test("a store listing whose website fails keeps what the listing gave and says s
 });
 
 test("an address on this machine or a private network is told by its form, or by what its name is found at, and a page on the host given is always opened", async (t) => {
-  const { localByForm, onLocalNetwork, mayOpen } = require("../skills/easybrandkit/scripts/lib/address");
-  for (const raw of ["http://127.0.0.1:9222/json/list", "http://127.1/", "http://2130706433/", "http://0.0.0.0/", "http://localhost/", "http://app.localhost:3000/", "http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://10.1.2.3/", "http://172.20.0.1/", "http://192.168.1.1/", "http://169.254.169.254/latest/meta-data/", "http://[fe80::1]/", "http://[fd00::1]/"]) {
+  const { localByForm, localAddress, onLocalNetwork, mayOpen } = require("../skills/easybrandkit/scripts/lib/address");
+  for (const raw of ["http://127.0.0.1:9222/json/list", "http://127.1/", "http://2130706433/", "http://0.0.0.0/", "http://localhost/", "http://app.localhost:3000/", "http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://10.1.2.3/", "http://172.20.0.1/", "http://192.168.1.1/", "http://169.254.169.254/latest/meta-data/", "http://[fe80::1]/", "http://[fd00::1]/", "http://100.100.1.1/", "http://[64:ff9b::7f00:1]/"]) {
     assert.equal(localByForm(new URL(raw)), true, raw);
   }
-  for (const raw of ["https://acme.com/", "http://93.184.216.34/", "http://[2606:4700::1111]/", "https://localhost.acme.com/"]) assert.equal(localByForm(new URL(raw)), false, raw);
+  for (const raw of ["https://acme.com/", "http://93.184.216.34/", "http://[2606:4700::1111]/", "https://localhost.acme.com/", "http://198.18.0.10/", "http://[64:ff9b::5db8:d822]/"]) assert.equal(localByForm(new URL(raw)), false, raw);
+  // On this machine or a private network are the ranges that are there, not
+  // every address that is not public: a proxy in fake-ip mode gives every
+  // name an address in 198.18.0.0/15, and a network with IPv6 only gives a
+  // name with IPv4 only a NAT64 address, judged by the IPv4 address in it.
+  for (const address of ["0.0.0.0", "10.0.0.5", "100.64.0.1", "127.0.0.1", "127.1.2.3", "169.254.169.254", "172.31.255.255", "192.168.1.1", "::", "::1", "fc00::5", "fd12::1", "fe80::1", "fec0::1", "::ffff:127.0.0.1", "::ffff:a00:5", "64:ff9b::7f00:1", "64:ff9b::10.0.0.5", "[::1]"]) {
+    assert.equal(localAddress(address), true, address);
+  }
+  for (const address of ["198.18.0.10", "198.19.255.254", "93.184.216.34", "100.128.0.1", "172.32.0.1", "192.0.2.1", "224.0.0.1", "64:ff9b::5db8:d822", "64:ff9b::8c52:7903", "::ffff:93.184.216.34", "2606:4700::1111", "2001:db8::1", "ff02::1", "", "intranet"]) {
+    assert.equal(localAddress(address), false, address);
+  }
   t.mock.method(dns.promises, "lookup", async (host) => {
     if (host === "intranet.acme.com") return [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.5", family: 4 }];
     if (host === "gone.acme.com") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.acme.com"), { code: "ENOTFOUND" });
+    if (/brightmoss/.test(host)) return [{ address: host.startsWith("www.") ? "198.18.0.11" : "198.18.0.10", family: 4 }];
+    if (/github/.test(host)) return [{ address: "64:ff9b::8c52:7903", family: 6 }, { address: "140.82.121.3", family: 4 }];
+    if (/nat64-inside/.test(host)) return [{ address: "64:ff9b::a00:5", family: 6 }];
     return [{ address: "93.184.216.34", family: 4 }];
   });
   // A name any of whose addresses is local is too; one that is not found is
@@ -2282,6 +2318,7 @@ test("an address on this machine or a private network is told by its form, or by
   assert.equal(await onLocalNetwork(new URL("https://intranet.acme.com/")), true);
   assert.equal(await onLocalNetwork(new URL("https://www.acme.com/")), false);
   assert.equal(await onLocalNetwork(new URL("https://gone.acme.com/")), false);
+  assert.equal(await onLocalNetwork(new URL("https://nat64-inside.acme.com/")), true);
   // The host given, with its port, is opened; another on this machine or a
   // private network is not, whoever names it.
   assert.equal(await mayOpen("http://127.0.0.1:8737/", "http://127.0.0.1:8737/features.html"), true);
@@ -2290,6 +2327,30 @@ test("an address on this machine or a private network is told by its form, or by
   assert.equal(await mayOpen("https://intranet.acme.com/", "https://acme.com/"), false);
   assert.equal(await mayOpen("https://www.acme.com/", "https://acme.com/"), true);
   assert.equal(await mayOpen("about:blank", "https://acme.com/"), true);
+  // A bare name sent on to www through a fake-ip proxy, or on a network with
+  // IPv6 only, is a public site.
+  assert.equal(await mayOpen("http://www.brightmoss.test/", "http://brightmoss.test/"), true);
+  assert.equal(await mayOpen("https://www.github.com/", "https://github.com/"), true);
+  // This machine by any of its names is one host on one port: a local site
+  // can send its visitors from 127.0.0.1 to localhost. Another port, or the
+  // other scheme's own port, is another program.
+  for (const [to, from] of [["http://localhost:8080/", "http://127.0.0.1:8080/"], ["http://[::1]:8080/", "http://localhost:8080/"], ["http://app.localhost:3000/", "http://127.0.0.1:3000/x"], ["http://localhost/", "http://127.0.0.1:80/"], ["https://localhost/", "https://[::1]:443/"]]) {
+    assert.equal(await mayOpen(to, from), true, `${from} to ${to}`);
+  }
+  for (const [to, from] of [["http://localhost:8081/", "http://127.0.0.1:8080/"], ["https://127.0.0.1/", "http://127.0.0.1/"], ["http://10.0.0.5:8080/", "http://localhost:8080/"], ["http://localhost:8080/", "http://10.0.0.5:8080/"]]) {
+    assert.equal(await mayOpen(to, from), false, `${from} to ${to}`);
+  }
+  // Where the browser says it got a page counts, also for a name the kit's
+  // own lookup does not find there: one that it reached itself at a local
+  // address is local. Through a proxy it says Unknown and gives the proxy's
+  // address, so the lookup decides.
+  assert.equal(await mayOpen("http://www.acme.com/", "http://acme.com/", { space: "Loopback", ip: "127.0.0.1" }), false);
+  assert.equal(await mayOpen("http://gone.acme.com/", "http://acme.com/", { space: "Local", ip: "10.0.0.5" }), false);
+  assert.equal(await mayOpen("http://www.acme.com/", "http://acme.com/", { space: "Unknown", ip: "127.0.0.1" }), true);
+  assert.equal(await mayOpen("http://intranet.acme.com/", "http://acme.com/", { space: "Unknown", ip: "93.184.216.34" }), false);
+  assert.equal(await mayOpen("http://www.acme.com/", "http://acme.com/", { space: "Public", ip: "93.184.216.34" }), true);
+  assert.equal(await mayOpen("http://www.brightmoss.test/", "http://brightmoss.test/", { space: "Local", ip: "198.18.0.11" }), true);
+  assert.equal(await mayOpen("http://www.github.com/", "http://github.com/", { space: "Public", ip: "[64:ff9b::8c52:7903]" }), true);
 });
 
 test("a page a site leads to on this machine or a private network is not read, unless the address given is on that host", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
@@ -2300,7 +2361,11 @@ test("a page a site leads to on this machine or a private network is not read, u
   let port = "";
   const site = await serve((req, res) => {
     const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
-    if (!String(req.headers.host || "").startsWith("brand.test")) {
+    const host = String(req.headers.host || "");
+    // A local site whose own address is localhost sends a visitor that
+    // comes by 127.0.0.1 there.
+    if (lead === "its own address" && host === `127.0.0.1:${port}`) return res.writeHead(301, { location: `http://localhost:${port}/` }).end();
+    if (!host.startsWith("brand.test")) {
       if (req.url === "/missing") return res.writeHead(404, { "content-type": "text/html" }).end("<!doctype html><title>Not found</title><h1>Not found</h1>");
       return html(brandPage("rgb(0,0,255)"));
     }
@@ -2309,6 +2374,9 @@ test("a page a site leads to on this machine or a private network is not read, u
     if (lead === "redirect") return res.writeHead(302, { location: `http://127.0.0.1:${port}/inside` }).end();
     if (lead === "a private name") return res.writeHead(302, { location: `http://intranet.test:${port}/inside` }).end();
     if (lead === "a missing page") return res.writeHead(302, { location: `http://127.0.0.1:${port}/missing` }).end();
+    // A name the kit's own lookup finds on the web, which the browser finds
+    // on this machine, as a site that rebinds its name does.
+    if (lead === "a name found elsewhere") return res.writeHead(302, { location: `http://rebind.test:${port}/inside` }).end();
     html(brandPage("rgb(255,0,0)").replace("</body>", `<script>setTimeout(() => location.replace("http://127.0.0.1:${port}/inside"), 300)</script></body>`));
   });
   port = new URL(site.origin).port;
@@ -2327,11 +2395,16 @@ test("a page a site leads to on this machine or a private network is not read, u
   // loaded, or to a name found on a private network: no kit is made from
   // what it shows, and the earlier kit stays. A page there is not looked at
   // at all, also when it answers with an error.
-  for (const [how, to] of [["redirect", `http://127.0.0.1:${port}/inside`], ["a script", `http://127.0.0.1:${port}/inside`], ["a private name", `http://intranet.test:${port}/inside`], ["a missing page", `http://127.0.0.1:${port}/missing`]]) {
+  for (const [how, to] of [["redirect", `http://127.0.0.1:${port}/inside`], ["a script", `http://127.0.0.1:${port}/inside`], ["a private name", `http://intranet.test:${port}/inside`], ["a missing page", `http://127.0.0.1:${port}/missing`], ["a name found elsewhere", `http://rebind.test:${port}/inside`]]) {
     lead = how;
     await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} led to ${to}, which is on a local or private network, so no kit was made.` && err.earlierKit === dir, how);
     assert.deepEqual(filesOf(dir), before, how);
   }
+  // A local site that sends its visitors from 127.0.0.1 to its own address,
+  // localhost on the same port, is read there.
+  lead = "its own address";
+  const local = await makeKit(`http://127.0.0.1:${port}/`, { dir: path.join(parent, "local"), stores: false });
+  assert.equal(local.kit.url, `http://localhost:${port}/`);
   // The home page the kit chose for a deeper address is a page that failed:
   // the address given is read.
   lead = "redirect";
@@ -2405,6 +2478,36 @@ test("a tab that stops answering is told in words, and more time is advised only
   const asked = `${url}deep`;
   const { kit } = await stalledOnce(asked, { dir: path.join(parent, "deep"), stores: false });
   assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+});
+
+test("through a proxy, which the browser does not tell past, the kit's own lookup says where a page is", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let lead = "";
+  const site = await serve((req, res) => {
+    if (String(req.headers.host || "").startsWith("brand.test") && req.url === "/") return res.writeHead(302, { location: lead }).end();
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const port = new URL(site.origin).port;
+  const proxy = await proxyOf(t);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
+  const given = `http://brand.test:${port}/`;
+  // Every page comes from the proxy's address, on this machine. A page on a
+  // name found on the web is read through it,
+  lead = `http://www.brand.test:${port}/`;
+  const { kit } = await makeKit(given, { dir: path.join(parent, "www"), stores: false });
+  assert.equal(kit.url, lead);
+  assert.ok(proxy.hosts.includes(`www.brand.test:${port}`), proxy.hosts.join(" "));
+  // and one on a name found on a private network, or at such an address, is
+  // not.
+  for (const to of [`http://intranet.test:${port}/inside`, `http://127.0.0.1:${port}/inside`]) {
+    lead = to;
+    await assert.rejects(makeKit(given, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `${given} led to ${to}, which is on a local or private network, so no kit was made.`, to);
+  }
 });
 
 // A site whose page tries to save a file every 25 ms for as long as it is

@@ -795,14 +795,37 @@ async function openPage(chrome, { width, height }) {
 // the status the server last answered its document with and that address,
 // after any redirect, the address of a page the browser could not open and
 // shows its own error page for, and whether the page has moved on to
-// about:blank, as scripts that guard against DevTools make it do. Frames
-// inside the page do not count. The bodies of the responses are not wanted,
-// so little of them is kept.
+// about:blank, as scripts that guard against DevTools make it do. Also where
+// the browser got the document: the address it connected to (ip) and the IP
+// address space Chrome gave that answer (space), which is Unknown when it
+// went through a proxy, whose address ip is then. Frames inside the page do
+// not count. The bodies of the responses are not wanted, so little of them
+// is kept.
 async function watchAnswer(cdp) {
   const { frameTree } = await cdp.send("Page.getFrameTree");
-  const answer = { status: 0, url: "", unreachable: "", blank: false };
-  cdp.on("Network.responseReceived", ({ type, frameId, response }) => {
-    if (type === "Document" && frameId === frameTree.frame.id && response) Object.assign(answer, { status: response.status, url: response.url });
+  const main = frameTree.frame.id;
+  const answer = { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "" };
+  // The main frame's document request, and the space of each answer to it,
+  // its redirects' first: each comes apart from the answer it belongs to,
+  // before it or after it.
+  let request = "";
+  let spaces = [];
+  let answered = "";
+  cdp.on("Network.requestWillBeSent", ({ requestId, type, frameId }) => {
+    if (type !== "Document" || frameId !== main || requestId === request) return;
+    request = requestId;
+    spaces = [];
+  });
+  cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode, resourceIPAddressSpace }) => {
+    if (requestId !== request) return;
+    spaces.push({ status: statusCode, space: resourceIPAddressSpace || "" });
+    if (requestId === answered && statusCode === answer.status) answer.space = resourceIPAddressSpace || "";
+  });
+  cdp.on("Network.responseReceived", ({ requestId, type, frameId, response }) => {
+    if (type !== "Document" || frameId !== main || !response) return;
+    const known = requestId === request ? spaces.filter(({ status }) => status === response.status).pop() : null;
+    answered = requestId;
+    Object.assign(answer, { status: response.status, url: response.url, ip: String(response.remoteIPAddress || "").replace(/^\[|\]$/g, ""), space: known ? known.space : "" });
   });
   cdp.on("Page.frameNavigated", ({ frame }) => {
     if (frame.parentId) return;
@@ -811,6 +834,17 @@ async function watchAnswer(cdp) {
   });
   await cdp.send("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 100_000 });
   return answer;
+}
+
+// What the browser said of where it got the tab's document (cdp.answer), for
+// an address of that document: nothing for one of another origin, whose
+// document has not come yet or has gone.
+function seenOf(cdp, at) {
+  try {
+    return new URL(at).origin === new URL(cdp.answer.url).origin ? { space: cdp.answer.space || "", ip: cdp.answer.ip || "" } : {};
+  } catch {
+    return {};
+  }
 }
 
 // Opens the address and waits for its load event, at most 30 s: a page that
@@ -829,7 +863,7 @@ async function navigate(cdp, url) {
   }
   if (!web) throw pageFailed(`${url} is not a web address, so no kit was made.`, "is not a web address");
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
-  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false });
+  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "" });
   // A site gets 30 s to answer, or what the run has left: one the kit chose
   // to read that never answers leaves the run time to go on without it.
   const limit = Math.max(1_000, Math.min(30_000, timeLeft()));
@@ -900,4 +934,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, inOwnWorld, pageFailed, noKit };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, seenOf, inOwnWorld, pageFailed, noKit };

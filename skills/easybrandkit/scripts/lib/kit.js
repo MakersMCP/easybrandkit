@@ -28,7 +28,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { launch, openPage, navigate, pageFailed, noKit } = require("./chrome");
+const { launch, openPage, navigate, seenOf, pageFailed, noKit } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture } = require("./page");
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
@@ -221,12 +221,14 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
 }
 
 // Throws when the tab has gone on to a page on a local or private network
-// that is not on the host of the address the user gave (given): a site's
-// redirect or its script can lead there, and what such a page shows is not
-// read.
+// that is not on the host and port of the address the user gave (given): a
+// site's redirect or its script can lead there, and what such a page shows
+// is not read. Where the browser says it got the page counts too, so a name
+// that the kit's own lookup does not find there, or finds elsewhere, is
+// still told by where the browser found it.
 async function refuseLocal(cdp, url, pageUrl, given) {
   for (const at of new Set([pageUrl, cdp.answer.url].filter(Boolean))) {
-    if (!(await mayOpen(at, given))) throw pageFailed(`${url} led to ${at}, which ${LOCAL}, so no kit was made.`, `led to ${at}, which ${LOCAL}`);
+    if (!(await mayOpen(at, given, seenOf(cdp, at)))) throw pageFailed(`${url} led to ${at}, which ${LOCAL}, so no kit was made.`, `led to ${at}, which ${LOCAL}`);
   }
 }
 

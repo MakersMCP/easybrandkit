@@ -137,6 +137,10 @@ test("fetches only HTTPS on the listed hosts, and only public addresses", async 
     assert.equal(stores.isPublicAddress(address), false, address);
   }
   assert.equal(stores.isPublicAddress("17.253.144.10"), true);
+  // An IPv4 address in IPv6 form, mapped or through NAT64 on a network with
+  // IPv6 only, is as public as the IPv4 address it stands for.
+  for (const address of ["::ffff:7f00:1", "::ffff:10.0.0.1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe"]) assert.equal(stores.isPublicAddress(address), false, address);
+  for (const address of ["::ffff:1153:900a", "64:ff9b::1153:900a", "64:ff9b::17.253.144.10"]) assert.equal(stores.isPublicAddress(address), true, address);
   await assert.rejects(stores.checkFetchUrl("https://acme.com/logo.png"), /host not allowed/);
   await assert.rejects(stores.checkFetchUrl("http://play.google.com/store"), /not HTTPS/);
   await assert.rejects(stores.checkFetchUrl("https://user:pw@play.google.com/"), /not a plain URL/);

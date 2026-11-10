@@ -15,6 +15,7 @@ const net = require("net");
 const { promises: dns } = require("dns");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
+const { ipv4Within } = require("./address");
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
@@ -78,8 +79,13 @@ function classify(raw) {
   return null;
 }
 
+// Whether an address is on the public internet. An IPv4 address in IPv6
+// form, mapped or reached through NAT64 as on a network with IPv6 only, is
+// as public as the IPv4 address it stands for.
 function isPublicAddress(address) {
   const family = net.isIP(address);
+  const v4 = ipv4Within(address);
+  if (v4) return isPublicAddress(v4);
   if (family === 4) {
     const [a, b, c] = address.split(".").map(Number);
     return !(
