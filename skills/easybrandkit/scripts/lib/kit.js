@@ -38,6 +38,7 @@ const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
 const { SaveError, toldPlainly, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
+const { mayOpen, LOCAL } = require("./address");
 const { plainText } = require("./text");
 const version = require("./version");
 
@@ -219,9 +220,20 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
   if (what) throw pageFailed(`${url} ${what}, so no kit was made.`, what);
 }
 
-// deeper: the page is one past the home page, read as given when the home
-// page could not be read.
-async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = false) {
+// Throws when the tab has gone on to a page on a local or private network
+// that is not on the host of the address the user gave (given): a site's
+// redirect or its script can lead there, and what such a page shows is not
+// read.
+async function refuseLocal(cdp, url, pageUrl, given) {
+  for (const at of new Set([pageUrl, cdp.answer.url].filter(Boolean))) {
+    if (!(await mayOpen(at, given))) throw pageFailed(`${url} led to ${at}, which ${LOCAL}, so no kit was made.`, `led to ${at}, which ${LOCAL}`);
+  }
+}
+
+// alsoNamed: more names the brand goes by. deeper: the page is one past the
+// home page, read as given when the home page could not be read. given: the
+// address the user gave.
+async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, given = url } = {}) {
   const chrome = await launch(SCREEN);
   // A browser that has just not answered is not waited for again as it is
   // asked to quit.
@@ -231,6 +243,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = f
     resetPictureWait();
     log(`Opening ${url}`);
     const pageUrl = await navigate(cdp, url);
+    await refuseLocal(cdp, url, pageUrl, given);
     // An error page is not waited for or walked. A bot check can come with
     // an error status too, and is read like any page: it may let the browser
     // through to the site.
@@ -263,6 +276,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = f
     }
     // Also a page that has moved on to such a page since it loaded.
     refuseOtherPage(cdp, url, pageUrl, found.challenge);
+    await refuseLocal(cdp, url, pageUrl, given);
     // The words first, while the page is as the snapshot saw it.
     const { headings, ctas } = await readWords(cdp, found.wordTargets);
     const text = { title: found.title, description: found.description, headings, ctas };
@@ -279,6 +293,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = f
     log("Taking the first screen");
     const screenshots = await captureFirstScreen(cdp, dir);
     refuseOtherPage(cdp, url, pageUrl, "");
+    await refuseLocal(cdp, url, pageUrl, given);
     const name = brandName(found.siteName, found.title, pageUrl, { deeper, logo: (logos.find((logo) => logo.alt) || {}).alt });
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");
@@ -478,13 +493,15 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (page) {
       const had = fs.readdirSync(work);
       try {
-        read = await readPage(page, work, log, appName, facts);
+        // A page the kit chose on a local or private network is not opened.
+        if (page !== asked && !(await mayOpen(page, asked))) throw pageFailed(`${page} ${LOCAL}, so no kit was made.`, `${LOCAL}, which easybrandkit does not open on its own`);
+        read = await readPage(page, work, log, { alsoNamed: appName, facts, given: asked });
       } catch (err) {
         if (!err.pageFailed || page === asked || err.outOfTime) throw err;
         failed = err.pageFailed;
         for (const name of fs.readdirSync(work)) if (!had.includes(name)) fs.rmSync(path.join(work, name), { recursive: true, force: true });
       }
-      if (failed && !listing) read = await readPage(asked, work, log, appName, facts, true);
+      if (failed && !listing) read = await readPage(asked, work, log, { alsoNamed: appName, facts, deeper: true, given: asked });
     }
     // A listing none of whose pictures came, and no website to read: a name
     // alone is no kit to put in the place of an earlier one.

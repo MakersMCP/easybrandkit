@@ -1920,6 +1920,8 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
     if (req.url === "/gone") return answer(410)(req, res);
     if (req.url === "/denied") return answer(200, "<h1>Denied</h1>", { "x-frame-options": "DENY" })(req, res);
     if (req.url === "/when") return when.ask(res);
+    // The connection dropped, so the page cannot be opened.
+    if (req.url === "/drop") return req.socket.destroy();
     return res.writeHead(404).end();
   });
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
@@ -1941,7 +1943,10 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
     ["500", answer(500), `${url} answered 500, so no kit was made.`, opening],
     ["an error with no page of its own", answer(404, ""), `${url} answered 404, so no kit was made.`, opening],
     ["a redirect to a 410", answer(302, "", { location: "/gone" }), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`, opening],
-    ["a script that moves on to a closed port", answer(200, `<!doctype html><title>x</title><script>location.replace("${closed.origin}/")</script>`), `${url} led to ${closed.origin}/, which could not be opened, so no kit was made.`],
+    ["a script that moves on to a page that cannot be opened", answer(200, `<!doctype html><title>x</title><script>location.replace("/drop")</script>`), `${url} led to ${site.origin}/drop, which could not be opened, so no kit was made.`],
+    // Another port of this machine is another program's, whether it answers
+    // or not: it is not read.
+    ["a script that moves on to another port of this machine", answer(200, `<!doctype html><title>x</title><script>location.replace("${closed.origin}/")</script>`), `${url} led to ${closed.origin}/, which is on a local or private network, so no kit was made.`],
     ["a script that moves on to a 410 while the page is read", moved(`setTimeout(() => location.replace("/gone"), 1000)`), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`, "Reading the page"],
     ["a script that moves on to a blank page while the page is read", moved(`setTimeout(() => location.replace("about:blank"), 1000)`), `${url} moved on to a blank page, so no kit was made.`, "Reading the page"],
     ["a script that moves on to a blank page at once", answer(200, `<!doctype html><title>x</title><script>location.replace("about:blank")</script>`), `${url} moved on to a blank page, so no kit was made.`, opening],
@@ -2105,19 +2110,24 @@ test("a deeper address whose home page fails is read as given and says so, and i
   assert.deepEqual(filesOf(dir), before);
 });
 
-test("a store listing whose website fails keeps what the listing gave and says so", { skip: noBrowser }, async (t) => {
+test("a store listing whose website fails keeps what the listing gave and says so", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const closed = await serve(() => {});
   closed.server.close();
   // The website the listing names, and a listing from a store that is not
   // asked: what easybrandkit fetches from it itself is answered here.
   let answers = (req, res) => res.writeHead(403, { "content-type": "text/html" }).end("<!doctype html><title>Forbidden</title><h1>Forbidden</h1>");
   const site = await serve((req, res) => answers(req, res));
+  // The website by a name of its own, which the browser finds on this
+  // machine and the lookup below puts on a public address, as a listing's
+  // website is: one on this machine or a private network is not opened.
+  const named = site.origin.replace("127.0.0.1", "site.test");
+  const closedNamed = closed.origin.replace("127.0.0.1", "closed.test");
   const png = Buffer.alloc(33);
   png.writeUInt32BE(0x89504e47, 0);
   png.writeUInt32BE(1024, 16);
   png.writeUInt32BE(1024, 20);
   const art = "https://is1-ssl.mzstatic.com/image/thumb";
-  let seller = `${site.origin}/app`;
+  let seller = `${named}/app`;
   // A picture whose address holds this does not come.
   let missing = "";
   const realFetch = globalThis.fetch;
@@ -2130,22 +2140,25 @@ test("a store listing whose website fails keeps what the listing gave and says s
     }
     return realFetch(url, ...rest);
   });
-  t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "17.253.144.10", family: 4 }]);
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
   const fromListing = ["BRAND.md", "_brand.yml", "appstore-icon.png", "appstore-shot-01.png", "brand.json"];
   const bot = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(BOT_CHECK);
   const blank = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`${brandPage("rgb(255,0,0)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`);
   const cases = [
-    ["a 403", answers, `${site.origin}/app`, "answered 403"],
-    ["a closed port", answers, `${closed.origin}/`, "could not be opened (net::ERR_CONNECTION_REFUSED)"],
-    ["a bot check", bot, `${site.origin}/`, `answered with a bot check ("Human Verification")`],
-    ["a blank page", blank, `${site.origin}/`, "moved on to a blank page"],
+    ["a 403", answers, `${named}/app`, "answered 403"],
+    ["a closed port", answers, `${closedNamed}/`, "could not be opened (net::ERR_CONNECTION_REFUSED)"],
+    ["a bot check", bot, `${named}/`, `answered with a bot check ("Human Verification")`],
+    ["a blank page", blank, `${named}/`, "moved on to a blank page"],
+    ["an address on this machine", bot, `${site.origin}/`, "is on a local or private network, which easybrandkit does not open on its own"],
+    ["a name on a private network", bot, `http://intranet.test:${new URL(site.origin).port}/`, "is on a local or private network, which easybrandkit does not open on its own"],
   ];
   for (const [what, handler, website, told] of cases) {
     answers = handler;
@@ -2164,7 +2177,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   // A page that shows nothing after the whole wait costs the website, not
   // the listing. The wait is told to have passed.
   answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end("<!doctype html><title>Loading</title>");
-  seller = `${site.origin}/`;
+  seller = `${named}/`;
   const pageLib = require("../skills/easybrandkit/scripts/lib/page");
   t.mock.method(pageLib, "waitForContent", async () => "loader");
   const bare = await reloadedKit().makeKit(listing, { dir: path.join(parent, "bare"), stores: false });
@@ -2206,7 +2219,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   assert.deepEqual(filesOf(earlier), kept, "no picture, and no website");
   // A website that opens makes the kit without them.
   missing = "mzstatic";
-  seller = `${site.origin}/`;
+  seller = `${named}/`;
   answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   const noPictures = await makeKit(listing, { dir: path.join(parent, "no-pictures"), stores: false });
   assert.deepEqual(noPictures.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
@@ -2234,18 +2247,96 @@ test("a store listing whose website fails keeps what the listing gave and says s
 
   // A browser that ends on the way, or that is not there, is no failure of
   // the website's, and ends the run.
-  seller = `${site.origin}/`;
+  seller = `${named}/`;
   const gone = path.join(parent, "gone");
   await assert.rejects(makeKit(listing, { dir: gone, stores: false, log: (line) => line === "Reading the page" && killBrowsers() }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again.");
   assert.equal(fs.existsSync(gone), false);
   const chrome = process.env.CHROME_PATH;
   process.env.CHROME_PATH = path.join(parent, "no-chrome");
-  t.after(() => {
-    if (chrome === undefined) delete process.env.CHROME_PATH;
-    else process.env.CHROME_PATH = chrome;
-  });
-  await assert.rejects(makeKit(listing, { dir: gone, stores: false }), /^Error: No Chrome, Chromium, Edge or Brave found/);
+  try {
+    await assert.rejects(makeKit(listing, { dir: gone, stores: false }), /^Error: No Chrome, Chromium, Edge or Brave found/);
+  } finally {
+    process.env.CHROME_PATH = chrome;
+  }
   assert.equal(fs.existsSync(gone), false);
+});
+
+test("an address on this machine or a private network is told by its form, or by what its name is found at, and a page on the host given is always opened", async (t) => {
+  const { localByForm, onLocalNetwork, mayOpen } = require("../skills/easybrandkit/scripts/lib/address");
+  for (const raw of ["http://127.0.0.1:9222/json/list", "http://127.1/", "http://2130706433/", "http://0.0.0.0/", "http://localhost/", "http://app.localhost:3000/", "http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://10.1.2.3/", "http://172.20.0.1/", "http://192.168.1.1/", "http://169.254.169.254/latest/meta-data/", "http://[fe80::1]/", "http://[fd00::1]/"]) {
+    assert.equal(localByForm(new URL(raw)), true, raw);
+  }
+  for (const raw of ["https://acme.com/", "http://93.184.216.34/", "http://[2606:4700::1111]/", "https://localhost.acme.com/"]) assert.equal(localByForm(new URL(raw)), false, raw);
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (host === "intranet.acme.com") return [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.5", family: 4 }];
+    if (host === "gone.acme.com") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.acme.com"), { code: "ENOTFOUND" });
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  // A name any of whose addresses is local is too; one that is not found is
+  // a page the browser cannot open, not a local one.
+  assert.equal(await onLocalNetwork(new URL("https://intranet.acme.com/")), true);
+  assert.equal(await onLocalNetwork(new URL("https://www.acme.com/")), false);
+  assert.equal(await onLocalNetwork(new URL("https://gone.acme.com/")), false);
+  // The host given, with its port, is opened; another on this machine or a
+  // private network is not, whoever names it.
+  assert.equal(await mayOpen("http://127.0.0.1:8737/", "http://127.0.0.1:8737/features.html"), true);
+  assert.equal(await mayOpen("http://127.0.0.1:9222/json/list", "http://127.0.0.1:8737/"), false);
+  assert.equal(await mayOpen("http://127.0.0.1:8737/", "https://apps.apple.com/us/app/acme/id1234567890"), false);
+  assert.equal(await mayOpen("https://intranet.acme.com/", "https://acme.com/"), false);
+  assert.equal(await mayOpen("https://www.acme.com/", "https://acme.com/"), true);
+  assert.equal(await mayOpen("about:blank", "https://acme.com/"), true);
+});
+
+test("a page a site leads to on this machine or a private network is not read, unless the address given is on that host", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  // The brand's site by a name of its own, which the browser finds on this
+  // machine and the lookup below puts on a public address. What it leads to
+  // on this machine's own address is another program's page.
+  let lead = "redirect";
+  let port = "";
+  const site = await serve((req, res) => {
+    const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
+    if (!String(req.headers.host || "").startsWith("brand.test")) {
+      if (req.url === "/missing") return res.writeHead(404, { "content-type": "text/html" }).end("<!doctype html><title>Not found</title><h1>Not found</h1>");
+      return html(brandPage("rgb(0,0,255)"));
+    }
+    if (req.url === "/project/") return html(brandPage("rgb(255,0,0)"));
+    if (req.url !== "/") return res.writeHead(404).end();
+    if (lead === "redirect") return res.writeHead(302, { location: `http://127.0.0.1:${port}/inside` }).end();
+    if (lead === "a private name") return res.writeHead(302, { location: `http://intranet.test:${port}/inside` }).end();
+    if (lead === "a missing page") return res.writeHead(302, { location: `http://127.0.0.1:${port}/missing` }).end();
+    html(brandPage("rgb(255,0,0)").replace("</body>", `<script>setTimeout(() => location.replace("http://127.0.0.1:${port}/inside"), 300)</script></body>`));
+  });
+  port = new URL(site.origin).port;
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const given = `http://brand.test:${port}/`;
+  // The address given leads there by a redirect, by a script once it has
+  // loaded, or to a name found on a private network: no kit is made from
+  // what it shows, and the earlier kit stays. A page there is not looked at
+  // at all, also when it answers with an error.
+  for (const [how, to] of [["redirect", `http://127.0.0.1:${port}/inside`], ["a script", `http://127.0.0.1:${port}/inside`], ["a private name", `http://intranet.test:${port}/inside`], ["a missing page", `http://127.0.0.1:${port}/missing`]]) {
+    lead = how;
+    await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} led to ${to}, which is on a local or private network, so no kit was made.` && err.earlierKit === dir, how);
+    assert.deepEqual(filesOf(dir), before, how);
+  }
+  // The home page the kit chose for a deeper address is a page that failed:
+  // the address given is read.
+  lead = "redirect";
+  const asked = `${given}project/`;
+  const { kit } = await makeKit(asked, { dir: path.join(parent, "deeper"), stores: false });
+  assert.equal(kit.url, asked);
+  assert.deepEqual(kit.notes, [`The home page, ${given}, could not be read: it led to http://127.0.0.1:${port}/inside, which is on a local or private network. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+  // Given that page's own address, it is read, as a site of the user's.
+  const own = await makeKit(`http://127.0.0.1:${port}/inside`, { dir: path.join(parent, "own"), stores: false });
+  assert.deepEqual(own.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
 });
 
 // kit.js loaded afresh, for what the test has mocked of the modules it takes
@@ -2357,7 +2448,7 @@ test("a page that tries to save files for the whole run leaves nothing in the us
 // what becomes of a method's calls: "drop", as a browser too busy to answer
 // them, "rename", as one that does not know them and answers so, or "pass",
 // or a list of these for its calls in turn, the last of them for all calls
-// after.
+// after. STAND_IN_ARGS, a JSON list, is added to the browser's arguments.
 // STAND_IN_LOG names a file each call's method is added to, with " session"
 // after one sent to a tab.
 const RELAY = `"use strict";
@@ -2366,7 +2457,8 @@ const { spawn } = require("child_process");
 const rules = JSON.parse(process.env.STAND_IN_RELAY || "{}");
 const log = process.env.STAND_IN_LOG;
 const counts = {};
-const browser = spawn(process.env.STAND_IN_BROWSER, process.argv.slice(2), { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+const args = [...process.argv.slice(2), ...JSON.parse(process.env.STAND_IN_ARGS || "[]")];
+const browser = spawn(process.env.STAND_IN_BROWSER, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
 browser.on("exit", (code) => process.exit(code === null ? 1 : code));
 browser.stdio[4].pipe(fs.createWriteStream(null, { fd: 4 }));
 let rest = "";
@@ -2388,15 +2480,15 @@ fs.createReadStream(null, { fd: 3, encoding: "utf8" })
   .on("end", () => browser.stdio[3].end());
 `;
 
-// The browser of the tests run through the relay above, with these rules,
-// for the rest of the test.
-function useRelay(t, dir, rules = {}) {
+// The browser of the tests run through the relay above, with these rules
+// and these more arguments, for the rest of the test.
+function useRelay(t, dir, rules = {}, args = []) {
   const real = findChrome();
   const relay = path.join(dir, "relay.js");
   const chrome = path.join(dir, "chrome");
   fs.writeFileSync(relay, RELAY);
   fs.writeFileSync(chrome, `#!/bin/sh\nexec "${process.execPath}" "${relay}" "$@"\n`, { mode: 0o755 });
-  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_LOG"];
+  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => {
     for (const [name, value] of Object.entries(env)) {
@@ -2404,7 +2496,7 @@ function useRelay(t, dir, rules = {}) {
       else process.env[name] = value;
     }
   });
-  Object.assign(process.env, { CHROME_PATH: chrome, STAND_IN_BROWSER: real, STAND_IN_RELAY: JSON.stringify(rules) });
+  Object.assign(process.env, { CHROME_PATH: chrome, STAND_IN_BROWSER: real, STAND_IN_RELAY: JSON.stringify(rules), STAND_IN_ARGS: JSON.stringify(args) });
   delete process.env.STAND_IN_LOG;
 }
 

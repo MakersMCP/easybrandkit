@@ -818,8 +818,16 @@ async function watchAnswer(cdp) {
 // Returns the address the tab ended on, after any redirects; cdp.answer says
 // what the server answered. An error status with no page of its own makes
 // Chrome give a net:: code, which says less than the status, so that is left
-// to cdp.answer too.
+// to cdp.answer too. Only a web page is opened: a link a site gives can name a
+// file on this machine (file://localhost/...), which Chrome would show.
 async function navigate(cdp, url) {
+  let web = false;
+  try {
+    web = /^https?:$/.test(new URL(url).protocol);
+  } catch {
+    // Not an address at all.
+  }
+  if (!web) throw pageFailed(`${url} is not a web address, so no kit was made.`, "is not a web address");
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false });
   // A site gets 30 s to answer, or what the run has left: one the kit chose

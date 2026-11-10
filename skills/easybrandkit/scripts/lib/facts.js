@@ -19,6 +19,7 @@ const fs = require("fs");
 const path = require("path");
 const { Worker } = require("worker_threads");
 const { navigate, inOwnWorld } = require("./chrome");
+const { localByForm } = require("./address");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
@@ -218,12 +219,16 @@ const LONG_LINK = 2_000;
 const LONG_WORDS = 400;
 
 // One page for each subject from the links the home page shows, on the
-// same site. A link whose words and address both fit wins, then one in the
-// menu or the footer, then the shorter address.
+// same site: web pages only, on the home page's host, and on its port too
+// when that host is this machine or on a private network, where another
+// port is another program. A link whose words and address both fit wins,
+// then one in the menu or the footer, then the shorter address.
 function pickPages(model, home) {
   const page = pageOf({ model });
-  const homePath = noEndSlashes(new URL(home).pathname);
+  const homeUrl = new URL(home);
+  const homePath = noEndSlashes(homeUrl.pathname);
   const homeSite = hostOf(home);
+  const local = localByForm(homeUrl);
   const best = new Map();
   for (const node of page.all) {
     if (node.tag !== "a" || !node.href || node.href.length > LONG_LINK || node.hidden) continue;
@@ -237,7 +242,8 @@ function pickPages(model, home) {
     } catch {
       continue;
     }
-    if (siteOf(url) !== homeSite || noEndSlashes(url.pathname) === homePath) continue;
+    if (!/^https?:$/.test(url.protocol) || siteOf(url) !== homeSite || noEndSlashes(url.pathname) === homePath) continue;
+    if (local && url.port !== homeUrl.port) continue;
     if (/\.(pdf|zip|png|jpe?g|gif|svg|webp|mp4|dmg|exe)$/i.test(url.pathname)) continue;
     const text = textOf(page, node).length > LONG_WORDS ? "" : lineOf(page, node);
     for (const [role, byText, byPath] of ROLES) {
@@ -406,6 +412,18 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
   let closedOn = "";
   cdp.closed.then(() => (ended = true));
   const notOpen = () => (closedOn ? `the kit's connection to its tab closed while the ${closedOn} page was read` : "the kit's connection to its tab had closed");
+  // An address off the site that pickPages keeps to.
+  const homeUrl = new URL(home);
+  const local = localByForm(homeUrl);
+  const elsewhere = (raw) => {
+    if (!raw) return false;
+    try {
+      const url = new URL(raw);
+      return hostOf(raw) !== hostOf(home) || (local && url.port !== homeUrl.port);
+    } catch {
+      return true;
+    }
+  };
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });
@@ -433,7 +451,7 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
     log(`Reading the ${pick.role} page`);
     try {
       const at = await navigate(cdp, pick.url);
-      if (hostOf(at) !== hostOf(home)) {
+      if (elsewhere(at)) {
         skipped.push({ ...pick, reason: `it led to ${at}` });
         continue;
       }
@@ -448,6 +466,11 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
       const read = await readModel(cdp);
       if (notThePage()) {
         skipped.push({ ...pick, reason: notThePage() });
+        continue;
+      }
+      // A page that has moved itself off the site since it loaded.
+      if (elsewhere(cdp.answer.url)) {
+        skipped.push({ ...pick, reason: `it led to ${cdp.answer.url}` });
         continue;
       }
       if (!read || !read.tree || CHALLENGE_TITLE.test(read.title || "")) {

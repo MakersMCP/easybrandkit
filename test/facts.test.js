@@ -223,6 +223,30 @@ test("pages to read: one per subject from the home page's links, on the same sit
   ]);
 });
 
+test("pages to read are web pages only, and on a host of this machine or of a private network only on the home page's port", () => {
+  const menu = (home, ...links) => model(home, [el("nav", { region: "nav" }, ...links.map(([href, words]) => link(href, words)))]);
+  // A file a site names by its host, as file://localhost/... names one on
+  // this machine, is not read, nor is another port, which is another program.
+  for (const home of ["http://127.0.0.1:8737/", "http://localhost:8737/", "http://[::1]:8737/", "http://10.0.0.5:8737/"]) {
+    const { host, hostname } = new URL(home);
+    const at = (port, rest) => `http://${port ? `${hostname}:${port}` : hostname}${rest}`;
+    const picked = pickPages(menu(home, [`file://${hostname}/home/me/notes/pricing`, "Pricing"], [at(9222, "/json/list"), "About"], [at(0, "/security"), "Security"], [`http://${host}/customers`, "Customers"], [`ftp://${host}/integrations`, "Integrations"]), home);
+    assert.deepEqual(picked, [{ role: "customers", url: `http://${host}/customers` }], home);
+  }
+  // A public host's own pages can be on another port or scheme, and a file
+  // it names is not read either.
+  assert.deepEqual(pickPages(menu("https://acme.test/", ["file://acme.test/etc/pricing", "Pricing"], ["http://acme.test:8080/customers", "Customers"]), "https://acme.test/"), [{ role: "customers", url: "http://acme.test:8080/customers" }]);
+});
+
+test("a page that is not a web page is not opened", async () => {
+  const asked = [];
+  const cdp = { answer: {}, closed: new Promise(() => {}), on: () => {}, send: async (method) => (asked.push(method), {}) };
+  for (const url of ["file://localhost/etc/hosts", "file:///etc/hosts", "javascript:alert(1)", "data:text/html,x", "not an address"]) {
+    await assert.rejects(navigate(cdp, url), (err) => err.message === `${url} is not a web address, so no kit was made.` && err.pageFailed === "is not a web address", url);
+  }
+  assert.deepEqual(asked, []);
+});
+
 test("robots.txt: easybrandkit's own group, else every crawler's; the longest rule wins, Allow on a tie", () => {
   const text = [
     "# comments are ignored",
@@ -670,6 +694,49 @@ test("a menu page that fails is told once, in words, and one that answers an err
   assert.deepEqual(asked, ["https://acme.test/about Page.getLayoutMetrics"], "nothing more was read of the page that answered 404");
 });
 
+test("a menu page that leads off the site, or moves itself there once it has loaded, is not read, and on this machine another port is off the site", async (t) => {
+  setTimeLimit(120_000);
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  for (const base of ["https://acme.test", "http://127.0.0.1:8737"]) {
+    const home = model(`${base}/`, [el("nav", { region: "nav" }, link(`${base}/pricing`, "Pricing"), link(`${base}/customers`, "Customers"), link(`${base}/about`, "About"))]);
+    const away = base.startsWith("https") ? "https://other.test/inside" : "http://127.0.0.1:9222/inside";
+    // Pricing redirects off the site; customers moves itself there as its
+    // text is read.
+    let at = "";
+    let loaded = () => {};
+    const cdp = {
+      answer: { status: 0, url: "", unreachable: "", blank: false },
+      closed: new Promise(() => {}),
+      on: (method, listener) => {
+        if (method === "Page.loadEventFired") loaded = listener;
+      },
+      send: async (method, params = {}) => {
+        if (WORLD[method]) return WORLD[method];
+        if (method === "Page.navigate") {
+          at = params.url.endsWith("/pricing") ? away : params.url;
+          cdp.answer.url = at;
+          loaded();
+          return {};
+        }
+        if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
+        if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+          if (at.endsWith("/customers")) cdp.answer.url = away;
+          return { result: { value: at ? model(at, [el("h1", {}, "Page")]) : home } };
+        }
+        if (method === "Runtime.evaluate") return { result: { value: "" } };
+        if (method === "DOMSnapshot.captureSnapshot") return { documents: [{ nodes: { nodeName: [0] } }], strings: ["A"] };
+        return {};
+      },
+    };
+    const { pages, skipped } = await readFactPages(cdp, `${base}/`, () => {});
+    assert.deepEqual(pages.map((one) => one.role), ["home", "about"], base);
+    assert.deepEqual(skipped, [
+      { role: "pricing", url: `${base}/pricing`, reason: `it led to ${away}` },
+      { role: "customers", url: `${base}/customers`, reason: `it led to ${away}` },
+    ], base);
+  }
+});
+
 test("a menu page whose read fails is told on one line, and an exception in it not by what it says", async (t) => {
   setTimeLimit(120_000);
   t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
@@ -869,13 +936,15 @@ test("--facts: when no page could be read, the summary sends no one to claims, a
   assert.equal(fs.existsSync(path.join(dir, "pages")), false);
 });
 
-test("--facts: a menu page that cannot be opened, moves on or goes blank is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {
+test("--facts: a menu page that cannot be opened, moves on, goes blank or leads to another port of this machine is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
   const closed = http.createServer();
   await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
   const shut = `http://127.0.0.1:${closed.address().port}`;
   await new Promise((resolve) => closed.close(resolve));
-  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="${shut}/customers">Customers</a> <a href="/security">Security</a> <a href="/integrations">Integrations</a> <a href="/about">About</a></nav></header>`;
+  // A link to another port of this machine is not picked at all, as another
+  // program listens there: Clients is never asked for.
+  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/customers">Customers</a> <a href="${shut}/clients">Clients</a> <a href="/security">Security</a> <a href="/integrations">Integrations</a> <a href="/about">About</a></nav></header>`;
   const pageOf = (title, script = "") => `${head(title)}${nav}<main><h1>${title}</h1></main>${script ? `<script>${script}</script>` : ""}</body></html>`;
   const pages = {
     "/": pageOf("Acme"),
@@ -885,6 +954,8 @@ test("--facts: a menu page that cannot be opened, moves on or goes blank is name
     "/gone": pageOf("Gone"),
   };
   const server = http.createServer((req, res) => {
+    // The connection dropped, so the page cannot be opened.
+    if (req.url === "/customers") return req.socket.destroy();
     const body = pages[req.url];
     res.writeHead(req.url === "/gone" ? 503 : body ? 200 : 404, { "content-type": "text/html; charset=utf-8" });
     res.end(body || "");
@@ -901,8 +972,9 @@ test("--facts: a menu page that cannot be opened, moves on or goes blank is name
   assert.deepEqual(facts.skipped, [
     { role: "pricing", url: `${origin}/pricing`, reason: "it answered 404" },
     // Not told as the page before it was: each address starts afresh.
-    { role: "customers", url: `${shut}/customers`, reason: "it could not be opened (net::ERR_CONNECTION_REFUSED)" },
-    { role: "security", url: `${origin}/security`, reason: "it could not be opened" },
+    { role: "customers", url: `${origin}/customers`, reason: "it could not be opened (net::ERR_EMPTY_RESPONSE)" },
+    // It moves on to another port of this machine, which is not read.
+    { role: "security", url: `${origin}/security`, reason: `it led to ${shut}/` },
     { role: "integrations", url: `${origin}/integrations`, reason: "it moved on to a blank page" },
     { role: "about", url: `${origin}/about`, reason: "it answered 503" },
   ]);
