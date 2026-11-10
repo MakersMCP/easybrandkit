@@ -93,7 +93,9 @@ Run it again with the same `--out` and the new kit takes the place of the earlie
 A run that fails, is refused, or is stopped with Ctrl-C or a kill leaves the folder as it was: an earlier kit stays whole, and a folder the run would have made is not made. Such a run exits with a status other than 0, and a kit you find in the folder after it is the earlier one. The line under the title of its `BRAND.md` names the address it was read from and the date. After two kinds of run that also exit with a status other than 0, the kit in the folder is the new one:
 
 - A run that saved its kit but could not print its summary or `brand.json`, say to a full disk, exits with 1, and its last line says the kit was saved.
-- A run stopped in the moment after it saved its kit ends by the signal, and its last line says so, as in `stopped by SIGINT, after the new kit was saved in <folder>`. With `--json`, that stop prints no error on stdout, and `brand.json` may not have been printed.
+- A run stopped in the moment after it saved its kit ends by the signal, and its last line says so, as in `stopped by SIGINT, after the new kit was saved in <folder>`. With `--json`, that stop prints no error on stdout, and `brand.json` may not have been printed. A stop that comes as the process ends, once its summary is printed, leaves no such line.
+
+So a run that printed its summary, which starts with `Saved the`, or `brand.json` with `--json`, has saved its kit, whatever its exit status.
 
 Installed globally (`npm install -g easybrandkit`), the command is `easybrandkit`. npx keeps the copy an earlier run fetched, so `npx easybrandkit@latest` is how you get a newer version. To stop a run started with npx, press Ctrl-C or send the signal to its whole process group (`kill -- -<pgid>`). A kill sent to the npx process alone may not reach easybrandkit: where `/bin/sh` is dash, as on Debian and Ubuntu, the run goes on and puts its kit in place if it ends well.
 
@@ -195,7 +197,7 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 - On a busy machine the browser itself can be slow to start, to open its tab or to answer the kit's connection to that tab. The run waits for each of these as long as its `--timeout` allows. If that runs out, the run fails, an earlier kit stays, and the last line says what did not answer and to give the run more time. A browser that has no room in the temp folder for its profile, or that does not use the profile it is given, as a Chromium installed as a snap can do, never answers, and the run says so within 15 s, with what to do.
 - A page too large to read gets no kit, and the run says so. Node 22.23 takes no message from the browser over 128 MB, and the snapshot of a very large page can be bigger.
 - With `--facts`, a menu page that answers with an error is skipped, and `FACTS.md` and the summary name it. When the home page's text cannot be read, no other page is read either, and `FACTS.md` says that no page could be read and why.
-- With `--facts`, rules that do not finish in their time, 30 s at most, list no claims, and `FACTS.md` and the summary say so. A page built to keep them busy costs that, and `pages/` still holds the text of each page read.
+- With `--facts`, rules that do not finish in their time, 30 s at most, list no claims: `FACTS.md` and the summary say so, and `facts.json` has a `claimsError` field. A page built to keep them busy costs that, and `pages/` still holds the text of each page read.
 - Instagram, Facebook and TikTok serve nothing without a login, so they are not asked.
 - A logo drawn into a canvas or a WebGL scene is not found.
 - Colors come from what the home page shows. A main color used on one button of another page will not show up.
