@@ -201,7 +201,7 @@ const ROLES = [
   ["integrations", /^(integrations|app integrations|connectors|entegrasyonlar|integrationen|int[ée]grations|integraciones|integra[çc][õo]es|integrazioni)$/i, /^(integrations|apps|marketplace|extensions|plugins|connectors|entegrasyonlar|integrationen|integraciones|integracoes|integrazioni)$/i],
   ["about", /^(about|about us|about \S+|company|our story|who we are|hakk[ıi]m[ıi]zda|\S+ hakk[ıi]nda|kurumsal|biz kimiz|[üu]ber uns|unternehmen|[àa] propos|qui sommes-nous|sobre( nosotros| n[óo]s)?|nosotros|chi siamo)$/i, /^(about|about-us|company|our-story|who-we-are|hakkimizda|biz-kimiz|kurumsal|ueber-uns|uber-uns|unternehmen|a-propos|qui-sommes-nous|sobre|sobre-nosotros|nosotros|chi-siamo)$/i],
 ];
-const PAGE_FILES = ["home", ...ROLES.map(([role]) => role)].map((role) => `${role}.md`);
+const PAGE_FILES = ["home", "given", ...ROLES.map(([role]) => role)].map((role) => `${role}.md`);
 
 const siteOf = (url) => url.hostname.toLowerCase().replace(/^www\./, "");
 const hostOf = (raw) => {
@@ -375,11 +375,13 @@ async function readRobots(origin) {
 // pause, its load and its read, and the claims' rules after them.
 const PAGE_TIME = 45_000;
 
-// The home page as the kit left it, then each picked page in the same tab,
-// one at a time with a pause between them (the site's Crawl-delay, 1 to 10
-// s), while the run has time for it. The page the user gave is read in any
-// case, as the kit reads it; the pages easybrandkit picks follow robots.txt.
-async function readFactPages(cdp, home, log) {
+// The page the kit read, as it left it, then each picked page in the same
+// tab, one at a time with a pause between them (the site's Crawl-delay, 1 to
+// 10 s), while the run has time for it. The page the kit read is read in any
+// case; the pages easybrandkit picks follow robots.txt. That page is filed as
+// the home page, or under role, "given" for an address deeper in the site
+// that was read as given because its home page could not be read.
+async function readFactPages(cdp, home, log, { role = "home" } = {}) {
   const pages = [];
   const skipped = [];
   // A page the server answered with an error, or that the browser could not
@@ -387,10 +389,10 @@ async function readFactPages(cdp, home, log) {
   const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "");
   log("Reading the page's claims");
   const model = await readModel(cdp).catch(() => null);
-  // A home page that has moved on since the kit read it is not read as one.
+  // A page that has moved on since the kit read it is not read as that page.
   const notHome = notThePage() || (model && model.tree ? "" : "its text could not be read");
-  if (notHome) return { pages, skipped: [{ role: "home", url: home, reason: notHome }] };
-  pages.push({ role: "home", url: home, readAt: new Date().toISOString(), model });
+  if (notHome) return { pages, skipped: [{ role, url: home, reason: notHome }] };
+  pages.push({ role, url: home, readAt: new Date().toISOString(), model });
   const picks = pickPages(model, home);
   if (!picks.length) return { pages, skipped };
   const robots = await readRobots(new URL(home).origin);

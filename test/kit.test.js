@@ -2029,6 +2029,20 @@ test("a deeper address whose home page fails is read as given and says so, and i
   assert.match(fs.readFileSync(path.join(named, "BRAND.md"), "utf8"), /^# Acme Cloud brand kit\n/);
   deep = answer(200, brandPage("rgb(0,0,255)"));
 
+  // With --facts, the page given is filed as that, not as the home page,
+  // and FACTS.md says that the home page could not be read, and why.
+  const withFacts = path.join(parent, "facts");
+  const { kit: factsKit, facts } = await makeKit(asked, { dir: withFacts, stores: false, facts: true });
+  assert.deepEqual(factsKit.notes, [noteOf("answered 404")]);
+  assert.deepEqual(facts.pages.map((one) => [one.role, one.url, one.file]), [["given", asked, "pages/given.md"]]);
+  assert.deepEqual(facts.skipped, [{ role: "home", url, reason: "it answered 404" }]);
+  assert.deepEqual(fs.readdirSync(path.join(withFacts, "pages")), ["given.md"]);
+  assert.match(fs.readFileSync(path.join(withFacts, "pages", "given.md"), "utf8"), new RegExp(`^# Page text: given\\n\\nAddress: <${asked}>\\n`));
+  const factsMd = fs.readFileSync(path.join(withFacts, "FACTS.md"), "utf8");
+  assert.ok(factsMd.includes(`| given | <${asked}> | pages/given.md |`), factsMd);
+  assert.ok(factsMd.includes(`Not read: the home page, <${url}>: it answered 404.`), factsMd);
+  assert.doesNotMatch(factsMd, /\| home \||\(home\)/);
+
   // The home page that works is read, as ever, and the page given is not.
   home = answer(200);
   const read = await makeKit(asked, { dir: path.join(parent, "home"), stores: false });

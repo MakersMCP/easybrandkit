@@ -446,7 +446,7 @@ test("the files: page text stays data, fenced and quoted, never Markdown of its 
 
   // What a new kit takes the place of in these, by name: a file of
   // someone's own in pages/ is not one of them.
-  assert.deepEqual(FACT_FILES, ["FACTS.md", "facts.json", "pages/home.md", "pages/pricing.md", "pages/customers.md", "pages/security.md", "pages/integrations.md", "pages/about.md"]);
+  assert.deepEqual(FACT_FILES, ["FACTS.md", "facts.json", "pages/home.md", "pages/given.md", "pages/pricing.md", "pages/customers.md", "pages/security.md", "pages/integrations.md", "pages/about.md"]);
 });
 
 test("a page built to keep the rules busy costs its claims, and the run stays free to answer Ctrl-C and to end on time", async (t) => {
@@ -785,6 +785,16 @@ test("a menu page too large for Node's connection, or whose tab's connection clo
     { role: "customers", url: "https://acme.test/customers", reason },
     { role: "about", url: "https://acme.test/about", reason },
   ]);
+  // The page the kit read is filed under a role of its own when asked, as
+  // a page read as given is, and so is a reason not to read it.
+  setTimeLimit(120_000);
+  const given = "https://acme.test/project/";
+  ({ pages, skipped } = await readFactPages(tab(false, false, model(given, [el("h1", {}, "Project")])), given, () => {}, { role: "given" }));
+  assert.deepEqual(pages.map((one) => [one.role, one.url]), [["given", given]]);
+  assert.deepEqual(skipped, []);
+  ({ pages, skipped } = await readFactPages(tab(false, false, null), given, () => {}, { role: "given" }));
+  assert.deepEqual(pages, []);
+  assert.deepEqual(skipped, [{ role: "given", url: given, reason: "its text could not be read" }]);
 });
 
 test("--facts: a menu page that makes the kit's own read of it throw says only that its text could not be read", { skip: noBrowser }, async (t) => {

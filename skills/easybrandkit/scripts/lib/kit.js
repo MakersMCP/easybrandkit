@@ -283,8 +283,10 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = f
       return null;
     });
     // The claims last, from the page as the kit leaves it and the pages it
-    // links to: the kit is made the same way with or without them.
-    const factPages = facts ? await readFactPages(cdp, pageUrl, log).catch((err) => ({ pages: [], skipped: [{ role: "home", url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
+    // links to: the kit is made the same way with or without them. A page
+    // read as given is not filed as the home page.
+    const role = deeper ? "given" : "home";
+    const factPages = facts ? await readFactPages(cdp, pageUrl, log, { role }).catch((err) => ({ pages: [], skipped: [{ role, url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
     // A browser that was killed or crashed on the way has left the kit
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.
@@ -526,6 +528,8 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     // The page's ground is not in brand.json: its list of colors can file
     // that color under the header or footer.
     fs.writeFileSync(path.join(work, "_brand.yml"), brandYml(kit, { background: found.brand.background || "", site: read ? read.pageUrl : "" }));
+    // FACTS.md says the home page was not read, and why, as BRAND.md does.
+    if (facts && read && failed && !listing) read.factPages.skipped.unshift({ role: "home", url: page, reason: `it ${failed}` });
     const claims = facts && read ? await writeFacts(work, { name: kit.name, site: kit.url, generator: kit.generator, ...read.factPages }) : null;
     // The folder is read again as the files go in: it can have changed
     // while the site was read.
