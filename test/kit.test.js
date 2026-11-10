@@ -1244,14 +1244,19 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   const late = "before the run's time ran out";
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // A browser that starts and never answers on its pipe.
+  // A browser that starts and never answers on its pipe. It is not asked to
+  // quit, which it would not answer either: it is killed at once.
   const silent = path.join(parent, "silent");
-  fs.writeFileSync(silent, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+  fs.writeFileSync(silent, `#!/bin/sh\nexec ${ANSWER}\n`, { mode: 0o755 });
   process.env.CHROME_PATH = silent;
+  answers({ "Browser.getVersion": "never" });
   setTimeLimit(2_500);
   let end = await ended(launch({ width: 800, height: 600 }), 2_500);
   assert.equal(end.message, `silent was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout. If it happens again, point CHROME_PATH at another browser.`);
+  assert.deepEqual(fs.readFileSync(log, "utf8").trim().split("\n"), ["Browser.getVersion"]);
   assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
+
+  fs.rmSync(log, { force: true });
 
   // One that answers as it starts, and is slow from then on: it opens no
   // tab, or one after 11 s, more than the 10 s a tab was given before, and
