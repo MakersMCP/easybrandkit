@@ -19,4 +19,8 @@ const outOfTime = () => timeLeft() < 2_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-module.exports = { setTimeLimit, timeLeft, outOfTime, sleep };
+// A timer longer than this goes off at once, and a program that calls makeKit
+// can give it any time limit.
+const LONGEST_TIMER = 2 ** 31 - 1;
+
+module.exports = { setTimeLimit, timeLeft, outOfTime, sleep, LONGEST_TIMER };

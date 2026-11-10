@@ -7,7 +7,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { connect } = require("./chrome");
+const { connect, newTab, browserWait } = require("./chrome");
 const { capture, resetPictureWait } = require("./page");
 
 const CARD = { width: 1600, height: 900, scale: 1.5 };
@@ -64,12 +64,16 @@ function cardHtml(kit, dir) {
   </div></body></html>`;
 }
 
-// Drawn in a new tab of the browser the kit was read with.
+// Drawn in a new tab of the browser the kit was read with. The tab and the
+// connection to it are waited for 30 s at most, or what the run has left: a
+// kit can do without its card, and the claims still to be read need time.
+const CARD_WAIT = 30_000;
+
 async function renderCard(base, kit, dir) {
-  const res = await fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(10_000) });
-  const target = await res.json();
-  const cdp = await connect(target.webSocketDebuggerUrl);
+  const target = await newTab(base, browserWait(CARD_WAIT));
+  let cdp;
   try {
+    cdp = await connect(target.webSocketDebuggerUrl, browserWait(CARD_WAIT));
     await cdp.send("Page.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: CARD.width, height: CARD.height, deviceScaleFactor: 1, mobile: false });
     const { frameTree } = await cdp.send("Page.getFrameTree");
@@ -81,7 +85,7 @@ async function renderCard(base, kit, dir) {
     fs.writeFileSync(path.join(dir, "card.png"), png);
     return { file: "card.png", width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
   } finally {
-    cdp.close();
+    if (cdp) cdp.close();
     await fetch(`${base}/json/close/${target.id}`, { signal: AbortSignal.timeout(5_000) }).catch(() => {});
   }
 }

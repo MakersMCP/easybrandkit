@@ -8,7 +8,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
-const { timeLeft, outOfTime, sleep } = require("./time");
+const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
 
 const MAC = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -59,6 +59,27 @@ function findChrome() {
 // The browsers this process has open, so that a run that is stopped can end
 // them at once instead of leaving them running.
 const open = new Set();
+
+// How long a wait on the browser may last: what the run has left, at least a
+// second, and no more than cap where one is given. A busy machine can keep a
+// browser from answering for many seconds, so the run's own limit, and not a
+// fixed one, says how long its start, its tab and the connection to it are
+// waited for.
+const browserWait = (cap = Infinity) => Math.max(1_000, Math.min(cap, LONGEST_TIMER, timeLeft()));
+
+// What the browser did, as an error whose words can start a sentence or
+// follow "The card could not be drawn:", marked browserSaid. A run that ends
+// on one adds what to do (noKit).
+const browserSaid = (words, more = {}) => Object.assign(new Error(words), { browserSaid: true, outOfTime: false, ...more });
+
+// A wait on the browser that ran out: what did not answer, and for how long.
+// Its outOfTime says the run has used up its own time.
+function noAnswer(what, ms) {
+  const spent = outOfTime();
+  return browserSaid(`${what} ${spent ? "before the run's time ran out" : `in ${Math.round(ms / 1_000)} s`}`, { noAnswer: true, outOfTime: spent });
+}
+
+const noKit = (err) => Object.assign(new Error(`${err.message}, so no kit was made. ${err.outOfTime ? "Try again, or give it more time with --timeout." : "Try again."}`), { outOfTime: err.outOfTime });
 
 // The folders browsers of Chrome's kind make in the temp folder, by the
 // name each one gives them: the one that holds the socket that makes a
@@ -313,7 +334,7 @@ async function launch({ width, height }) {
       let asked = false;
       try {
         const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
-        const browser = await connect(webSocketDebuggerUrl);
+        const browser = await connect(webSocketDebuggerUrl, 2_000);
         asked = true;
         await browser.send("Browser.close", {}, 3_000).catch(() => {});
       } catch {
@@ -335,19 +356,23 @@ async function launch({ width, height }) {
   };
   // Whether the browser still runs: one that was killed or crashed has
   // ended, or no longer takes a connection on its port. One that is slow to
-  // answer, on a busy machine, still runs.
-  const alive = async () => {
+  // answer, on a busy machine, still runs, and so does one that has not
+  // ended when it is not asked (ms 0).
+  const alive = async (ms = 5_000) => {
     if (exited) return false;
+    if (!ms) return true;
     try {
-      await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(5_000) })).arrayBuffer();
+      await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(ms) })).arrayBuffer();
       return !exited;
     } catch (err) {
       return !exited && err.name === "TimeoutError";
     }
   };
-  // Chrome writes the port it picked to DevToolsActivePort in the profile.
+  // Chrome writes the port it picked to DevToolsActivePort in the profile,
+  // which a busy machine can keep it from doing for a while.
   const portFile = path.join(profile, "DevToolsActivePort");
-  for (let waited = 0; waited < 20_000 && !exited; waited += 100) {
+  const wait = browserWait();
+  for (const until = Date.now() + wait; !exited && Date.now() < until; ) {
     try {
       const port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
       if (/^\d+$/.test(port)) {
@@ -364,12 +389,14 @@ async function launch({ width, height }) {
     }
     await sleep(100);
   }
+  const running = !exited;
   // Told before close, which removes the folder the browser made.
   const tooLong = exited ? socketTooLong(temp, before) : 0;
   await close();
   if (tooLong) {
     throw new Error(`${path.basename(binary)} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
   }
+  if (running) throw noKit(noAnswer(`${path.basename(binary)} was started but did not answer`, wait));
   throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
 }
 
@@ -465,7 +492,10 @@ function killBrowsers() {
 // of the run's time, where more of it can help: such a run does not go on.
 const pageFailed = (message, what, spent = false) => Object.assign(new Error(message), { pageFailed: what, outOfTime: spent });
 
-function connect(wsUrl) {
+// A connection to the browser or to one of its tabs, waited for ms at most: a
+// browser that takes the connection and never answers it would otherwise
+// hold the run for minutes.
+function connect(wsUrl, ms = browserWait()) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const pending = new Map();
@@ -473,6 +503,10 @@ function connect(wsUrl) {
     let nextId = 0;
     let markClosed;
     const closed = new Promise((done) => (markClosed = done));
+    const timer = setTimeout(() => {
+      reject(noAnswer("The browser did not answer the kit's connection to its tab", ms));
+      ws.close();
+    }, ms);
     ws.onmessage = (event) => {
       let msg;
       try {
@@ -491,8 +525,15 @@ function connect(wsUrl) {
       if (msg.error) waiter.reject(new Error(msg.error.message || "DevTools protocol error"));
       else waiter.resolve(msg.result || {});
     };
-    ws.onerror = () => reject(new Error("The browser connection failed."));
+    // An error, or a close before it opened, as when the browser ends
+    // meanwhile. Once it has opened, this changes nothing.
+    const refused = () => {
+      clearTimeout(timer);
+      reject(browserSaid("The browser refused the kit's connection to its tab"));
+    };
+    ws.onerror = refused;
     ws.onclose = () => {
+      refused();
       for (const waiter of pending.values()) {
         clearTimeout(waiter.timer);
         waiter.reject(new Error("The browser connection closed."));
@@ -500,7 +541,8 @@ function connect(wsUrl) {
       pending.clear();
       markClosed();
     };
-    ws.onopen = () =>
+    ws.onopen = () => {
+      clearTimeout(timer);
       resolve({
         // Settles once the connection has closed, as when the browser ends.
         closed,
@@ -525,17 +567,29 @@ function connect(wsUrl) {
           ws.close();
         },
       });
+    };
   });
+}
+
+// A new tab of the browser's, as /json/new gives it, with its id and the
+// address of the connection to it, waited for ms at most.
+async function newTab(base, ms) {
+  try {
+    const res = await fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(ms) });
+    return await res.json();
+  } catch (err) {
+    if (err.name === "TimeoutError") throw noAnswer("The browser did not open a tab", ms);
+    throw err;
+  }
 }
 
 // A new tab, set to a desktop screen of the given size. Headless Chrome says
 // "HeadlessChrome" in its user agent, and some sites answer that with a
 // stripped page; the tab says "Chrome", as the same browser with a window
-// would.
+// would. The tab and the connection to it have what the run has left.
 async function openPage(base, { width, height }) {
-  const res = await fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(10_000) });
-  const target = await res.json();
-  const cdp = await connect(target.webSocketDebuggerUrl);
+  const target = await newTab(base, browserWait());
+  const cdp = await connect(target.webSocketDebuggerUrl, browserWait());
   // A site can make a browser save a file, into the Downloads folder of the
   // user it runs as, where nothing removes it. This browser saves none, but
   // only as long as this connection is open: it goes back to saving them the
@@ -582,13 +636,16 @@ async function watchAnswer(cdp) {
 async function navigate(cdp, url) {
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false });
+  // A site gets 30 s to answer, or what the run has left: one the kit chose
+  // to read that never answers leaves the run time to go on without it.
+  const limit = Math.max(1_000, Math.min(30_000, timeLeft()));
   let errorText;
   try {
-    ({ errorText } = await cdp.send("Page.navigate", { url }));
+    ({ errorText } = await cdp.send("Page.navigate", { url }, limit));
   } catch (err) {
     if (!err.timedOut) throw err;
     if (outOfTime()) throw pageFailed(`${url} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`, "did not answer", true);
-    throw pageFailed(`${url} did not answer`, "did not answer");
+    throw pageFailed(`${url} did not answer in ${Math.round(limit / 1_000)} s, so no kit was made. The site may be down or slow: try again later.`, "did not answer");
   }
   if (errorText) {
     if (cdp.answer.status >= 400) return url;
@@ -649,4 +706,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, openPage, navigate, inOwnWorld, pageFailed };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, newTab, browserWait, openPage, navigate, inOwnWorld, pageFailed, noKit };

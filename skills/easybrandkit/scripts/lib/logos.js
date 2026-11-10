@@ -21,7 +21,7 @@ const zlib = require("zlib");
 const { Worker } = require("worker_threads");
 const { inOwnWorld, pageFailed } = require("./chrome");
 const { capture, metrics, nearest } = require("./page");
-const { sleep, outOfTime, timeLeft } = require("./time");
+const { sleep, outOfTime, timeLeft, LONGEST_TIMER } = require("./time");
 const { plainText, noEndSlashes } = require("./text");
 
 const LOGO_MAX = 6;
@@ -151,10 +151,6 @@ function brandLink(raw, base) {
   }
   return null;
 }
-
-// A timer longer than this goes off at once, and a program that calls makeKit
-// can give it any time limit.
-const LONGEST_TIMER = 2 ** 31 - 1;
 
 // The marks, the look and the links of the page as it stands, read from one
 // DOM snapshot on a thread of its own, for as long as the run still has. It

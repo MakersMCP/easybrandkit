@@ -17,14 +17,20 @@ const { EventEmitter, once } = require("node:events");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
-const { findChrome, launch, openPage, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, newTab, browserWait, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf, saveVector, readWords } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 const { noControls, plainText, noEndSlashes } = require("../skills/easybrandkit/scripts/lib/text");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
+const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
+
+// Each test starts with the time a run has by default: a browser is waited
+// for as long as the run has left, and a test before it can have used that
+// up.
+test.beforeEach(() => setTimeLimit(120_000));
 const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
 
@@ -1102,6 +1108,104 @@ test("a browser that is slow to answer still runs; one that refuses its port or 
   assert.equal(await browser.alive(), false, "its port refuses");
   await browser.close();
   assert.equal(await browser.alive(), false, "ended");
+});
+
+test("a browser slow to start, to open a tab or to answer the connection to it is waited for as long as the run has left, and then told in words", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  // The browser's DevTools server, as slow as each case needs: it takes every
+  // connection and answers none of them, but /json/new once tab is set, that
+  // many ms after it is asked, with a tab whose connection it never answers.
+  // It counts the times it is asked for /json/version.
+  let tab = 0;
+  let versions = 0;
+  const devtools = http.createServer((req, res) => {
+    if (req.url.startsWith("/json/version")) versions++;
+    if (!tab || !req.url.startsWith("/json/new")) return;
+    const target = { id: "x", webSocketDebuggerUrl: `ws://127.0.0.1:${devtools.address().port}/devtools/page/x` };
+    setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(target)), tab);
+  });
+  const upgrades = new Set();
+  devtools.on("upgrade", (req, socket) => upgrades.add(socket));
+  devtools.listen(0, "127.0.0.1");
+  await once(devtools, "listening");
+  const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
+  t.after(() => {
+    killBrowsers();
+    setTimeLimit(120_000);
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    for (const socket of upgrades) socket.destroy();
+    devtools.closeAllConnections();
+    devtools.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  process.env.TMPDIR = temp;
+  // What a wait ended with, once the run's time has run out, where it took
+  // a fixed 10 or 20 s, or went on past the run's limit for minutes.
+  const ended = async (promise, least, more = 6_000) => {
+    const started = Date.now();
+    const end = await Promise.race([promise.then(() => "went on", (err) => err), new Promise((resolve) => setTimeout(resolve, least + more, "still waiting"))]);
+    assert.ok(Date.now() - started >= least - 500, `ended after ${Date.now() - started} ms`);
+    return end;
+  };
+  const late = "before the run's time ran out";
+
+  // A browser that starts and never says where its DevTools are.
+  const silent = path.join(parent, "silent");
+  fs.writeFileSync(silent, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+  process.env.CHROME_PATH = silent;
+  setTimeLimit(2_500);
+  let end = await ended(launch({ width: 800, height: 600 }), 2_500);
+  assert.equal(end.message, `silent was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout.`);
+  assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
+
+  // One that says where they are at once, and is slow from then on.
+  const slow = path.join(parent, "chrome");
+  fs.writeFileSync(slow, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\nprintf '${devtools.address().port}\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"\nexec sleep 60\n`, { mode: 0o755 });
+  process.env.CHROME_PATH = slow;
+  setTimeLimit(120_000);
+  const browser = await launch({ width: 800, height: 600 });
+  setTimeLimit(2_500);
+  end = await ended(openPage(browser.base, { width: 800, height: 600 }), 2_500);
+  assert.equal(end.message, `The browser did not open a tab ${late}`);
+  assert.equal(end.outOfTime, true);
+  // A tab that comes after 11 s, more than the 10 s a tab was given before,
+  // and a connection to it that is never answered.
+  tab = 11_000;
+  setTimeLimit(14_000);
+  end = await ended(openPage(browser.base, { width: 800, height: 600 }), 14_000);
+  assert.equal(end.message, `The browser did not answer the kit's connection to its tab ${late}`);
+  // The card's tab, which a kit can do without.
+  tab = 0;
+  setTimeLimit(2_500);
+  end = await ended(renderCard(browser.base, {}, parent), 2_500);
+  assert.equal(end.message, `The browser did not open a tab ${late}`);
+  // Under a time limit longer than any timer can be, as a program that calls
+  // makeKit can give it, a tab that comes is taken.
+  tab = 300;
+  setTimeLimit(2 ** 40);
+  assert.equal((await newTab(browser.base, browserWait())).id, "x");
+  await browser.close();
+
+  // A run whose browser opens no tab keeps the earlier kit, and says so. The
+  // browser has just been waited for, so it is not asked again whether it
+  // still runs, which would add seconds past the run's limit: /json/version
+  // is asked for only to ask the browser to quit.
+  tab = 0;
+  versions = 0;
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  end = await ended(makeKit("https://acme.example/", { dir, stores: false, timeLimit: 3_000 }), 3_000, 10_000);
+  assert.equal(end.message, `The browser did not open a tab ${late}, so no kit was made. Try again, or give it more time with --timeout.`);
+  assert.equal(end.earlierKit, dir);
+  assert.equal(versions, 1);
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
 test("a browser that cannot start because the temp folder's path is too long for its socket says so", { skip: process.platform !== "linux" && "told on Linux only" }, async (t) => {
@@ -2263,7 +2367,7 @@ test("a browser killed while the page is read fails the run at once and says so,
   assert.deepEqual(filesOf(dir), before, "a server that never answers");
   // One call's own limit passed, with time to spare: more time would not help.
   const stalled = withStalledTab(t, "Page.navigate");
-  await assert.rejects(stalled(silent.origin, { dir, stores: false }), (err) => err.message === `${silent.origin}/ did not answer` && err.earlierKit === dir);
+  await assert.rejects(stalled(silent.origin, { dir, stores: false }), (err) => err.message === `${silent.origin}/ did not answer in 30 s, so no kit was made. The site may be down or slow: try again later.` && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before, "one call's own limit");
 });
 
@@ -2408,6 +2512,17 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   drawn = Object.assign(new Error("Page.captureScreenshot timed out"), { timedOut: true });
   const stalled = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(stalled.kit.notes, ["The card could not be drawn: the browser tab stopped answering."]);
+  // And so is a tab for the card that the browser does not open in time: the
+  // second tab of a run is the card's.
+  const realFetch = globalThis.fetch;
+  let tabs = 0;
+  t.mock.method(globalThis, "fetch", function (url, ...rest) {
+    if (String(url).includes("/json/new") && ++tabs === 2) return Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    return realFetch.call(this, url, ...rest);
+  });
+  const slowTab = await makeKit(site.origin, { dir, stores: false });
+  assert.equal(tabs, 2);
+  assert.deepEqual(slowTab.kit.notes, ["The card could not be drawn: the browser did not open a tab in 30 s."]);
 });
 
 test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {

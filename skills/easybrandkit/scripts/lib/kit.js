@@ -28,7 +28,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { launch, openPage, navigate, pageFailed } = require("./chrome");
+const { launch, openPage, navigate, pageFailed, noKit } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture } = require("./page");
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
@@ -249,7 +249,8 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
       // A file that cannot be written fails the run: what it has of the file
       // would otherwise go into the kit.
       if (err.syscall) throw err;
-      cardError = err.timedOut ? "the browser tab stopped answering" : String(err.message || err);
+      const said = String(err.message || err);
+      cardError = err.timedOut ? "the browser tab stopped answering" : err.browserSaid ? said.charAt(0).toLowerCase() + said.slice(1) : said;
       return null;
     });
     // The claims last, from the page as the kit leaves it and the pages it
@@ -263,9 +264,11 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
   } catch (err) {
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
-    // the DevTools protocol.
+    // the DevTools protocol. One that did not answer a wait for its tab has
+    // just been waited for, and is not asked again.
     if (err.syscall) throw err;
-    if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
+    if (!(await chrome.alive(err.noAnswer ? 0 : undefined))) throw new Error(BROWSER_GONE);
+    if (err.browserSaid) throw noKit(err);
     if (err.timedOut) {
       const spent = outOfTime();
       throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent);
