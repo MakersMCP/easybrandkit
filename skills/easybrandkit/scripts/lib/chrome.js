@@ -268,6 +268,63 @@ function endAll(processes, profile) {
   return ended;
 }
 
+// What fs says of a write that found no room: a full disk, or a user's quota
+// used up.
+const NO_ROOM = new Set(["ENOSPC", "EDQUOT"]);
+// A disk with less room than this left has none for a browser's profile.
+const ROOM = 64 * 1024;
+
+// Whether the disk that holds the profile takes ROOM more bytes, asked by
+// writing them: the error of a write that found no room, with the path
+// written, or null. A full disk and a quota used up look the same to the
+// browser, and only a write tells them apart.
+function noRoomIn(profile) {
+  const probe = path.join(profile, "easybrandkit-room");
+  try {
+    fs.writeFileSync(probe, Buffer.alloc(ROOM));
+    return null;
+  } catch (err) {
+    return NO_ROOM.has(err.code) ? Object.assign(err, { path: err.path || probe }) : null;
+  } finally {
+    try {
+      fs.rmSync(probe, { force: true });
+    } catch {
+      // Removed with the profile.
+    }
+  }
+}
+
+// Whether the disk that holds the temp folder shows next to no room.
+function lowOnRoom(temp) {
+  try {
+    const { bavail, bsize } = fs.statfsSync(temp);
+    return bavail * bsize < ROOM;
+  } catch {
+    return false;
+  }
+}
+
+// Whether a profile is still as the kit made it: a browser writes its own
+// files into the profile it uses in its first moments (SingletonLock, or
+// lockfile on Windows, and Local State), so one that has left nothing there
+// but the kit's Default/Preferences uses another folder.
+function untouched(profile) {
+  try {
+    const top = fs.readdirSync(profile);
+    if (top.some((name) => name !== "Default")) return false;
+    return !top.length || fs.readdirSync(path.join(profile, "Default")).every((name) => name === "Preferences");
+  } catch {
+    return false;
+  }
+}
+
+// A browser that has used its profile this long without saying where its
+// DevTools are is slow; one that has not touched it uses another folder.
+const UNTOUCHED_WAIT = 15_000;
+// Chrome writes DevToolsActivePort in one go: a file that stays empty this
+// long is one it could not write. So is a disk that shows no room this long.
+const EMPTY_WAIT = 3_000;
+
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
@@ -276,17 +333,25 @@ async function launch({ width, height }) {
   if (!binary) {
     throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
   }
+  const name = path.basename(binary);
   const temp = os.tmpdir();
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
   // A download that starts while no connection is refusing it (see openPage)
   // goes into the throwaway profile and is removed with it, not into the
   // Downloads folder of the user the browser runs as.
+  const preferences = path.join(profile, "Default", "Preferences");
   try {
     fs.mkdirSync(path.join(profile, "Default"));
-    fs.writeFileSync(path.join(profile, "Default", "Preferences"), JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false } }));
-  } catch {
-    // The refusal still holds.
+    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false } }));
+  } catch (err) {
+    // A disk with no room for this has none for the browser's own files
+    // either, and the browser would wait for the run's whole time. For
+    // anything else, the refusal still holds.
+    if (NO_ROOM.has(err.code)) {
+      fs.rmSync(profile, { recursive: true, force: true });
+      throw Object.assign(err, { path: err.path || preferences });
+    }
   }
   // Chrome on Linux has its crash handler write the reports of its processes
   // into the user's own browser's folder (~/.config/google-chrome/Crash
@@ -369,35 +434,74 @@ async function launch({ width, height }) {
     }
   };
   // Chrome writes the port it picked to DevToolsActivePort in the profile,
-  // which a busy machine can keep it from doing for a while.
+  // which a busy machine can keep it from doing for a while: that is waited
+  // for as long as the run has left. Looked at once a second, a browser that
+  // never will is told before then: one that could not write the file, as on
+  // a disk with no room, and one that does not use the profile at all.
   const portFile = path.join(profile, "DevToolsActivePort");
   const wait = browserWait();
-  for (const until = Date.now() + wait; !exited && Date.now() < until; ) {
+  const started = Date.now();
+  let looked = started;
+  let emptySince = 0;
+  let lowSince = 0;
+  const neverWill = (written) => {
+    const now = Date.now();
+    emptySince = written === "" ? emptySince || now : 0;
+    lowSince = lowOnRoom(temp) ? lowSince || now : 0;
+    const empty = emptySince && now - emptySince >= EMPTY_WAIT;
+    if (empty || (lowSince && now - lowSince >= EMPTY_WAIT)) {
+      const full = noRoomIn(profile);
+      if (full) return full;
+      lowSince = 0;
+      if (empty) return new Error(`${name} was started but could not write where its DevTools are, as when the disk that holds the temp folder, ${temp}, is full, so no kit was made. Check that it has room, and try again.`);
+    }
+    if (now - started >= UNTOUCHED_WAIT && untouched(profile)) {
+      return new Error(`${name} runs but does not use the profile folder it was given, as a browser installed as a snap can do, so no kit was made. Point CHROME_PATH at another browser.`);
+    }
+    return null;
+  };
+  for (const until = started + wait; !exited && Date.now() < until; ) {
+    let written = null;
     try {
-      const port = fs.readFileSync(portFile, "utf8").split("\n")[0].trim();
-      if (/^\d+$/.test(port)) {
-        base = `http://127.0.0.1:${port}`;
-        // Known from the start: by the time the browser is stopped, its
-        // helpers can have ended, and its link to the folder of its socket
-        // can be gone.
-        entry.crashHandler = crashHandlerOf(processesOf(child));
-        entry.singleton = singletonOf(profile, temp);
-        return { base, close, alive };
-      }
+      written = fs.readFileSync(portFile, "utf8");
     } catch {
       // Not written yet.
+    }
+    const port = (written || "").split("\n")[0].trim();
+    if (/^\d+$/.test(port)) {
+      base = `http://127.0.0.1:${port}`;
+      // Known from the start: by the time the browser is stopped, its
+      // helpers can have ended, and its link to the folder of its socket
+      // can be gone.
+      entry.crashHandler = crashHandlerOf(processesOf(child));
+      entry.singleton = singletonOf(profile, temp);
+      return { base, close, alive };
+    }
+    if (Date.now() - looked >= 1_000) {
+      looked = Date.now();
+      const never = neverWill(written);
+      if (never) {
+        await close();
+        throw never;
+      }
     }
     await sleep(100);
   }
   const running = !exited;
-  // Told before close, which removes the folder the browser made.
+  // Told before close, which removes the folder the browser made and the
+  // profile: a browser that ended at once can have found no room either.
   const tooLong = exited ? socketTooLong(temp, before) : 0;
+  const full = exited && !tooLong ? noRoomIn(profile) : null;
   await close();
   if (tooLong) {
-    throw new Error(`${path.basename(binary)} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
+    throw new Error(`${name} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
   }
-  if (running) throw noKit(noAnswer(`${path.basename(binary)} was started but did not answer`, wait));
-  throw new Error(`${path.basename(binary)} did not start. Try again, or point CHROME_PATH at another browser.`);
+  if (full) throw full;
+  if (running) {
+    const late = noKit(noAnswer(`${name} was started but did not answer`, wait));
+    throw Object.assign(late, { message: `${late.message} If it happens again, point CHROME_PATH at another browser.` });
+  }
+  throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
 }
 
 // A socket's path on Linux holds 108 bytes, the last of them a zero.

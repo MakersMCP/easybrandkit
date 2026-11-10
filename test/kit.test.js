@@ -1195,7 +1195,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   process.env.CHROME_PATH = silent;
   setTimeLimit(2_500);
   let end = await ended(launch({ width: 800, height: 600 }), 2_500);
-  assert.equal(end.message, `silent was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout.`);
+  assert.equal(end.message, `silent was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout. If it happens again, point CHROME_PATH at another browser.`);
   assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
 
   // One that says where they are at once, and is slow from then on.
@@ -1276,6 +1276,130 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.equal(end.message, "The browser refused the kit's connection to its tab, so no kit was made. Try again.");
   assert.equal(end.earlierKit, dir);
   assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+});
+
+test("a browser that will never say where its DevTools are is told before the run's time is up: one with no room in the temp folder, and one that does not use its profile", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
+  t.after(() => {
+    killBrowsers();
+    setTimeLimit(120_000);
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  process.env.TMPDIR = temp;
+  // Stand-ins for Chrome: one that never touches the profile it is given, as
+  // a Chromium installed as a snap, which has a /tmp of its own; one that
+  // makes its lock there, as Chrome does in its first moments, and is slow
+  // from then on; and one that also leaves DevToolsActivePort empty, as
+  // Chrome does when the disk has no room for it.
+  const standIn = (name, also) => {
+    const file = path.join(parent, name);
+    fs.writeFileSync(file, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\n${also}exec sleep 60\n`, { mode: 0o755 });
+    return file;
+  };
+  const silent = standIn("silent", "");
+  const locked = standIn("locked", `ln -s "standin-$$" "$profile/SingletonLock"\n`);
+  const empty = standIn("empty", `ln -s "standin-$$" "$profile/SingletonLock"\n: > "$profile/DevToolsActivePort"\n`);
+  const timed = async (promise) => {
+    const started = Date.now();
+    const end = await promise.then(() => "went on", (err) => err);
+    return { end, ms: Date.now() - started };
+  };
+  const late = "before the run's time ran out";
+  // What fs says when a write finds no room, for the files named.
+  const noRoom = (code, names) => {
+    const write = fs.writeFileSync;
+    return t.mock.method(fs, "writeFileSync", function (file, ...rest) {
+      if (names.includes(path.basename(String(file))) && String(file).startsWith(temp)) {
+        throw Object.assign(new Error(`${code}: no space left on device, write`), { code, errno: -28, syscall: "write" });
+      }
+      return write.call(this, file, ...rest);
+    });
+  };
+  const full = (code) => (code === "ENOSPC" ? `The disk that holds the temp folder, ${temp}, is full (ENOSPC).` : `This user has no room left on the disk that holds the temp folder, ${temp} (EDQUOT).`) + " Free some space on it, or set TMPDIR to a folder on another disk.";
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+
+  // No room for the kit's own file in the profile: told at once.
+  process.env.CHROME_PATH = locked;
+  let mock = noRoom("ENOSPC", ["Preferences"]);
+  let run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
+  mock.mock.restore();
+  assert.equal(run.end.message, full("ENOSPC"));
+  assert.equal(run.end.earlierKit, dir);
+  assert.ok(run.ms < 3_000, `told after ${run.ms} ms`);
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "the profile is removed");
+
+  // DevToolsActivePort left empty on a disk with no room, or a quota used up:
+  // told within seconds, not at the end of the run.
+  process.env.CHROME_PATH = empty;
+  mock = noRoom("ENOSPC", ["easybrandkit-room"]);
+  run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
+  mock.mock.restore();
+  assert.equal(run.end.message, full("ENOSPC"));
+  assert.equal(run.end.earlierKit, dir);
+  assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+  // Left empty, while the disk has room again: the browser will not write it.
+  run = await timed(launch({ width: 800, height: 600 }));
+  assert.equal(run.end.message, `empty was started but could not write where its DevTools are, as when the disk that holds the temp folder, ${temp}, is full, so no kit was made. Check that it has room, and try again.`);
+  assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+  // Not written yet, on a disk that shows no room and has none.
+  process.env.CHROME_PATH = locked;
+  const statfs = fs.statfsSync;
+  t.mock.method(fs, "statfsSync", function (at, ...rest) {
+    const real = statfs.call(this, at, ...rest);
+    return String(at).startsWith(temp) ? Object.assign(real, { bavail: 1 }) : real;
+  });
+  mock = noRoom("EDQUOT", ["easybrandkit-room"]);
+  run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
+  mock.mock.restore();
+  t.mock.restoreAll();
+  assert.equal(run.end.message, full("EDQUOT"));
+  assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+
+  // One that ends at once on such a disk did not start for want of room.
+  process.env.CHROME_PATH = standIn("quits", "exit 1\n");
+  mock = noRoom("ENOSPC", ["easybrandkit-room"]);
+  run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
+  mock.mock.restore();
+  assert.equal(run.end.message, full("ENOSPC"));
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+
+  // A browser that never touches its profile: told after 15 s, however much
+  // time the run has left.
+  process.env.CHROME_PATH = silent;
+  run = await timed(launch({ width: 800, height: 600 }));
+  assert.equal(run.end.message, "silent runs but does not use the profile folder it was given, as a browser installed as a snap can do, so no kit was made. Point CHROME_PATH at another browser.");
+  assert.ok(run.ms >= 14_500 && run.ms < 22_000, `told after ${run.ms} ms`);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+  // One that uses it is waited for as long as the run has left, whether it
+  // writes its lock or only files of its own in Default. Both are started
+  // at once: the browser is picked as a start begins.
+  const writes = standIn("writes", `echo x > "$profile/Default/Cookies"\n`);
+  setTimeLimit(18_000);
+  process.env.CHROME_PATH = locked;
+  const lockedRun = timed(launch({ width: 800, height: 600 }));
+  process.env.CHROME_PATH = writes;
+  const writesRun = timed(launch({ width: 800, height: 600 }));
+  for (const [name, used] of [["locked", await lockedRun], ["writes", await writesRun]]) {
+    assert.equal(used.end.message, `${name} was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout. If it happens again, point CHROME_PATH at another browser.`);
+    assert.ok(used.ms >= 17_500, `${name} told after ${used.ms} ms`);
+  }
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
