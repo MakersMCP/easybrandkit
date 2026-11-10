@@ -371,6 +371,10 @@ async function readRobots(origin) {
 
 // ---- Reading the pages ----
 
+// The time a run must have left to read a page past the home page: its
+// pause, its load and its read, and the claims' rules after them.
+const PAGE_TIME = 45_000;
+
 // The home page as the kit left it, then each picked page in the same tab,
 // one at a time with a pause between them (the site's Crawl-delay, 1 to 10
 // s), while the run has time for it. The page the user gave is read in any
@@ -404,8 +408,8 @@ async function readFactPages(cdp, home, log) {
       skipped.push({ ...pick, reason: "the site's robots.txt asks tools not to read it" });
       continue;
     }
-    if (timeLeft() < 45_000) {
-      skipped.push({ ...pick, reason: "the run ran out of time; give --timeout more seconds" });
+    if (timeLeft() < PAGE_TIME) {
+      skipped.push({ ...pick, reason: `too little of the run's time was left to read it, as a page past the home page is read only while ${PAGE_TIME / 1_000} s are left; give --timeout more seconds` });
       continue;
     }
     let timer;

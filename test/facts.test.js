@@ -705,7 +705,7 @@ test("a menu page whose read fails is told on one line, and an exception in it n
   ]);
 });
 
-test("a menu page too large for Node's connection, or whose tab's connection closes, is told in words", async (t) => {
+test("a menu page too large for Node's connection, or whose tab's connection closes, is told in words, and so is one the run has too little time left for", async (t) => {
   setTimeLimit(120_000);
   t.after(() => setTimeLimit(120_000));
   t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
@@ -743,6 +743,18 @@ test("a menu page too large for Node's connection, or whose tab's connection clo
   assert.deepEqual(skipped, [
     { role: "pricing", url: "https://acme.test/pricing", reason: "it is too large to read" },
     { role: "customers", url: "https://acme.test/customers", reason: "the kit's connection to its tab closed" },
+  ]);
+  // A run of 30 s has less than the 45 s a page past the home page is read
+  // in by the time it gets there: the reason says so, and not that the run
+  // ran out of time, which it has not.
+  setTimeLimit(30_000);
+  at = "";
+  ({ pages, skipped } = await readFactPages(cdp, "https://acme.test/", () => {}));
+  assert.deepEqual(pages.map((one) => one.role), ["home"]);
+  const reason = "too little of the run's time was left to read it, as a page past the home page is read only while 45 s are left; give --timeout more seconds";
+  assert.deepEqual(skipped, [
+    { role: "pricing", url: "https://acme.test/pricing", reason },
+    { role: "customers", url: "https://acme.test/customers", reason },
   ]);
 });
 

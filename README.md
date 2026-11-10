@@ -140,7 +140,7 @@ npx easybrandkit@latest linear.app --facts
 - Security standards the site names, such as SOC 2, ISO 27001, GDPR or HIPAA, each with the sentence that names it.
 - Ratings, questions and answers, and company details from the page and its JSON-LD.
 
-Besides the home page, easybrandkit reads up to five pages it finds in the site's menu and footer: pricing, customers, security, integrations and about. It reads them one at a time with a pause between them, and only the ones the site's robots.txt lets tools read. `FACTS.md` lists the claims and `facts.json` holds the same for scripts. `pages/` keeps the text of each page read, so every claim can be checked in its context. A run takes one to three minutes.
+Besides the home page, easybrandkit reads up to five pages it finds in the site's menu and footer: pricing, customers, security, integrations and about. It reads them one at a time with a pause between them, and only the ones the site's robots.txt lets tools read. A page past the home page is read only while 45 s of the run's `--timeout` are left, so a short `--timeout` can leave some of them or all of them out, and `FACTS.md` names the pages it skipped. `FACTS.md` lists the claims and `facts.json` holds the same for scripts. `pages/` keeps the text of each page read, so every claim can be checked in its context. A run takes one to three minutes.
 
 No model is involved. Rules find the claims, and a claim they cannot tie to a name, a label or a price is left out. Prices are what the page showed from where it was read, so they can differ by country.
 
