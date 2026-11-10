@@ -612,10 +612,14 @@ test("a browser that ends during --facts is not waited for through the site's cr
   const said = [];
   setTimeout(end, 300);
   const started = Date.now();
-  const { pages } = await readFactPages(cdp, "https://acme.test/", (line) => said.push(line));
+  const { pages, skipped } = await readFactPages(cdp, "https://acme.test/", (line) => said.push(line));
   assert.ok(Date.now() - started < 8_000, `took ${Date.now() - started} ms`);
   assert.deepEqual(pages.map((one) => one.role), ["home"]);
   assert.deepEqual(said, ["Reading the page's claims"]);
+  // Each page not read is named, as the run goes on where the browser still
+  // runs: one that has ended fails it.
+  const reason = "the kit's connection to its tab had closed";
+  assert.deepEqual(skipped, ["pricing", "customers", "about"].map((role) => ({ role, url: `https://acme.test/${role}`, reason })));
 });
 
 test("page text: headings, list items and quotes marked, the menu bar and the footer left out", () => {
@@ -705,56 +709,81 @@ test("a menu page whose read fails is told on one line, and an exception in it n
   ]);
 });
 
-test("a menu page too large for Node's connection, or whose tab's connection closes, is told in words, and so is one the run has too little time left for", async (t) => {
+test("a menu page too large for Node's connection, or whose tab's connection closes, is told in words, and so are the pages after it and one the run has too little time left for", async (t) => {
   setTimeLimit(120_000);
   t.after(() => setTimeLimit(120_000));
   t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
-  const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"))]);
+  const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/about", "About"))]);
   // As a call on a connection that closed comes back: Node's WebSocket
   // closes it under an answer larger than it takes, and says so.
   const closed = (tooLarge) => Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge });
-  let at = "";
-  let loaded = () => {};
-  const cdp = {
-    answer: { status: 0, url: "", unreachable: "", blank: false },
-    closed: new Promise(() => {}),
-    on: (method, listener) => {
-      if (method === "Page.loadEventFired") loaded = listener;
-    },
-    send: async (method, params = {}) => {
-      if (WORLD[method]) return WORLD[method];
-      if (method === "Page.navigate") {
-        at = params.url;
-        loaded();
+  // A tab whose connection closes as the first menu page's text is read
+  // (closes set), too large for Node or not, as a real one does: that call
+  // fails, closed settles, and every call after it fails too.
+  const tab = (closes, tooLarge = false, first = home, whenClosed = () => {}) => {
+    let at = "";
+    let loaded = () => {};
+    let gone = false;
+    let end;
+    const cdp = {
+      answer: { status: 0, url: "", unreachable: "", blank: false },
+      closed: new Promise((resolve) => (end = resolve)),
+      on: (method, listener) => {
+        if (method === "Page.loadEventFired") loaded = listener;
+      },
+      send: async (method, params = {}) => {
+        if (gone) throw closed(false);
+        if (WORLD[method]) return WORLD[method];
+        if (method === "Page.navigate") {
+          at = params.url;
+          loaded();
+          return {};
+        }
+        if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
+        if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+          if (!at) return { result: { value: first } };
+          if (closes) {
+            gone = true;
+            end();
+            whenClosed();
+            throw closed(tooLarge);
+          }
+          return { result: { value: model(at, [el("h1", {}, "Page")]) } };
+        }
+        if (method === "Runtime.evaluate") return { result: { value: "" } };
+        if (method === "DOMSnapshot.captureSnapshot") return { documents: [{ nodes: { nodeName: [0] } }], strings: ["A"] };
         return {};
-      }
-      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
-      if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
-        if (!at) return { result: { value: home } };
-        throw closed(at.endsWith("/pricing"));
-      }
-      if (method === "Runtime.evaluate") return { result: { value: "" } };
-      if (method === "DOMSnapshot.captureSnapshot") return { documents: [{ nodes: { nodeName: [0] } }], strings: ["A"] };
-      return {};
-    },
+      },
+    };
+    return cdp;
   };
-  let { pages, skipped } = await readFactPages(cdp, "https://acme.test/", () => {});
+  const after = "the kit's connection to its tab closed while the pricing page was read";
+  let { pages, skipped } = await readFactPages(tab(true, true), "https://acme.test/", () => {});
   assert.deepEqual(pages.map((one) => one.role), ["home"]);
   assert.deepEqual(skipped, [
     { role: "pricing", url: "https://acme.test/pricing", reason: "it is too large to read" },
-    { role: "customers", url: "https://acme.test/customers", reason: "the kit's connection to its tab closed" },
+    { role: "customers", url: "https://acme.test/customers", reason: after },
+    { role: "about", url: "https://acme.test/about", reason: after },
+  ]);
+  // The connection's close is the reason, also once little time is left.
+  ({ pages, skipped } = await readFactPages(tab(true, false, home, () => setTimeLimit(30_000)), "https://acme.test/", () => {}));
+  assert.deepEqual(pages.map((one) => one.role), ["home"]);
+  assert.deepEqual(skipped, [
+    { role: "pricing", url: "https://acme.test/pricing", reason: "the kit's connection to its tab closed" },
+    { role: "customers", url: "https://acme.test/customers", reason: after },
+    { role: "about", url: "https://acme.test/about", reason: after },
   ]);
   // A run of 30 s has less than the 45 s a page past the home page is read
   // in by the time it gets there: the reason says so, and not that the run
   // ran out of time, which it has not.
   setTimeLimit(30_000);
-  at = "";
-  ({ pages, skipped } = await readFactPages(cdp, "https://acme.test/", () => {}));
+  ({ pages, skipped } = await readFactPages(tab(false), "https://acme.test/", () => {}));
   assert.deepEqual(pages.map((one) => one.role), ["home"]);
   const reason = "too little of the run's time was left to read it, as a page past the home page is read only while 45 s are left; give --timeout more seconds";
   assert.deepEqual(skipped, [
     { role: "pricing", url: "https://acme.test/pricing", reason },
     { role: "customers", url: "https://acme.test/customers", reason },
+    { role: "about", url: "https://acme.test/about", reason },
   ]);
 });
 

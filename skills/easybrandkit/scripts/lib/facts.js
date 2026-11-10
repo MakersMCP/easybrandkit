@@ -395,10 +395,15 @@ async function readFactPages(cdp, home, log) {
   if (!picks.length) return { pages, skipped };
   const robots = await readRobots(new URL(home).origin);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
-  // A browser that has ended fails the run, which readPage says at once: no
-  // more pauses for pages that cannot be read.
+  // Once the tab's connection has closed, no page can be read in it: each
+  // page not tried yet is named with the reason, and no pause is waited for.
+  // It closes when the browser ends, which fails the run, but also while the
+  // browser runs, as when Node's WebSocket closes it under an answer larger
+  // than it takes. closedOn is the page whose read it ended.
   let ended = false;
+  let closedOn = "";
   cdp.closed.then(() => (ended = true));
+  const notOpen = () => (closedOn ? `the kit's connection to its tab closed while the ${closedOn} page was read` : "the kit's connection to its tab had closed");
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });
@@ -408,6 +413,10 @@ async function readFactPages(cdp, home, log) {
       skipped.push({ ...pick, reason: "the site's robots.txt asks tools not to read it" });
       continue;
     }
+    if (ended) {
+      skipped.push({ ...pick, reason: notOpen() });
+      continue;
+    }
     if (timeLeft() < PAGE_TIME) {
       skipped.push({ ...pick, reason: `too little of the run's time was left to read it, as a page past the home page is read only while ${PAGE_TIME / 1_000} s are left; give --timeout more seconds` });
       continue;
@@ -415,7 +424,10 @@ async function readFactPages(cdp, home, log) {
     let timer;
     await Promise.race([new Promise((resolve) => (timer = setTimeout(resolve, pause))), cdp.closed]);
     clearTimeout(timer);
-    if (ended) break;
+    if (ended) {
+      skipped.push({ ...pick, reason: notOpen() });
+      continue;
+    }
     log(`Reading the ${pick.role} page`);
     try {
       const at = await navigate(cdp, pick.url);
@@ -442,6 +454,12 @@ async function readFactPages(cdp, home, log) {
       }
       pages.push({ role: pick.role, url: at, readAt: new Date().toISOString(), model: read });
     } catch (err) {
+      // A call that a closed connection left unanswered: the pages after
+      // this one are not read.
+      if (err.closed) {
+        ended = true;
+        closedOn = closedOn || pick.role;
+      }
       // The note that tells it names the address already, and is one line.
       const closed = err.closed && (err.tooLarge ? "it is too large to read" : "the kit's connection to its tab closed");
       skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : closed || plainText(String(err.message || err)) });
