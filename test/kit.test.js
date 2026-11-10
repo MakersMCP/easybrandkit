@@ -580,24 +580,55 @@ test("a page of many fixed elements gets a few hundred hidden, and none once the
   assert.equal(late.calls.set, 0);
 });
 
-test("a page's words are not asked for once the run has used up its time", async (t) => {
+test("a page's words are read while the tab answers, also once the run's time is up, and a tab that does not answer ends the read at once", async (t) => {
   t.after(() => setTimeLimit(120_000));
   let asked = 0;
+  const words = async (method) => (method === "DOM.resolveNode" ? { object: { objectId: "o" } } : { result: { value: `Words ${asked}` } });
+  let answer = words;
   const cdp = {
     send: async (method) => {
       asked++;
-      return method === "DOM.resolveNode" ? { object: { objectId: "o" } } : { result: { value: `Words ${asked}` } };
+      return answer(method);
     },
   };
   const targets = Array.from({ length: 60 }, (_, i) => ({ kind: i < 30 ? "heading" : "cta", tag: "h2", backendNodeId: i + 1 }));
-  setTimeLimit(120_000);
-  const read = await readWords(cdp, targets);
-  assert.equal(read.headings.length, 12);
-  assert.equal(asked, 120);
-  asked = 0;
+  // With time left or none, a tab that answers gives what the kit keeps:
+  // twelve headings and six button labels. Each heading is asked for, and no
+  // button once both are full.
+  for (const limit of [120_000, 1_000]) {
+    asked = 0;
+    setTimeLimit(limit);
+    const read = await readWords(cdp, targets);
+    assert.equal(read.headings.length, 12, String(limit));
+    assert.equal(read.ctas.length, 6, String(limit));
+    assert.equal(read.unread, "", String(limit));
+    assert.equal(asked, 72, String(limit));
+  }
+  // A tab that does not answer ends the read at its first call, as each of
+  // the others would wait as long, and says why.
+  answer = async (method) => {
+    throw Object.assign(new Error(`${method} timed out`), { timedOut: true });
+  };
+  for (const [limit, why] of [[120_000, "tab"], [1_000, "time"]]) {
+    asked = 0;
+    setTimeLimit(limit);
+    assert.deepEqual(await readWords(cdp, targets), { headings: [], ctas: [], unread: why }, String(limit));
+    assert.equal(asked, 1, String(limit));
+  }
+  // Once the time is up, a tab slow to answer is read for five seconds more,
+  // and what is left is not read for want of time.
+  let clock = Date.now();
+  t.mock.method(Date, "now", () => clock);
   setTimeLimit(1_000);
-  assert.deepEqual(await readWords(cdp, targets), { headings: [], ctas: [] });
-  assert.equal(asked, 0);
+  asked = 0;
+  answer = async (method) => {
+    clock += 1_000;
+    return words(method);
+  };
+  const slow = await readWords(cdp, targets);
+  assert.equal(slow.headings.length, 3);
+  assert.equal(slow.unread, "time");
+  assert.equal(asked, 6);
 });
 
 test("stores and social networks: a listing leads to its website, a profile is refused before anything runs", async () => {
@@ -2494,6 +2525,57 @@ test("a tab that stops answering is told in words, and more time is advised only
   const asked = `${url}deep`;
   const { kit } = await stalledOnce(asked, { dir: path.join(parent, "deep"), stores: false });
   assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+});
+
+// kit.js with the browser tab's calls passed through change first: what it
+// gives back, a promise, takes the place of the call's own answer, and
+// nothing lets the call go on as it is.
+function withTab(t, change) {
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const realOpen = chrome.openPage;
+  t.mock.method(chrome, "openPage", async (...args) => {
+    const cdp = await realOpen(...args);
+    const send = cdp.send;
+    cdp.send = (name, params = {}, ...rest) => change(name, params, (...again) => send(...again)) || send(name, params, ...rest);
+    return cdp;
+  });
+  return reloadedKit().makeKit;
+}
+
+test("a page's words are read once the run's time is up, and those the tab did not give are told in the kit's notes", { skip: noBrowser }, async (t) => {
+  const page = brandPage("rgb(255,0,0)").replace("<main><h1>Acme</h1></main>", "<main><h1>Acme</h1><h2>Plans for teams</h2><h2>Ship every day</h2></main>");
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // The run's time is up once the page's snapshot has been read, right
+  // before its words: they are read all the same.
+  let spent = false;
+  const late = withTab(t, (name, params, send) => {
+    if (name !== "DOMSnapshot.captureSnapshot" || spent || !(params.computedStyles || []).includes("font-family")) return null;
+    return send(name, params).then((snap) => {
+      spent = true;
+      setTimeLimit(1_500);
+      return snap;
+    });
+  });
+  const { kit } = await late(site.origin, { dir: path.join(parent, "late"), stores: false });
+  assert.ok(spent);
+  assert.deepEqual(kit.text.headings.map((heading) => heading.text), ["Acme", "Plans for teams", "Ship every day"]);
+  assert.ok(!kit.notes.some((note) => /headings and button labels/.test(note)), kit.notes.join("\n"));
+  // A tab that does not give them: the kit is made without them, and its
+  // notes say so.
+  t.mock.restoreAll();
+  setTimeLimit(120_000);
+  const mute = withTab(t, (name, params) => (name === "Runtime.callFunctionOn" && /innerText/.test(params.functionDeclaration) ? Promise.reject(Object.assign(new Error(`${name} timed out`), { timedOut: true })) : null));
+  const dir = path.join(parent, "mute");
+  const { kit: muted } = await mute(site.origin, { dir, stores: false });
+  assert.deepEqual(muted.text.headings, []);
+  const note = "The page's headings and button labels were not read: the browser tab stopped answering.";
+  assert.ok(muted.notes.includes(note), muted.notes.join("\n"));
+  assert.ok(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8").includes(`\n- ${note}\n`));
 });
 
 test("with --facts, the page the kit read is read for its claims only while it is still that page, and the card's tab does not tell it that it is hidden", { skip: noBrowser }, async (t) => {

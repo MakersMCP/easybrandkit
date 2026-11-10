@@ -280,7 +280,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     refuseOtherPage(cdp, url, pageUrl, found.challenge);
     await refuseLocal(cdp, url, pageUrl, given);
     // The words first, while the page is as the snapshot saw it.
-    const { headings, ctas } = await readWords(cdp, found.wordTargets);
+    const { headings, ctas, unread } = await readWords(cdp, found.wordTargets);
     const text = { title: found.title, description: found.description, headings, ctas };
     log(`Cutting out ${found.marks.length === 1 ? "1 logo" : `${found.marks.length} logos`}`);
     const logos = await captureLogos(cdp, found.marks, dir, m.width, m.height);
@@ -317,7 +317,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
-    return { pageUrl, found, name, colors, text, logos, screenshots, card, cardError: card ? "" : cardError, factPages };
+    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages };
   } catch (err) {
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
@@ -520,6 +520,10 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     else if (page !== asked) notes.push(`${asked} is not the home page, so ${page} was read instead: the home page carries the brand's own header and colors.`);
     const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
     if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
+    if (read && read.wordsUnread) {
+      const some = read.text.headings.length || read.text.ctas.length ? "Some of the page's headings and button labels were" : "The page's headings and button labels were";
+      notes.push(`${some} not read: ${read.wordsUnread === "time" ? "the run's time ran out. Give it more time with --timeout." : "the browser tab stopped answering."}`);
+    }
     if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
     if (facts && !read) notes.push(failed ? "No facts were read: the website it names could not be read." : "No facts were read: the listing names no website.");
     const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : []) : [];

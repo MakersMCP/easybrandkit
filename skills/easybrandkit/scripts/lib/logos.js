@@ -610,20 +610,39 @@ function sayOnce(text) {
 
 const INNER_TEXT = `function () { return String(this.innerText || this.textContent || ""); }`;
 
+// How long a page's words are read for once the run's time is up: a tab
+// that answers gives all of them in a moment.
+const WORDS_GRACE = 5_000;
+
+// The page's headings and button labels, read while the tab answers, also
+// once the run's time is up, for a few seconds more then. A call the tab
+// does not answer ends it, since every other call would wait as long: sixty
+// of them would be a minute past the run's limit. unread says why some were
+// not read, for the kit's notes: "time" when the time ran out, "tab" when the
+// tab stopped answering, "" when all were read.
 async function readWords(cdp, targets) {
   const headings = [];
   const ctas = [];
+  const until = Date.now() + Math.max(WORDS_GRACE, timeLeft());
+  let unread = "";
   for (const target of targets) {
-    // A call that a tab no longer answers takes a second even with no time
-    // left, and sixty of them are a minute past the run's limit.
-    if (outOfTime()) break;
+    if (headings.length >= 12 && ctas.length >= 6) break;
+    if (Date.now() >= until) {
+      unread = "time";
+      break;
+    }
+    const wait = Math.max(1_000, Math.min(30_000, until - Date.now()));
     let text = "";
     try {
-      const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: target.backendNodeId });
+      const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: target.backendNodeId }, wait);
       if (!object || !object.objectId) continue;
-      const { result } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: INNER_TEXT, returnByValue: true });
+      const { result } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: INNER_TEXT, returnByValue: true }, wait);
       text = sayOnce(plainText((result && result.value) || "", 2_000)).slice(0, 200);
-    } catch {
+    } catch (err) {
+      if (err.timedOut || err.closed) {
+        unread = outOfTime() ? "time" : "tab";
+        break;
+      }
       // A node the page has replaced since the snapshot: its words are skipped.
       continue;
     }
@@ -633,7 +652,7 @@ async function readWords(cdp, targets) {
     if (target.kind === "heading" && headings.length < 12 && !headings.some((h) => h.text === text)) headings.push({ tag: target.tag, text });
     if (target.kind === "cta" && ctas.length < 6 && !ctas.some((c) => c.toLowerCase() === text.toLowerCase())) ctas.push(text);
   }
-  return { headings, ctas };
+  return { headings, ctas, unread };
 }
 
 // The box where the mark is actually painted. Layout bounds ignore CSS
