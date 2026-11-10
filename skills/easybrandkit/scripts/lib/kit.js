@@ -188,6 +188,9 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
 async function readPage(url, dir, log, alsoNamed = "", facts = false) {
   const chrome = await launch(SCREEN);
   let cdp;
+  // A browser that has just not answered is not waited for again as it is
+  // asked to quit.
+  let unanswered = false;
   try {
     cdp = await openPage(chrome.base, SCREEN);
     resetPictureWait();
@@ -265,9 +268,11 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
     // the DevTools protocol. One that did not answer a wait for its tab has
-    // just been waited for, and is not asked again.
+    // just been waited for, and is not asked again. Once the run's time is
+    // up, a second tells one that has ended from one that is slow.
     if (err.syscall) throw err;
-    if (!(await chrome.alive(err.noAnswer ? 0 : undefined))) throw new Error(BROWSER_GONE);
+    unanswered = Boolean(err.noAnswer || err.timedOut);
+    if (!(await chrome.alive(err.noAnswer ? 0 : outOfTime() ? 1_000 : undefined))) throw new Error(BROWSER_GONE);
     if (err.browserSaid) throw noKit(err);
     if (err.timedOut) {
       const spent = outOfTime();
@@ -277,7 +282,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
   } finally {
     // In this order: the browser refuses downloads only as long as this
     // connection is open, and the page goes on until the browser has ended.
-    await chrome.close();
+    await chrome.close({ hurry: unanswered });
     if (cdp) cdp.close();
   }
 }

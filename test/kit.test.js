@@ -1188,6 +1188,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
     return end;
   };
   const late = "before the run's time ran out";
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // A browser that starts and never says where its DevTools are.
   const silent = path.join(parent, "silent");
@@ -1240,29 +1241,40 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.equal((await newTab(browser.base, browserWait())).id, "x");
   await browser.close();
 
-  // A browser asked to quit that never takes the connection for it is
-  // killed within seconds, also when the run has minutes left.
-  quit = "deaf";
+  // A browser asked to quit that takes the connection for it and never
+  // answers on it, or never takes it, is killed within seconds, also when
+  // the run has minutes left; once the run's time is up, or when it has just
+  // not answered, asking it takes a second.
   setTimeLimit(120_000);
-  const quitting = await launch({ width: 800, height: 600 });
-  const started = Date.now();
-  end = await ended(quitting.close(), 0, 10_000);
-  assert.equal(end, "went on");
-  assert.ok(Date.now() - started < 4_000, `a browser deaf ended ${Date.now() - started} ms after it was asked to quit`);
-  assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
-  setTimeLimit(120_000);
+  for (const [how, hurry, most] of [["deaf", false, 4_000], ["mute", true, 3_000], ["mute", "out of time", 3_000]]) {
+    quit = how;
+    const quitting = await launch({ width: 800, height: 600 });
+    if (hurry === "out of time") {
+      setTimeLimit(1_000);
+      await wait(1_000);
+    }
+    const started = Date.now();
+    end = await ended(quitting.close({ hurry: hurry === true }), 0, 10_000);
+    assert.equal(end, "went on", `a browser ${how}, ${hurry ? `in a hurry (${hurry})` : "with time left"}`);
+    assert.ok(Date.now() - started < most, `a browser ${how} ended ${Date.now() - started} ms after it was asked to quit`);
+    assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
+    setTimeLimit(120_000);
+  }
 
   // A run whose browser opens no tab keeps the earlier kit, and says so. The
   // browser has just been waited for, so it is not asked again whether it
-  // still runs, which would add seconds past the run's limit: /json/version
-  // is asked for only to ask the browser to quit.
+  // still runs, and asking it to quit, which it never answers, takes a
+  // second: the run ends a moment after its limit. /json/version is asked
+  // for only to ask the browser to quit.
   tab = 0;
-  quit = "";
+  quit = "mute";
   versions = 0;
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
+  const started = Date.now();
   end = await ended(makeKit("https://acme.example/", { dir, stores: false, timeLimit: 3_000 }), 3_000, 10_000);
+  assert.ok(Date.now() - started < 3_000 + 3_000, `ended ${Date.now() - started - 3_000} ms past the run's limit`);
   assert.equal(end.message, `The browser did not open a tab ${late}, so no kit was made. Try again, or give it more time with --timeout.`);
   assert.equal(end.earlierKit, dir);
   assert.equal(versions, 1);
@@ -2648,6 +2660,41 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   const started = Date.now();
   await assert.rejects(cdp.send("Page.getLayoutMetrics"), /^Error: The browser connection closed\.$/);
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
+});
+
+test("a browser whose tab has just not answered is given a second to quit, also when the run has time left", async (t) => {
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const quits = [];
+  t.mock.method(chrome, "launch", async () => ({ base: "http://127.0.0.1:1", alive: async () => true, close: async (options) => quits.push(options) }));
+  // A tab that opens the page and then fails each call as fail says.
+  const tab = (fail, navigated = {}) => ({
+    answer: { status: 0, url: "", unreachable: "", blank: false },
+    closed: new Promise(() => {}),
+    on: (method, listener) => method === "Page.loadEventFired" && setTimeout(listener),
+    close: () => {},
+    send: async (method) => {
+      if (method === "Page.navigate") return navigated;
+      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: "https://acme.example/" }] };
+      throw fail(method);
+    },
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // One mock for both runs: a method mocked twice is left mocked once the
+  // test's mocks are restored.
+  let opens = tab((method) => Object.assign(new Error(`${method} timed out`), { timedOut: true }));
+  t.mock.method(chrome, "openPage", async () => opens);
+  await assert.rejects(reloadedKit().makeKit("https://acme.example/", { dir, stores: false }), /^Error: The browser tab stopped answering while it read https:\/\/acme\.example\/, so no kit was made\. Try again\.$/);
+  assert.deepEqual(quits, [{ hurry: true }]);
+  // One whose page could not be opened answered: it is asked to quit with
+  // the time that takes.
+  opens = tab(() => assert.fail("not asked"), { errorText: "net::ERR_NAME_NOT_RESOLVED" });
+  await assert.rejects(reloadedKit().makeKit("https://acme.example/", { dir, stores: false }), /^Error: Could not open https:\/\/acme\.example\/: net::ERR_NAME_NOT_RESOLVED/);
+  assert.deepEqual(quits, [{ hurry: true }, { hurry: false }]);
+  assert.deepEqual(filesOf(dir), before);
 });
 
 test("files of someone's that come into a folder made during the run are refused, not taken for a kit", { skip: noBrowser }, async (t) => {

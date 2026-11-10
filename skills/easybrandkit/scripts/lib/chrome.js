@@ -318,6 +318,10 @@ function untouched(profile) {
   }
 }
 
+// How long a browser is given to quit when asked, its answers included,
+// while the run still has time.
+const QUIT_WAIT = 9_000;
+
 // A browser that has used its profile this long without saying where its
 // DevTools are is slow; one that has not touched it uses another folder.
 const UNTOUCHED_WAIT = 15_000;
@@ -389,23 +393,30 @@ async function launch({ width, height }) {
   // on writing to the profile for a while. Those still there once it has
   // quit are killed, and the profile is removed once they are gone. A
   // profile that still cannot be removed is left in the temp folder; the
-  // kit is not lost over it.
-  const close = async () => {
+  // kit is not lost over it. Asking it and waiting for it to end take a
+  // second in all once the run's time is up, or when the browser has just
+  // not answered (hurry), so that one that does not quit is killed then and
+  // does not keep the run going past its limit.
+  const close = async ({ hurry = false } = {}) => {
     // The browser's processes as they are now, with its crash handler; its
     // helpers, which name the profile, are found also once it has ended, as
     // one that could not start has.
     const processes = withCrashHandler(entry, processesOf(child));
     if (base && !exited) {
-      let asked = false;
+      const until = Date.now() + (hurry || outOfTime() ? 1_000 : QUIT_WAIT);
+      const left = (ms) => Math.max(1, Math.min(ms, until - Date.now()));
+      let browser = null;
       try {
-        const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) })).json();
-        const browser = await connect(webSocketDebuggerUrl, 2_000);
-        asked = true;
-        await browser.send("Browser.close", {}, 3_000).catch(() => {});
+        const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(left(2_000)) })).json();
+        browser = await connect(webSocketDebuggerUrl, left(2_000));
+        // Its answer does not count: that it ends does, and that is waited
+        // for below.
+        browser.send("Browser.close", {}, left(3_000)).catch(() => {});
       } catch {
         // Not answering: it is killed below.
       }
-      for (let i = 0; i < 50 && asked && !exited; i++) await sleep(100);
+      while (browser && !exited && Date.now() < until) await sleep(50);
+      if (browser) browser.close();
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
