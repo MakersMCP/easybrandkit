@@ -223,12 +223,11 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
 // page could not be read.
 async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = false) {
   const chrome = await launch(SCREEN);
-  let cdp;
   // A browser that has just not answered is not waited for again as it is
   // asked to quit.
   let unanswered = false;
   try {
-    cdp = await openPage(chrome.base, SCREEN);
+    const cdp = await openPage(chrome, SCREEN);
     resetPictureWait();
     log(`Opening ${url}`);
     const pageUrl = await navigate(cdp, url);
@@ -284,7 +283,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = f
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");
     let cardError = "the browser gave back an empty picture";
-    const card = await renderCard(chrome.base, { url: pageUrl, name, colors, fonts: found.brand.fonts, logos, screenshots }, dir).catch((err) => {
+    const card = await renderCard(chrome, { url: pageUrl, name, colors, fonts: found.brand.fonts, logos, screenshots }, dir).catch((err) => {
       // A file that cannot be written fails the run: what it has of the file
       // would otherwise go into the kit.
       if (err.syscall) throw err;
@@ -316,16 +315,13 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = f
       const spent = outOfTime();
       throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent);
     }
-    // The tab's connection closed while the browser runs: Node closes it
-    // under an answer too large for it, as a very large page's snapshot.
-    if (err.closed && err.tooLarge) throw pageFailed(`${url} is too large to read, so no kit was made.`, "is too large to read");
+    // An answer larger than the kit takes, as a very large page's snapshot.
+    if (err.tooLarge) throw pageFailed(`${url} is too large to read, so no kit was made.`, "is too large to read");
+    // The tab closed while the browser runs.
     if (err.closed) throw new Error(`The kit's connection to the browser tab closed while it read ${url}, so no kit was made. Try again.`);
     throw err;
   } finally {
-    // In this order: the browser refuses downloads only as long as this
-    // connection is open, and the page goes on until the browser has ended.
     await chrome.close({ hurry: unanswered });
-    if (cdp) cdp.close();
   }
 }
 

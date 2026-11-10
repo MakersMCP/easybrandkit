@@ -2,7 +2,9 @@
 
 // The browser: a Chrome, Chromium, Edge or Brave already on this machine,
 // started headless with a throwaway profile and driven over the DevTools
-// protocol with the WebSocket built into Node 22. Nothing is downloaded.
+// protocol through a pipe of its own. It opens no port, so no other program
+// on the machine, another user's run among them, can reach it. Nothing is
+// downloaded.
 
 const fs = require("fs");
 const os = require("os");
@@ -304,30 +306,14 @@ function lowOnRoom(temp) {
   }
 }
 
-// Whether a profile is still as the kit made it: a browser writes its own
-// files into the profile it uses in its first moments (SingletonLock, or
-// lockfile on Windows, and Local State), so one that has left nothing there
-// but the kit's Default/Preferences uses another folder.
-function untouched(profile) {
-  try {
-    const top = fs.readdirSync(profile);
-    if (top.some((name) => name !== "Default")) return false;
-    return !top.length || fs.readdirSync(path.join(profile, "Default")).every((name) => name === "Preferences");
-  } catch {
-    return false;
-  }
-}
-
 // How long a browser is given to quit when asked, its answers included,
 // while the run still has time.
 const QUIT_WAIT = 9_000;
-
-// A browser that has used its profile this long without saying where its
-// DevTools are is slow; one that has not touched it uses another folder.
-const UNTOUCHED_WAIT = 15_000;
-// Chrome writes DevToolsActivePort in one go: a file that stays empty this
-// long is one it could not write. So is a disk that shows no room this long.
-const EMPTY_WAIT = 3_000;
+// How long a browser asked to quit has to say that it heard: one that does
+// not is killed then.
+const HEARD_WAIT = 2_000;
+// A disk that shows next to no room this long has none for a profile.
+const LOW_WAIT = 3_000;
 
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
@@ -341,7 +327,7 @@ async function launch({ width, height }) {
   const temp = os.tmpdir();
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
-  // A download that starts while no connection is refusing it (see openPage)
+  // A download that starts while the browser takes no refusal (see below)
   // goes into the throwaway profile and is removed with it, not into the
   // Downloads folder of the user the browser runs as.
   const preferences = path.join(profile, "Default", "Preferences");
@@ -362,11 +348,14 @@ async function launch({ width, height }) {
   // Reports), where nothing removes them; Ctrl-\ asks for one from each of
   // its helpers. BREAKPAD_DUMP_LOCATION puts them in the throwaway profile.
   const env = { ...process.env, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
+  // --remote-debugging-pipe: the browser takes the DevTools protocol on its
+  // file descriptors 3 and 4, which only this process holds, and opens no
+  // port for it.
   const child = spawn(
     binary,
     [
       "--headless=new",
-      "--remote-debugging-port=0",
+      "--remote-debugging-pipe",
       `--user-data-dir=${profile}`,
       `--window-size=${width},${height}`,
       "--hide-scrollbars",
@@ -381,19 +370,27 @@ async function launch({ width, height }) {
       ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
       "about:blank",
     ],
-    { stdio: "ignore", env },
+    { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"], env },
   );
+  const pipe = pipeOf(child.stdio[3], child.stdio[4]);
   let exited = false;
-  child.on("exit", () => (exited = true));
-  child.on("error", () => (exited = true));
+  const ended = () => {
+    exited = true;
+    pipe.end();
+  };
+  child.on("exit", ended);
+  child.on("error", ended);
   const entry = { child, profile, temp, before };
   open.add(entry);
-  let base = "";
+  // Whether the browser has answered on its pipe: one that never has is not
+  // asked to quit.
+  let answered = false;
   // Chrome is asked to quit first: killed outright, its helper processes go
   // on writing to the profile for a while. Those still there once it has
   // quit are killed, and the profile is removed once they are gone. A
   // profile that still cannot be removed is left in the temp folder; the
-  // kit is not lost over it. Asking it and waiting for it to end take a
+  // kit is not lost over it. A browser that does not say that it heard
+  // within 2 s is killed then. Asking it and waiting for it to end take a
   // second in all once the run's time is up, or when the browser has just
   // not answered (hurry), so that one that does not quit is killed then and
   // does not keep the run going past its limit.
@@ -402,24 +399,18 @@ async function launch({ width, height }) {
     // helpers, which name the profile, are found also once it has ended, as
     // one that could not start has.
     const processes = withCrashHandler(entry, processesOf(child));
-    if (base && !exited) {
+    if (answered && !exited && !pipe.ended()) {
       const until = Date.now() + (hurry || outOfTime() ? 1_000 : QUIT_WAIT);
-      const left = (ms) => Math.max(1, Math.min(ms, until - Date.now()));
-      let browser = null;
-      try {
-        const { webSocketDebuggerUrl } = await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(left(2_000)) })).json();
-        browser = await connect(webSocketDebuggerUrl, left(2_000));
-        // Its answer does not count: that it ends does, and that is waited
-        // for below.
-        browser.send("Browser.close", {}, left(3_000)).catch(() => {});
-      } catch {
-        // Not answering: it is killed below.
-      }
-      while (browser && !exited && Date.now() < until) await sleep(50);
-      if (browser) browser.close();
+      let heard = null;
+      pipe.send("Browser.close", {}, Math.max(1, Math.min(HEARD_WAIT, until - Date.now()))).then(
+        () => (heard = true),
+        () => (heard = false),
+      );
+      while (!exited && heard !== false && Date.now() < until) await sleep(50);
     }
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
+    pipe.end();
     endAll(processes, profile);
     open.delete(entry);
     removeSingleton(profile, entry.singleton);
@@ -431,72 +422,87 @@ async function launch({ width, height }) {
     removeTemps(entry);
   };
   // Whether the browser still runs: one that was killed or crashed has
-  // ended, or no longer takes a connection on its port. One that is slow to
-  // answer, on a busy machine, still runs, and so does one that has not
-  // ended when it is not asked (ms 0).
+  // ended, and its pipe with it. One that is slow to answer, on a busy
+  // machine, still runs, and so does one that has not ended when it is not
+  // asked (ms 0).
   const alive = async (ms = 5_000) => {
-    if (exited) return false;
+    if (exited || pipe.ended()) return false;
     if (!ms) return true;
     try {
-      await (await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(ms) })).arrayBuffer();
+      await pipe.send("Browser.getVersion", {}, ms);
       return !exited;
     } catch (err) {
-      return !exited && err.name === "TimeoutError";
+      return !exited && Boolean(err.timedOut);
     }
   };
-  // Chrome writes the port it picked to DevToolsActivePort in the profile,
-  // which a busy machine can keep it from doing for a while: that is waited
-  // for as long as the run has left. Looked at once a second, a browser that
-  // never will is told before then: one that could not write the file, as on
-  // a disk with no room, and one that does not use the profile at all.
-  const portFile = path.join(profile, "DevToolsActivePort");
-  const wait = browserWait();
-  const started = Date.now();
-  let looked = started;
-  let emptySince = 0;
-  let lowSince = 0;
-  const neverWill = (written) => {
-    const now = Date.now();
-    emptySince = written === "" ? emptySince || now : 0;
-    lowSince = lowOnRoom(temp) ? lowSince || now : 0;
-    const empty = emptySince && now - emptySince >= EMPTY_WAIT;
-    if (empty || (lowSince && now - lowSince >= EMPTY_WAIT)) {
-      const full = noRoomIn(profile);
-      if (full) return full;
-      lowSince = 0;
-      if (empty) return new Error(`${name} was started but could not write where its DevTools are, as when the disk that holds the temp folder, ${temp}, is full, so no kit was made. Check that it has room, and try again.`);
-    }
-    if (now - started >= UNTOUCHED_WAIT && untouched(profile)) {
-      return new Error(`${name} runs but does not use the profile folder it was given, as a browser installed as a snap can do, so no kit was made. Point CHROME_PATH at another browser.`);
-    }
-    return null;
-  };
-  for (const until = started + wait; !exited && Date.now() < until; ) {
-    let written = null;
+  // A new tab, waited for ms at most: its id.
+  const newTab = async (ms) => {
     try {
-      written = fs.readFileSync(portFile, "utf8");
-    } catch {
-      // Not written yet.
+      const { targetId } = await pipe.send("Target.createTarget", { url: "about:blank" }, ms);
+      return targetId;
+    } catch (err) {
+      if (err.timedOut) throw noAnswer("The browser did not open a tab", ms);
+      if (err.closed) throw err;
+      throw browserSaid("The browser refused to open a tab");
     }
-    const port = (written || "").split("\n")[0].trim();
-    if (/^\d+$/.test(port)) {
-      base = `http://127.0.0.1:${port}`;
-      // Known from the start: by the time the browser is stopped, its
-      // helpers can have ended, and its link to the folder of its socket
-      // can be gone.
-      entry.crashHandler = crashHandlerOf(processesOf(child));
-      entry.singleton = singletonOf(profile, temp);
-      return { base, close, alive };
-    }
-    if (Date.now() - looked >= 1_000) {
-      looked = Date.now();
-      const never = neverWill(written);
-      if (never) {
+  };
+  // A tab closed, waited for ms at most; the browser goes on.
+  const closeTab = (targetId, ms = 5_000) => pipe.send("Target.closeTarget", { targetId }, ms).then(
+    () => {},
+    () => {},
+  );
+  // The browser answers on its pipe once it has started, which a busy
+  // machine can keep it from doing for a while: that is waited for as long
+  // as the run has left, also when CHROME_PATH names a program that takes
+  // long before it starts the browser. Looked at once a second, a browser
+  // that never will is told before then: one with no room for its profile
+  // in the temp folder.
+  const wait = browserWait();
+  let said = null;
+  pipe.send("Browser.getVersion", {}, wait).then(
+    (version) => (said = { version }),
+    (err) => (said = { err }),
+  );
+  let lowSince = 0;
+  for (let looked = Date.now(); !said && !exited; ) {
+    await sleep(100);
+    if (Date.now() - looked < 1_000) continue;
+    looked = Date.now();
+    lowSince = lowOnRoom(temp) ? lowSince || looked : 0;
+    if (lowSince && looked - lowSince >= LOW_WAIT) {
+      const full = noRoomIn(profile);
+      if (full) {
         await close();
-        throw never;
+        throw full;
+      }
+      lowSince = 0;
+    }
+  }
+  if (said && !said.err) {
+    answered = true;
+    // Known from the start: by the time the browser is stopped, its
+    // helpers can have ended, and its link to the folder of its socket
+    // can be gone.
+    entry.crashHandler = crashHandlerOf(processesOf(child));
+    entry.singleton = singletonOf(profile, temp);
+    // A site can make a browser save a file, into the Downloads folder of
+    // the user it runs as, where nothing removes it. This browser saves none:
+    // said once to the whole browser over its pipe, the refusal holds for as
+    // long as the browser runs, for every tab, and before any page is
+    // opened. A browser too busy to answer it in the time the run has left
+    // ends the run, as one that does not start does: let go on, it would read
+    // the site with nothing refused. One that answers that it does not take
+    // it goes on: a download then lands in the throwaway profile.
+    const refusal = browserWait();
+    try {
+      await pipe.send("Browser.setDownloadBehavior", { behavior: "deny" }, refusal);
+    } catch (err) {
+      if (err.timedOut) {
+        await close({ hurry: true });
+        throw noKit(noAnswer("The browser did not answer the kit's request to refuse downloads", refusal));
       }
     }
-    await sleep(100);
+    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms) };
   }
   const running = !exited;
   // Told before close, which removes the folder the browser made and the
@@ -607,123 +613,174 @@ function killBrowsers() {
 // of the run's time, where more of it can help: such a run does not go on.
 const pageFailed = (message, what, spent = false) => Object.assign(new Error(message), { pageFailed: what, outOfTime: spent });
 
-// A call on a connection that has closed while the browser may still run,
-// marked closed. Node's own WebSocket closes it itself when an answer is
-// larger than it takes, 128 MB in Node 22.23, as the snapshot of a very large
-// page can be, and says so in its error: "Payload size exceeds maximum
-// allowed size", or, for an answer the browser sent compressed, as Chrome
-// does, "Max decompressed message size exceeded". Such a call is marked
-// tooLarge too.
-const connectionClosed = (why) => Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge: /(payload|message) size|exceeds maximum/i.test(why) });
+// A call on a connection that has closed, marked closed: a tab that has
+// closed while the browser runs, or a browser that has ended.
+const connectionClosed = () => Object.assign(new Error("The browser connection closed."), { closed: true });
 
-// A connection to the browser or to one of its tabs, waited for ms at most: a
-// browser that takes the connection and never answers it would otherwise
-// hold the run for minutes.
-function connect(wsUrl, ms = browserWait()) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
-    const pending = new Map();
-    const listeners = new Map();
-    let nextId = 0;
-    let markClosed;
-    const closed = new Promise((done) => (markClosed = done));
-    // What the WebSocket said when it failed, for a call it leaves unanswered.
-    let failure = "";
-    const timer = setTimeout(() => {
-      reject(noAnswer("The browser did not answer the kit's connection to its tab", ms));
-      ws.close();
-    }, ms);
-    ws.onmessage = (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));
-      } catch {
-        return;
+// The largest message taken from the browser. The snapshot of a very large
+// page can be bigger, and read whole it would take more memory than a run
+// has on the hosted worker: Node 22.23's WebSocket, which the kit used
+// before the pipe, took none larger either.
+const MESSAGE_MOST = 128 * 1024 * 1024;
+
+// The answer to a call that was larger than the kit takes, marked tooLarge.
+// The connection goes on: only that call fails.
+const tooLargeAnswer = () => Object.assign(new Error("The browser's answer was too large to take."), { tooLarge: true });
+
+// The DevTools protocol over a browser's pipe: each message is JSON ended by
+// a zero byte, the kit's written to input and the browser's read from output.
+// The browser's own calls go without a session. Each tab the kit uses is a
+// session of its own on the pipe (attach), with send, on and closed as a
+// connection of its own had. A message over most bytes is not kept: its
+// first bytes name the call it answers (an answer starts {"id":<n>,), and
+// that call fails as too large; anything else that large is dropped.
+function pipeOf(input, output, most = MESSAGE_MOST) {
+  const pending = new Map();
+  const listeners = new Map();
+  const sessions = new Map();
+  let nextId = 0;
+  let over = false;
+  let markOver;
+  const closed = new Promise((done) => (markOver = done));
+  const settle = (id, err, result) => {
+    const waiter = pending.get(id);
+    if (!waiter) return;
+    pending.delete(id);
+    clearTimeout(waiter.timer);
+    if (err) waiter.reject(err);
+    else waiter.resolve(result);
+  };
+  // A tab's session that has ended, as when its tab closed: its calls fail as
+  // on a closed connection.
+  const endSession = (session) => {
+    const mark = sessions.get(session);
+    if (!mark) return;
+    sessions.delete(session);
+    for (const [id, waiter] of [...pending]) if (waiter.session === session) settle(id, connectionClosed());
+    mark();
+  };
+  // The pipe closed, as when the browser ends: every call fails at once.
+  const end = () => {
+    if (over) return;
+    over = true;
+    for (const id of [...pending.keys()]) settle(id, connectionClosed());
+    for (const session of [...sessions.keys()]) endSession(session);
+    markOver();
+    input.destroy();
+    output.destroy();
+  };
+  const take = (bytes) => {
+    let msg;
+    try {
+      msg = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg !== "object") return;
+    if (typeof msg.method === "string") {
+      if (msg.method === "Target.detachedFromTarget" && msg.params) endSession(msg.params.sessionId);
+      for (const listener of listeners.get(`${msg.sessionId || ""} ${msg.method}`) || []) listener(msg.params || {});
+      return;
+    }
+    if (msg.error) settle(msg.id, new Error(msg.error.message || "DevTools protocol error"));
+    else settle(msg.id, null, msg.result || {});
+  };
+  // The first bytes of a message, from its parts.
+  const startOf = (list) => {
+    const head = [];
+    let size = 0;
+    for (const part of list) {
+      head.push(part);
+      size += part.length;
+      if (size >= 64) break;
+    }
+    return Buffer.concat(head).subarray(0, 64).toString("latin1");
+  };
+  let parts = [];
+  let size = 0;
+  // The start of a message too large to keep, while the rest of it goes by.
+  let dropping = null;
+  output.on("data", (chunk) => {
+    for (let at = 0; at < chunk.length; ) {
+      const zero = chunk.indexOf(0, at);
+      const piece = chunk.subarray(at, zero === -1 ? chunk.length : zero);
+      at = zero === -1 ? chunk.length : zero + 1;
+      if (dropping === null && size + piece.length > most) {
+        dropping = startOf([...parts, piece]);
+        parts = [];
+        size = 0;
       }
-      if (msg && msg.method) {
-        for (const listener of listeners.get(msg.method) || []) listener(msg.params || {});
-        return;
+      if (dropping !== null) {
+        if (zero === -1) continue;
+        const id = /^\{"id":(\d+)[,}]/.exec(dropping);
+        if (id) settle(Number(id[1]), tooLargeAnswer());
+        dropping = null;
+        continue;
       }
-      const waiter = msg && pending.get(msg.id);
-      if (!waiter) return;
-      pending.delete(msg.id);
-      clearTimeout(waiter.timer);
-      if (msg.error) waiter.reject(new Error(msg.error.message || "DevTools protocol error"));
-      else waiter.resolve(msg.result || {});
-    };
-    // An error, or a close before it opened, as when the browser ends
-    // meanwhile. Once it has opened, this changes nothing.
-    const refused = () => {
-      clearTimeout(timer);
-      reject(browserSaid("The browser refused the kit's connection to its tab"));
-    };
-    ws.onerror = (event) => {
-      failure = String((event && (event.message || (event.error && event.error.message))) || "");
-      refused();
-    };
-    ws.onclose = () => {
-      refused();
-      for (const waiter of pending.values()) {
-        clearTimeout(waiter.timer);
-        waiter.reject(connectionClosed(failure));
-      }
-      pending.clear();
-      markClosed();
-    };
-    ws.onopen = () => {
-      clearTimeout(timer);
-      resolve({
-        // Settles once the connection has closed, as when the browser ends.
-        closed,
-        send(method, params = {}, timeoutMs = 30_000) {
-          // On a connection that has closed the message would be dropped
-          // without a word, and only the timer would end the wait.
-          if (ws.readyState !== WebSocket.OPEN) return Promise.reject(connectionClosed(failure));
-          const id = ++nextId;
-          return new Promise((res, rej) => {
-            const timer = setTimeout(() => {
-              pending.delete(id);
-              rej(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
-            }, Math.max(1_000, Math.min(timeoutMs, timeLeft())));
-            pending.set(id, { resolve: res, reject: rej, timer });
-            ws.send(JSON.stringify({ id, method, params }));
-          });
-        },
-        on(method, listener) {
-          listeners.set(method, [...(listeners.get(method) || []), listener]);
-        },
-        close() {
-          ws.close();
-        },
-      });
-    };
+      parts.push(piece);
+      size += piece.length;
+      if (zero === -1) continue;
+      const whole = parts.length === 1 ? parts[0] : Buffer.concat(parts, size);
+      parts = [];
+      size = 0;
+      take(whole);
+    }
   });
-}
-
-// A new tab of the browser's, as /json/new gives it, with its id and the
-// address of the connection to it, waited for ms at most.
-async function newTab(base, ms) {
-  try {
-    const res = await fetch(`${base}/json/new?about:blank`, { method: "PUT", signal: AbortSignal.timeout(ms) });
-    return await res.json();
-  } catch (err) {
-    if (err.name === "TimeoutError") throw noAnswer("The browser did not open a tab", ms);
-    throw err;
-  }
+  output.on("end", end);
+  output.on("close", end);
+  output.on("error", end);
+  input.on("error", end);
+  // A call, waited for timeoutMs at most and no longer than the run has left,
+  // a second at least.
+  const send = (method, params = {}, timeoutMs = 30_000, session = "") => {
+    if (over || (session && !sessions.has(session))) return Promise.reject(connectionClosed());
+    const id = ++nextId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(Object.assign(new Error(`${method} timed out`), { timedOut: true }));
+      }, Math.max(1_000, Math.min(timeoutMs, timeLeft())));
+      pending.set(id, { resolve, reject, timer, session });
+      input.write(`${JSON.stringify(session ? { id, method, params, sessionId: session } : { id, method, params })}\0`);
+    });
+  };
+  // The kit's connection to a tab, waited for ms at most.
+  const attach = async (targetId, ms) => {
+    let session;
+    try {
+      ({ sessionId: session } = await send("Target.attachToTarget", { targetId, flatten: true }, ms));
+    } catch (err) {
+      if (err.timedOut) throw noAnswer("The browser did not answer the kit's connection to its tab", ms);
+      if (err.closed) throw err;
+      throw browserSaid("The browser refused the kit's connection to its tab");
+    }
+    if (over) throw connectionClosed();
+    let mark;
+    const tabClosed = new Promise((done) => (mark = done));
+    sessions.set(session, mark);
+    return {
+      // Settles once the tab has closed, or the browser has ended.
+      closed: tabClosed,
+      send: (method, params = {}, timeoutMs = 30_000) => send(method, params, timeoutMs, session),
+      on(method, listener) {
+        const key = `${session} ${method}`;
+        listeners.set(key, [...(listeners.get(key) || []), listener]);
+      },
+      // The tab closed, not waited for; the browser goes on.
+      close() {
+        if (sessions.has(session)) send("Target.closeTarget", { targetId }, 5_000).catch(() => {});
+      },
+    };
+  };
+  return { send, attach, closed, end, ended: () => over };
 }
 
 // A new tab, set to a desktop screen of the given size. Headless Chrome says
 // "HeadlessChrome" in its user agent, and some sites answer that with a
 // stripped page; the tab says "Chrome", as the same browser with a window
-// would. The tab and the connection to it have what the run has left.
-async function openPage(base, { width, height }) {
-  const target = await newTab(base, browserWait());
-  const cdp = await connect(target.webSocketDebuggerUrl, browserWait());
-  // A site can make a browser save a file, into the Downloads folder of the
-  // user it runs as, where nothing removes it. This browser saves none, but
-  // only as long as this connection is open: it goes back to saving them the
-  // moment the connection closes, so readPage closes it last.
-  await cdp.send("Browser.setDownloadBehavior", { behavior: "deny" }).catch(() => {});
+// would. The tab and the kit's connection to it have what the run has left.
+async function openPage(chrome, { width, height }) {
+  const cdp = await chrome.attach(await chrome.newTab(browserWait()), browserWait());
   await cdp.send("Page.enable");
   cdp.answer = await watchAnswer(cdp);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
@@ -835,4 +892,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, connect, newTab, browserWait, openPage, navigate, inOwnWorld, pageFailed, noKit };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, inOwnWorld, pageFailed, noKit };

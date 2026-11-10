@@ -7,7 +7,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { connect, newTab, browserWait } = require("./chrome");
+const { browserWait } = require("./chrome");
 const { capture, resetPictureWait } = require("./page");
 
 const CARD = { width: 1600, height: 900, scale: 1.5 };
@@ -69,11 +69,10 @@ function cardHtml(kit, dir) {
 // kit can do without its card, and the claims still to be read need time.
 const CARD_WAIT = 30_000;
 
-async function renderCard(base, kit, dir) {
-  const target = await newTab(base, browserWait(CARD_WAIT));
-  let cdp;
+async function renderCard(chrome, kit, dir) {
+  const target = await chrome.newTab(browserWait(CARD_WAIT));
   try {
-    cdp = await connect(target.webSocketDebuggerUrl, browserWait(CARD_WAIT));
+    const cdp = await chrome.attach(target, browserWait(CARD_WAIT));
     await cdp.send("Page.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: CARD.width, height: CARD.height, deviceScaleFactor: 1, mobile: false });
     const { frameTree } = await cdp.send("Page.getFrameTree");
@@ -85,8 +84,7 @@ async function renderCard(base, kit, dir) {
     fs.writeFileSync(path.join(dir, "card.png"), png);
     return { file: "card.png", width: png.readUInt32BE(16), height: png.readUInt32BE(20) };
   } finally {
-    if (cdp) cdp.close();
-    await fetch(`${base}/json/close/${target.id}`, { signal: AbortSignal.timeout(5_000) }).catch(() => {});
+    await chrome.closeTab(target);
   }
 }
 

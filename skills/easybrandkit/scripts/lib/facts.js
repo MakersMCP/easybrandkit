@@ -399,9 +399,9 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
   // Once the tab's connection has closed, no page can be read in it: each
   // page not tried yet is named with the reason, and no pause is waited for.
-  // It closes when the browser ends, which fails the run, but also while the
-  // browser runs, as when Node's WebSocket closes it under an answer larger
-  // than it takes. closedOn is the page whose read it ended.
+  // It closes when the browser ends, which fails the run, and the tab can
+  // close while the browser runs. closedOn is the page whose read it ended.
+  // An answer too large to take costs only its page.
   let ended = false;
   let closedOn = "";
   cdp.closed.then(() => (ended = true));
@@ -463,8 +463,8 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
         closedOn = closedOn || pick.role;
       }
       // The note that tells it names the address already, and is one line.
-      const closed = err.closed && (err.tooLarge ? "it is too large to read" : "the kit's connection to its tab closed");
-      skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : closed || plainText(String(err.message || err)) });
+      const reason = err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : err.tooLarge ? "it is too large to read" : err.closed ? "the kit's connection to its tab closed" : plainText(String(err.message || err));
+      skipped.push({ ...pick, reason });
     }
   }
   return { pages, skipped };

@@ -709,18 +709,20 @@ test("a menu page whose read fails is told on one line, and an exception in it n
   ]);
 });
 
-test("a menu page too large for Node's connection, or whose tab's connection closes, is told in words, and so are the pages after it and one the run has too little time left for", async (t) => {
+test("a menu page too large to take is told in words and the pages after it are read, a tab that closes is told and so are the pages after it, and so is one the run has too little time left for", async (t) => {
   setTimeLimit(120_000);
   t.after(() => setTimeLimit(120_000));
   t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
   const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/about", "About"))]);
-  // As a call on a connection that closed comes back: Node's WebSocket
-  // closes it under an answer larger than it takes, and says so.
-  const closed = (tooLarge) => Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge });
-  // A tab whose connection closes as the first menu page's text is read
-  // (closes set), too large for Node or not, as a real one does: that call
-  // fails, closed settles, and every call after it fails too.
-  const tab = (closes, tooLarge = false, first = home, whenClosed = () => {}) => {
+  // As calls come back on a tab that has closed, and with an answer too
+  // large to take, which costs only that call.
+  const closed = () => Object.assign(new Error("The browser connection closed."), { closed: true });
+  const tooLarge = () => Object.assign(new Error("The browser's answer was too large to take."), { tooLarge: true });
+  // A tab whose answer to the first menu page's text is too large to take
+  // (large set), or that closes then (closes set), as a real one does: that
+  // call fails, closed settles, and every call after it fails too.
+  const tab = (closes, large = false, first = home, whenClosed = () => {}) => {
+    let read = 0;
     let at = "";
     let loaded = () => {};
     let gone = false;
@@ -732,7 +734,7 @@ test("a menu page too large for Node's connection, or whose tab's connection clo
         if (method === "Page.loadEventFired") loaded = listener;
       },
       send: async (method, params = {}) => {
-        if (gone) throw closed(false);
+        if (gone) throw closed();
         if (WORLD[method]) return WORLD[method];
         if (method === "Page.navigate") {
           at = params.url;
@@ -742,11 +744,12 @@ test("a menu page too large for Node's connection, or whose tab's connection clo
         if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
         if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
           if (!at) return { result: { value: first } };
+          if (large && ++read === 1) throw tooLarge();
           if (closes) {
             gone = true;
             end();
             whenClosed();
-            throw closed(tooLarge);
+            throw closed();
           }
           return { result: { value: model(at, [el("h1", {}, "Page")]) } };
         }
@@ -757,15 +760,19 @@ test("a menu page too large for Node's connection, or whose tab's connection clo
     };
     return cdp;
   };
+  let { pages, skipped } = await readFactPages(tab(false, true), "https://acme.test/", () => {});
+  assert.deepEqual(pages.map((one) => one.role), ["home", "customers", "about"]);
+  assert.deepEqual(skipped, [{ role: "pricing", url: "https://acme.test/pricing", reason: "it is too large to read" }]);
+  // A tab that closes: the pages after it are named with the reason.
   const after = "the kit's connection to its tab closed while the pricing page was read";
-  let { pages, skipped } = await readFactPages(tab(true, true), "https://acme.test/", () => {});
+  ({ pages, skipped } = await readFactPages(tab(true), "https://acme.test/", () => {}));
   assert.deepEqual(pages.map((one) => one.role), ["home"]);
   assert.deepEqual(skipped, [
-    { role: "pricing", url: "https://acme.test/pricing", reason: "it is too large to read" },
+    { role: "pricing", url: "https://acme.test/pricing", reason: "the kit's connection to its tab closed" },
     { role: "customers", url: "https://acme.test/customers", reason: after },
     { role: "about", url: "https://acme.test/about", reason: after },
   ]);
-  // The connection's close is the reason, also once little time is left.
+  // The tab's close is the reason, also once little time is left.
   ({ pages, skipped } = await readFactPages(tab(true, false, home, () => setTimeLimit(30_000)), "https://acme.test/", () => {}));
   assert.deepEqual(pages.map((one) => one.role), ["home"]);
   assert.deepEqual(skipped, [
@@ -953,7 +960,7 @@ test("the page's text is read in a new world after a navigation, also a page's o
     if (cdp) cdp.close();
     server.close();
   });
-  cdp = await openPage(chrome.base, { width: 1000, height: 700 });
+  cdp = await openPage(chrome, { width: 1000, height: 700 });
   await navigate(cdp, `http://127.0.0.1:${port}/a`);
   assert.equal((await readModel(cdp)).title, "/a");
   // What it runs does not see the page's own world.

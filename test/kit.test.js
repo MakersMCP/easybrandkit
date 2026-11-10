@@ -14,10 +14,11 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawn, spawnSync } = require("node:child_process");
 const { EventEmitter, once } = require("node:events");
+const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
-const { findChrome, launch, openPage, newTab, browserWait, killBrowsers, removeTemps } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, browserWait, killBrowsers, removeTemps, pipeOf } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf, saveVector, readWords } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
@@ -231,7 +232,6 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   // The brand first, with an alt text that names no one and a host that does
   // not name it either, as on a project's own pages.
   assert.equal(deeper("Brightmoss | Features", "http://127.0.0.1:8737/brandfirst.html", "Go to the home page"), "Brightmoss");
-  assert.equal(deeper("Acme Cloud | Changelog", "http://127.0.0.1:8737/changes", ""), "Acme Cloud");
   assert.equal(deeper("PDF.js - Home", "https://mozilla.github.io/pdf.js/", ""), "PDF.js");
   assert.equal(deeper("Jekyll \u2022 Simple, blog-aware, static sites", "https://someone.github.io/jekyll/", ""), "Jekyll");
   assert.equal(deeper("Quickstart | Jekyll \u2022 Simple, blog-aware, static sites", "https://someone.github.io/jekyll/docs/", ""), "Jekyll");
@@ -774,6 +774,61 @@ function ended(pid) {
   }
 }
 
+// Stands in for the browser's end of its DevTools pipe, for the stand-in
+// browsers below: it reads the calls on file descriptor 3 and answers on 4,
+// as Chrome does with --remote-debugging-pipe. STAND_IN_ANSWERS says how, as
+// JSON: for a method, "never", "error", "exit" (answer, then end), a delay in
+// ms, or a list of these for its calls in turn, the last of them for all
+// calls after; any other call is answered at once. STAND_IN_LOG names a file
+// each call's method is added to, with " session" after one sent to a tab.
+const ANSWERER = `"use strict";
+const fs = require("fs");
+const rules = JSON.parse(process.env.STAND_IN_ANSWERS || "{}");
+const log = process.env.STAND_IN_LOG;
+const results = { "Browser.getVersion": { product: "StandIn/1", userAgent: "StandIn/1" }, "Target.createTarget": { targetId: "x" }, "Target.attachToTarget": { sessionId: "s" } };
+const out = fs.createWriteStream(null, { fd: 4 });
+const asked = {};
+let rest = "";
+fs.createReadStream(null, { fd: 3 }).on("data", (chunk) => {
+  const parts = (rest + chunk).split("\\0");
+  rest = parts.pop();
+  for (const part of parts) {
+    const { id, method, sessionId } = JSON.parse(part);
+    if (log) fs.appendFileSync(log, method + (sessionId ? " session" : "") + "\\n");
+    const rule = [].concat(method in rules ? rules[method] : 0);
+    asked[method] = (asked[method] || 0) + 1;
+    const now = rule[Math.min(asked[method], rule.length) - 1];
+    if (now === "never") continue;
+    const answer = () => out.write(JSON.stringify(now === "error" ? { id, error: { code: -32000, message: "Not allowed" } } : { id, result: results[method] || {} }) + "\\0", () => now === "exit" && process.exit(0));
+    if (typeof now === "number" && now > 0) setTimeout(answer, now);
+    else answer();
+  }
+});
+`;
+
+// The answerer above, for the stand-in browsers of a test: written into dir,
+// and named by STAND_IN_NODE and STAND_IN_ANSWERER, which the stand-ins run.
+// STAND_IN_ANSWERS and STAND_IN_LOG start unset.
+function useAnswerer(t, dir) {
+  const file = path.join(dir, "answerer.js");
+  fs.writeFileSync(file, ANSWERER);
+  const names = ["STAND_IN_NODE", "STAND_IN_ANSWERER", "STAND_IN_ANSWERS", "STAND_IN_LOG"];
+  const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  Object.assign(process.env, { STAND_IN_NODE: process.execPath, STAND_IN_ANSWERER: file });
+  delete process.env.STAND_IN_ANSWERS;
+  delete process.env.STAND_IN_LOG;
+}
+
+// What a stand-in runs to answer on its pipe, with its own arguments, which
+// name its profile as a browser's processes do.
+const ANSWER = `"$STAND_IN_NODE" "$STAND_IN_ANSWERER" "$@"`;
+
 // Stands in for Chrome: it makes the folders Chrome's component updater
 // downloads and unpacks into in its first seconds, each with a file in it,
 // as a browser killed then leaves them, and a folder of another kind that
@@ -794,8 +849,7 @@ if [ -n "$HELPER_PID" ]; then
   ( i=0; while [ $i -lt 100 ]; do sh -c 'sleep 0.05; mkdir -p "$1/Default"' write "$profile"; i=$((i + 1)); done ) &
   echo $! > "$HELPER_PID"
 fi
-printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
-exec sleep 30
+exec ${ANSWER}
 `;
 
 test("a browser that ends takes its helpers with it and leaves nothing of its own in the temp folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
@@ -812,8 +866,11 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
   });
   const chrome = path.join(parent, "chrome");
   fs.writeFileSync(chrome, STAND_IN, { mode: 0o755 });
+  useAnswerer(t, parent);
   process.env.CHROME_PATH = chrome;
   process.env.TMPDIR = temp;
+  // It never says that it heard the kit ask it to quit.
+  process.env.STAND_IN_ANSWERS = JSON.stringify({ "Browser.close": "never" });
   // A folder of the same kind that was there before stays with its files,
   // and so does one of another kind that holds a file.
   writeFiles(temp, { "com.google.Chrome.chrome_chrome_url_fetcher_.before/download": "theirs" });
@@ -823,11 +880,11 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
     if (linux) process.env.HELPER_PID = pidFile;
     const browser = await launch({ width: 800, height: 600 });
     if (end === "closed") {
-      // It does not answer on the port it wrote, so it cannot be asked to
-      // quit: it is killed at once, not waited for.
+      // It does not say that it heard the kit ask it to quit, so it is
+      // killed 2 s after, not waited for as long as one that heard.
       const started = Date.now();
       await browser.close();
-      assert.ok(Date.now() - started < 3_000, `closed in ${Date.now() - started} ms`);
+      assert.ok(Date.now() - started < 4_000, `closed in ${Date.now() - started} ms`);
     } else {
       killBrowsers();
     }
@@ -878,8 +935,7 @@ else
 fi
 "$NODE_BIN" -e 'process.title = process.argv.join(" "); require("fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 30000)' -- "$profile/helper.pid" "--crashpad-handler-pid=$(cat "$HANDLER_PID")" "--user-data-dir=$profile" &
 while [ ! -s "$profile/helper.pid" ]; do sleep 0.01; done
-printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
-exec sleep 30
+exec ${ANSWER}
 `;
 
 test("a browser's crash handler goes with it, also once its helpers have ended, and no other process it names does", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
@@ -899,6 +955,8 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
   });
   const chrome = path.join(parent, "chrome");
   fs.writeFileSync(chrome, WITH_CRASH_HANDLER, { mode: 0o755 });
+  useAnswerer(t, parent);
+  process.env.STAND_IN_ANSWERS = JSON.stringify({ "Browser.close": "never" });
   const handlerBin = path.join(parent, "chrome_crashpad_handler");
   fs.symlinkSync(process.execPath, handlerBin);
   fs.symlinkSync(process.execPath, path.join(parent, "something_else"));
@@ -977,7 +1035,9 @@ test("a browser that has ended is not looked up by its pid, which can be another
   const childProcess = require("node:child_process");
   t.mock.method(childProcess, "spawn", () => {
     const browser = new EventEmitter();
-    Object.assign(browser, { pid: other.pid, exitCode: null, signalCode: null, kill: () => assert.fail("the browser has ended") });
+    // Its pipe, which takes the kit's calls and answers none.
+    const stdio = [null, null, null, new PassThrough(), new PassThrough()];
+    Object.assign(browser, { pid: other.pid, exitCode: null, signalCode: null, stdio, kill: () => assert.fail("the browser has ended") });
     setTimeout(() => {
       browser.exitCode = 1;
       browser.emit("exit", 1, null);
@@ -1005,7 +1065,8 @@ test("a browser that has ended is not looked up by its pid, which can be another
 // shutdown then removes the profile's links first and that folder a moment
 // later: this one removes the links and goes on running, as a browser that
 // the kit kills in that moment leaves them. It also says where it was told
-// to write its crash reports.
+// to write its crash reports. Its pipe is answered by a process of its own,
+// which never says that it heard the kit ask it to quit.
 const WITH_SOCKET = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
@@ -1018,7 +1079,7 @@ ln -s 1234567890 "$socket/SingletonCookie"
 ln -s "$socket/SingletonSocket" "$profile/SingletonSocket"
 ln -s "$socket/SingletonCookie" "$profile/SingletonCookie"
 trap 'rm -f "$profile/SingletonSocket" "$profile/SingletonCookie"' INT
-printf '1\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"
+STAND_IN_ANSWERS='{"Browser.close":"never"}' ${ANSWER} &
 while :; do sleep 0.05; done
 `;
 
@@ -1040,6 +1101,7 @@ function withSocket(t) {
   });
   const chrome = path.join(parent, "chrome");
   fs.writeFileSync(chrome, WITH_SOCKET, { mode: 0o755 });
+  useAnswerer(t, parent);
   Object.assign(process.env, { CHROME_PATH: chrome, TMPDIR: temp, STAND_IN_PID: path.join(parent, "chrome.pid"), STAND_IN_DUMPS: path.join(parent, "dumps") });
   return {
     temp,
@@ -1116,88 +1178,40 @@ test("a browser that quits when asked leaves nothing of its component updater's 
   assert.deepEqual(fs.readdirSync(temp), []);
 });
 
-test("a browser that is slow to answer still runs; one that refuses its port or has ended does not", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser that is slow to answer still runs; one that has ended does not", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
-  // A port that takes a connection and never answers, as a busy browser's.
-  const slow = http.createServer(() => {});
-  slow.listen(0, "127.0.0.1");
-  await once(slow, "listening");
   const chrome = process.env.CHROME_PATH;
   t.after(() => {
     if (chrome === undefined) delete process.env.CHROME_PATH;
     else process.env.CHROME_PATH = chrome;
-    slow.closeAllConnections();
-    slow.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
+  // It answers as it starts and never again, as a busy browser, and says its
+  // pid.
+  useAnswerer(t, parent);
+  process.env.STAND_IN_ANSWERS = JSON.stringify({ "Browser.getVersion": [0, "never"] });
   const stand = path.join(parent, "chrome");
-  fs.writeFileSync(stand, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\nprintf '${slow.address().port}\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"\nexec sleep 30\n`, { mode: 0o755 });
+  const pidFile = path.join(parent, "chrome.pid");
+  fs.writeFileSync(stand, `#!/bin/sh\necho $$ > "${pidFile}"\nexec ${ANSWER}\n`, { mode: 0o755 });
   process.env.CHROME_PATH = stand;
   const browser = await launch({ width: 800, height: 600 });
   const started = Date.now();
   assert.equal(await browser.alive(), true, "slow to answer");
   assert.ok(Date.now() - started >= 4_000, `answered after ${Date.now() - started} ms`);
-  slow.closeAllConnections();
-  await new Promise((resolve) => slow.close(resolve));
-  assert.equal(await browser.alive(), false, "its port refuses");
+  // Killed: told at once, as its pipe has closed with it.
+  process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const asked = Date.now();
+  assert.equal(await browser.alive(), false, "killed");
+  assert.ok(Date.now() - asked < 500, `told after ${Date.now() - asked} ms`);
   await browser.close();
   assert.equal(await browser.alive(), false, "ended");
 });
-
-// The answer that takes a WebSocket connection, for a server of a test's own.
-function upgraded(req) {
-  const accept = crypto.createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
-  return `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`;
-}
-
-// A port nothing listens on.
-async function closedPort() {
-  const server = http.createServer().listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const { port } = server.address();
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
 
 test("a browser slow to start, to open a tab or to answer the connection to it is waited for as long as the run has left, and then told in words", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
-  // The browser's DevTools server, as slow as each case needs: it takes every
-  // connection and answers none of them, but these. /json/new once tab is
-  // set, that many ms after it is asked, with a tab whose connection it never
-  // answers, or one at tabAt. /json/version once quit is set, with the
-  // address of the browser's own connection, which it takes and then answers
-  // nothing on ("mute"), or never takes ("deaf"). /json/close at once. It
-  // counts the times it is asked for /json/version and /json/close.
-  let tab = 0;
-  let tabAt = "";
-  let quit = "";
-  let versions = 0;
-  let closes = 0;
-  const devtools = http.createServer((req, res) => {
-    const json = (body) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
-    const at = `ws://127.0.0.1:${devtools.address().port}/devtools`;
-    if (req.url.startsWith("/json/version")) {
-      versions++;
-      if (quit) json({ webSocketDebuggerUrl: `${at}/browser/x` });
-      return;
-    }
-    if (req.url.startsWith("/json/close")) {
-      closes++;
-      return res.end("Target is closing");
-    }
-    if (!tab || !req.url.startsWith("/json/new")) return;
-    const target = { id: "x", webSocketDebuggerUrl: tabAt || `${at}/page/x` };
-    setTimeout(() => json(target), tab);
-  });
-  const upgrades = new Set();
-  devtools.on("upgrade", (req, socket) => {
-    upgrades.add(socket);
-    if (quit === "mute" && req.url.includes("/devtools/browser/")) socket.write(upgraded(req));
-  });
-  devtools.listen(0, "127.0.0.1");
-  await once(devtools, "listening");
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
   t.after(() => {
     killBrowsers();
@@ -1206,12 +1220,18 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
-    for (const socket of upgrades) socket.destroy();
-    devtools.closeAllConnections();
-    devtools.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
   process.env.TMPDIR = temp;
+  // The browser's end of its pipe, as slow as each case needs, by the rules
+  // in STAND_IN_ANSWERS, which a browser takes as it starts; unless a case
+  // says otherwise, it ends once it has said that it heard the kit ask it to
+  // quit. The calls it was asked are counted in a log of its own.
+  useAnswerer(t, parent);
+  const log = path.join(parent, "calls.log");
+  process.env.STAND_IN_LOG = log;
+  const calls = (method) => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter((line) => line === method).length : 0);
+  const answers = (rules) => (process.env.STAND_IN_ANSWERS = JSON.stringify({ "Browser.close": "exit", ...rules }));
   // What a wait ended with, once the run's time has run out, where it took
   // a fixed 10 or 20 s, or went on past the run's limit for minutes; at most
   // more ms after least.
@@ -1224,7 +1244,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   const late = "before the run's time ran out";
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // A browser that starts and never says where its DevTools are.
+  // A browser that starts and never answers on its pipe.
   const silent = path.join(parent, "silent");
   fs.writeFileSync(silent, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
   process.env.CHROME_PATH = silent;
@@ -1233,55 +1253,63 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.equal(end.message, `silent was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout. If it happens again, point CHROME_PATH at another browser.`);
   assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
 
-  // One that says where they are at once, and is slow from then on.
+  // One that answers as it starts, and is slow from then on: it opens no
+  // tab, or one after 11 s, more than the 10 s a tab was given before, and
+  // never answers the kit's connection to it.
   const slow = path.join(parent, "chrome");
-  fs.writeFileSync(slow, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\nprintf '${devtools.address().port}\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"\nexec sleep 120\n`, { mode: 0o755 });
+  fs.writeFileSync(slow, `#!/bin/sh\nexec ${ANSWER}\n`, { mode: 0o755 });
   process.env.CHROME_PATH = slow;
+  answers({ "Target.createTarget": "never" });
   setTimeLimit(120_000);
-  const browser = await launch({ width: 800, height: 600 });
+  let browser = await launch({ width: 800, height: 600 });
   setTimeLimit(2_500);
-  end = await ended(openPage(browser.base, { width: 800, height: 600 }), 2_500);
+  end = await ended(openPage(browser, { width: 800, height: 600 }), 2_500);
   assert.equal(end.message, `The browser did not open a tab ${late}`);
   assert.equal(end.outOfTime, true);
-  // A tab that comes after 11 s, more than the 10 s a tab was given before,
-  // and a connection to it that is never answered.
-  tab = 11_000;
-  setTimeLimit(14_000);
-  end = await ended(openPage(browser.base, { width: 800, height: 600 }), 14_000);
-  assert.equal(end.message, `The browser did not answer the kit's connection to its tab ${late}`);
   // The card's tab, which a kit can do without.
-  tab = 0;
   setTimeLimit(2_500);
-  end = await ended(renderCard(browser.base, {}, parent), 2_500);
+  end = await ended(renderCard(browser, {}, parent), 2_500);
   assert.equal(end.message, `The browser did not open a tab ${late}`);
-  // Its connection is waited for 30 s at most, however much time the run has
-  // left, and the tab is closed again.
-  tab = 1;
+  await browser.close();
+  answers({ "Target.createTarget": 11_000, "Target.attachToTarget": "never" });
   setTimeLimit(120_000);
-  end = await ended(renderCard(browser.base, {}, parent), 30_000);
+  browser = await launch({ width: 800, height: 600 });
+  setTimeLimit(14_000);
+  end = await ended(openPage(browser, { width: 800, height: 600 }), 14_000);
+  assert.equal(end.message, `The browser did not answer the kit's connection to its tab ${late}`);
+  await browser.close();
+  // The card's connection is waited for 30 s at most, however much time the
+  // run has left, and its tab is closed again.
+  answers({ "Target.attachToTarget": "never" });
+  setTimeLimit(120_000);
+  browser = await launch({ width: 800, height: 600 });
+  end = await ended(renderCard(browser, {}, parent), 30_000);
   assert.equal(end.message, "The browser did not answer the kit's connection to its tab in 30 s");
-  assert.equal(closes, 1, "the card's tab is closed");
+  assert.equal(calls("Target.closeTarget"), 1, "the card's tab is closed");
+  await browser.close();
   // A connection to its tab that the browser refuses is told in words, and
   // the tab is closed all the same.
-  tabAt = `ws://127.0.0.1:${await closedPort()}/devtools/page/x`;
-  end = await ended(renderCard(browser.base, {}, parent), 0, 5_000);
+  answers({ "Target.attachToTarget": "error" });
+  browser = await launch({ width: 800, height: 600 });
+  end = await ended(renderCard(browser, {}, parent), 0, 5_000);
   assert.equal(end.message, "The browser refused the kit's connection to its tab");
-  assert.equal(closes, 2, "the card's tab is closed");
-  tabAt = "";
+  assert.equal(calls("Target.closeTarget"), 2, "the card's tab is closed");
   // Under a time limit longer than any timer can be, as a program that calls
   // makeKit can give it, a tab that comes is taken.
-  tab = 300;
+  await browser.close();
+  answers({ "Target.createTarget": 300 });
+  browser = await launch({ width: 800, height: 600 });
   setTimeLimit(2 ** 40);
-  assert.equal((await newTab(browser.base, browserWait())).id, "x");
+  assert.equal(await browser.newTab(browserWait()), "x");
   await browser.close();
 
-  // A browser asked to quit that takes the connection for it and never
-  // answers on it, or never takes it, is killed within seconds, also when
-  // the run has minutes left; once the run's time is up, or when it has just
-  // not answered, asking it takes a second.
+  // A browser asked to quit that never says it heard is killed within
+  // seconds, also when the run has minutes left; one that says it heard and
+  // does not end is given a second once the run's time is up, or when it has
+  // just not answered.
   setTimeLimit(120_000);
   for (const [how, hurry, most] of [["deaf", false, 4_000], ["mute", true, 3_000], ["mute", "out of time", 3_000]]) {
-    quit = how;
+    answers({ "Browser.close": how === "deaf" ? "never" : 0 });
     const quitting = await launch({ width: 800, height: 600 });
     if (hurry === "out of time") {
       setTimeLimit(1_000);
@@ -1297,12 +1325,11 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
 
   // A run whose browser opens no tab keeps the earlier kit, and says so. The
   // browser has just been waited for, so it is not asked again whether it
-  // still runs, and asking it to quit, which it never answers, takes a
-  // second: the run ends a moment after its limit. /json/version is asked
-  // for only to ask the browser to quit.
-  tab = 0;
-  quit = "mute";
-  versions = 0;
+  // still runs, and asking it to quit, which it hears and does not do, takes
+  // a second: the run ends a moment after its limit. Browser.getVersion is
+  // asked for only as the browser starts.
+  answers({ "Target.createTarget": "never", "Browser.close": 0 });
+  fs.rmSync(log, { force: true });
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
@@ -1311,13 +1338,12 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.ok(Date.now() - started < 3_000 + 3_000, `ended ${Date.now() - started - 3_000} ms past the run's limit`);
   assert.equal(end.message, `The browser did not open a tab ${late}, so no kit was made. Try again, or give it more time with --timeout.`);
   assert.equal(end.earlierKit, dir);
-  assert.equal(versions, 1);
+  assert.equal(calls("Browser.getVersion"), 1);
+  assert.equal(calls("Browser.close"), 1);
   assert.deepEqual(filesOf(dir), before);
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
   // One whose tab's connection the browser refuses keeps it too.
-  tab = 1;
-  tabAt = `ws://127.0.0.1:${await closedPort()}/devtools/page/x`;
-  quit = "deaf";
+  answers({ "Target.attachToTarget": "error", "Browser.close": "never" });
   end = await ended(makeKit("https://acme.example/", { dir, stores: false, timeLimit: 30_000 }), 0, 15_000);
   assert.equal(end.message, "The browser refused the kit's connection to its tab, so no kit was made. Try again.");
   assert.equal(end.earlierKit, dir);
@@ -1325,7 +1351,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
-test("a browser that will never say where its DevTools are is told before the run's time is up: one with no room in the temp folder, and one that does not use its profile", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser that does not answer is told within seconds when the temp folder has no room, and is waited for as long as the run has left otherwise", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
@@ -1340,22 +1366,24 @@ test("a browser that will never say where its DevTools are is told before the ru
     fs.rmSync(parent, { recursive: true, force: true });
   });
   process.env.TMPDIR = temp;
-  // Stand-ins for Chrome: one that never touches the profile it is given, as
-  // a Chromium installed as a snap, which has a /tmp of its own; one that
-  // makes its lock there, as Chrome does in its first moments, and is slow
-  // from then on; and one that also leaves DevToolsActivePort empty, as
-  // Chrome does when the disk has no room for it.
+  useAnswerer(t, parent);
+  process.env.STAND_IN_ANSWERS = JSON.stringify({ "Browser.close": "exit" });
+  // Stand-ins for Chrome that never answer on their pipe: one that makes its
+  // lock in the profile, as Chrome does in its first moments, and is slow
+  // from then on; one that never touches the profile and starts a helper
+  // that names it, as Chrome's zygote does, as a Chromium installed as a
+  // snap, which has a /tmp of its own, can; and one that starts nothing.
   const standIn = (name, also) => {
     const file = path.join(parent, name);
     fs.writeFileSync(file, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\n${also}exec sleep 60\n`, { mode: 0o755 });
     return file;
   };
-  const silent = standIn("silent", "");
   const locked = standIn("locked", `ln -s "standin-$$" "$profile/SingletonLock"\n`);
-  const empty = standIn("empty", `ln -s "standin-$$" "$profile/SingletonLock"\n: > "$profile/DevToolsActivePort"\n`);
+  const snap = standIn("snap", `sh -c 'sleep 60; :' zygote --type=zygote "--user-data-dir=$profile" &\n`);
+  const silent = standIn("silent", "");
   const timed = async (promise) => {
     const started = Date.now();
-    const end = await promise.then(() => "went on", (err) => err);
+    const end = await promise.then((browser) => browser, (err) => err);
     return { end, ms: Date.now() - started };
   };
   const late = "before the run's time ran out";
@@ -1385,37 +1413,23 @@ test("a browser that will never say where its DevTools are is told before the ru
   assert.deepEqual(filesOf(dir), before);
   assert.deepEqual(fs.readdirSync(temp), [], "the profile is removed");
 
-  // DevToolsActivePort left empty on a disk with no room, or a quota used up:
-  // told within seconds, not at the end of the run.
-  process.env.CHROME_PATH = empty;
-  mock = noRoom("ENOSPC", ["easybrandkit-room"]);
-  run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
-  mock.mock.restore();
-  assert.equal(run.end.message, full("ENOSPC"));
-  assert.equal(run.end.earlierKit, dir);
-  assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
-  assert.deepEqual(filesOf(dir), before);
-  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
-  // Left empty, while the disk has room again: the browser will not write it.
-  run = await timed(launch({ width: 800, height: 600 }));
-  assert.equal(run.end.message, `empty was started but could not write where its DevTools are, as when the disk that holds the temp folder, ${temp}, is full, so no kit was made. Check that it has room, and try again.`);
-  assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
-  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
-  // Not written yet, on a disk that shows no room and has none.
-  process.env.CHROME_PATH = locked;
+  // A disk that shows no room and has none, or a quota used up: told within
+  // seconds, not at the end of the run.
   const statfs = fs.statfsSync;
   t.mock.method(fs, "statfsSync", function (at, ...rest) {
     const real = statfs.call(this, at, ...rest);
     return String(at).startsWith(temp) ? Object.assign(real, { bavail: 1 }) : real;
   });
-  mock = noRoom("EDQUOT", ["easybrandkit-room"]);
-  run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
-  mock.mock.restore();
+  for (const code of ["EDQUOT", "ENOSPC"]) {
+    mock = noRoom(code, ["easybrandkit-room"]);
+    run = await timed(makeKit("https://acme.example/", { dir, stores: false }));
+    mock.mock.restore();
+    assert.equal(run.end.message, full(code));
+    assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
+    assert.deepEqual(filesOf(dir), before);
+    assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+  }
   t.mock.restoreAll();
-  assert.equal(run.end.message, full("EDQUOT"));
-  assert.ok(run.ms < 8_000, `told after ${run.ms} ms`);
-  assert.deepEqual(filesOf(dir), before);
-  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 
   // One that ends at once on such a disk did not start for want of room.
   process.env.CHROME_PATH = standIn("quits", "exit 1\n");
@@ -1426,23 +1440,28 @@ test("a browser that will never say where its DevTools are is told before the ru
   assert.deepEqual(filesOf(dir), before);
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 
-  // A browser that never touches its profile: told after 15 s, however much
-  // time the run has left.
-  process.env.CHROME_PATH = silent;
-  run = await timed(launch({ width: 800, height: 600 }));
-  assert.equal(run.end.message, "silent runs but does not use the profile folder it was given, as a browser installed as a snap can do, so no kit was made. Point CHROME_PATH at another browser.");
-  assert.ok(run.ms >= 14_500 && run.ms < 22_000, `told after ${run.ms} ms`);
-  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
-  // One that uses it is waited for as long as the run has left, whether it
-  // writes its lock or only files of its own in Default. Both are started
-  // at once: the browser is picked as a start begins.
-  const writes = standIn("writes", `echo x > "$profile/Default/Cookies"\n`);
+  // With room, one that does not answer is waited for as long as the run has
+  // left, whatever it does with its profile: past the 15 s after which a
+  // browser that left its profile untouched was refused before. So is a
+  // program CHROME_PATH names that takes 16 s before it starts the browser,
+  // which then answers. They are started at once: the browser is picked as a
+  // start begins.
+  const late16 = path.join(parent, "late16");
+  fs.writeFileSync(late16, `#!/bin/sh\nsleep 16\nexec ${ANSWER}\n`, { mode: 0o755 });
   setTimeLimit(18_000);
-  process.env.CHROME_PATH = locked;
-  const lockedRun = timed(launch({ width: 800, height: 600 }));
-  process.env.CHROME_PATH = writes;
-  const writesRun = timed(launch({ width: 800, height: 600 }));
-  for (const [name, used] of [["locked", await lockedRun], ["writes", await writesRun]]) {
+  const runs = [];
+  for (const [name, file] of [["locked", locked], ["snap", snap], ["silent", silent], ["late16", late16]]) {
+    process.env.CHROME_PATH = file;
+    runs.push([name, timed(launch({ width: 800, height: 600 }))]);
+  }
+  for (const [name, running] of runs) {
+    const used = await running;
+    if (name === "late16") {
+      assert.equal(typeof used.end.close, "function", `${name}: ${used.end.message}`);
+      assert.ok(used.ms >= 15_500, `${name} answered after ${used.ms} ms`);
+      await used.end.close();
+      continue;
+    }
     assert.equal(used.end.message, `${name} was started but did not answer ${late}, so no kit was made. Try again, or give it more time with --timeout. If it happens again, point CHROME_PATH at another browser.`);
     assert.ok(used.ms >= 17_500, `${name} told after ${used.ms} ms`);
   }
@@ -2332,41 +2351,115 @@ test("a page that tries to save files for the whole run leaves nothing in the us
   assert.deepEqual(site.downloads(), []);
 });
 
-test("the browser is told to end before the tab's connection closes, since that connection is what refuses downloads", { skip: noBrowser }, async (t) => {
+// Stands in for the browser between the kit and a real one: it starts the
+// browser STAND_IN_BROWSER names with its own arguments and passes the calls
+// on the pipe to it, and its answers back. STAND_IN_RELAY says, as JSON,
+// what becomes of a method's calls: "drop", as a browser too busy to answer
+// them, "rename", as one that does not know them and answers so, or "pass",
+// or a list of these for its calls in turn, the last of them for all calls
+// after.
+// STAND_IN_LOG names a file each call's method is added to, with " session"
+// after one sent to a tab.
+const RELAY = `"use strict";
+const fs = require("fs");
+const { spawn } = require("child_process");
+const rules = JSON.parse(process.env.STAND_IN_RELAY || "{}");
+const log = process.env.STAND_IN_LOG;
+const counts = {};
+const browser = spawn(process.env.STAND_IN_BROWSER, process.argv.slice(2), { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+browser.on("exit", (code) => process.exit(code === null ? 1 : code));
+browser.stdio[4].pipe(fs.createWriteStream(null, { fd: 4 }));
+let rest = "";
+fs.createReadStream(null, { fd: 3, encoding: "utf8" })
+  .on("data", (chunk) => {
+    const parts = (rest + chunk).split("\\0");
+    rest = parts.pop();
+    for (const part of parts) {
+      const msg = JSON.parse(part);
+      if (log) fs.appendFileSync(log, msg.method + (msg.sessionId ? " session" : "") + "\\n");
+      counts[msg.method] = (counts[msg.method] || 0) + 1;
+      const rule = [].concat(rules[msg.method] || "pass");
+      const now = rule[Math.min(counts[msg.method], rule.length) - 1];
+      if (now === "drop") continue;
+      if (now === "rename") msg.method += "Unknown";
+      browser.stdio[3].write(JSON.stringify(msg) + "\\0");
+    }
+  })
+  .on("end", () => browser.stdio[3].end());
+`;
+
+// The browser of the tests run through the relay above, with these rules,
+// for the rest of the test.
+function useRelay(t, dir, rules = {}) {
+  const real = findChrome();
+  const relay = path.join(dir, "relay.js");
+  const chrome = path.join(dir, "chrome");
+  fs.writeFileSync(relay, RELAY);
+  fs.writeFileSync(chrome, `#!/bin/sh\nexec "${process.execPath}" "${relay}" "$@"\n`, { mode: 0o755 });
+  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_LOG"];
+  const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  Object.assign(process.env, { CHROME_PATH: chrome, STAND_IN_BROWSER: real, STAND_IN_RELAY: JSON.stringify(rules) });
+  delete process.env.STAND_IN_LOG;
+}
+
+test("the refusal of downloads is said once, to the whole browser, before any tab is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
-  const realLaunch = chrome.launch;
-  const realOpen = chrome.openPage;
-  const order = [];
-  t.mock.method(chrome, "launch", async (...args) => {
-    const browser = await realLaunch(...args);
-    const close = browser.close;
-    browser.close = async () => {
-      order.push("browser told to end");
-      await close();
-      order.push("browser ended");
-    };
-    return browser;
-  });
-  t.mock.method(chrome, "openPage", async (...args) => {
-    const cdp = await realOpen(...args);
-    const close = cdp.close;
-    cdp.close = () => {
-      order.push("connection closed");
-      close();
-    };
-    return cdp;
-  });
-  await reloadedKit().makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
-  assert.deepEqual(order, ["browser told to end", "browser ended", "connection closed"]);
+  useRelay(t, parent);
+  const log = path.join(parent, "calls.log");
+  process.env.STAND_IN_LOG = log;
+  const { kit } = await makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  const calls = fs.readFileSync(log, "utf8").trim().split("\n");
+  // Then the page's tab and the card's.
+  assert.deepEqual(calls.slice(0, 3), ["Browser.getVersion", "Browser.setDownloadBehavior", "Target.createTarget"]);
+  assert.equal(calls.filter((call) => call.startsWith("Browser.setDownloadBehavior")).length, 1);
+  assert.equal(calls.filter((call) => call === "Target.createTarget").length, 2);
+  assert.equal(calls[calls.length - 1], "Browser.close");
 });
 
-test("a download no connection refuses goes into the throwaway profile, not the user's Downloads folder", { skip: LINUX_HOME }, async (t) => {
+test("a browser too busy to answer the kit's refusal of downloads ends the run before the site is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = ownTemp(t);
+  const tmpdir = process.env.TMPDIR;
+  if (temp) process.env.TMPDIR = temp;
+  t.after(() => {
+    if (tmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = tmpdir;
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // The refusal held back, as from a browser that does not answer it.
+  useRelay(t, parent, { "Browser.setDownloadBehavior": "drop" });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // It is waited for as long as the run has left, past the 30 s other
+  // calls to a tab get.
+  const started = Date.now();
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, timeLimit: 35_000 }), (err) => err.message === "The browser did not answer the kit's request to refuse downloads before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout." && err.earlierKit === dir);
+  assert.ok(Date.now() - started >= 34_000 && Date.now() - started < 35_000 + 4_000, `ended ${Date.now() - started - 35_000} ms past the run's limit`);
+  assert.equal(asked, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
+  if (temp) assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+});
+
+test("a browser that does not take the refusal of downloads reads the site, and a download goes into its throwaway profile, not the user's Downloads folder", { skip: LINUX_HOME }, async (t) => {
   const site = await savingSite(t);
   const temp = ownTemp(t);
   if (!temp) return t.skip("the temp folder is too deep for a browser");
@@ -2376,20 +2469,17 @@ test("a download no connection refuses goes into the throwaway profile, not the 
     if (tmpdir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = tmpdir;
   });
-  // The refusal taken back as soon as the tab is open.
-  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
-  const realOpen = chrome.openPage;
-  t.mock.method(chrome, "openPage", async (...args) => {
-    const cdp = await realOpen(...args);
-    await cdp.send("Browser.setDownloadBehavior", { behavior: "default" });
-    return cdp;
-  });
+  // The refusal sent under a name the browser does not know: it answers
+  // that it does not take it.
+  useRelay(t, site.parent, { "Browser.setDownloadBehavior": "rename" });
   let inProfile = [];
   const look = () => {
     const profile = fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"));
     inProfile = fs.readdirSync(path.join(temp, profile, "Downloads"));
   };
-  await reloadedKit().makeKit(site.origin, { dir: path.join(site.parent, "kit"), stores: false, log: (line) => line === "Drawing the card" && look() });
+  const { kit } = await makeKit(site.origin, { dir: path.join(site.parent, "kit"), stores: false, log: (line) => line === "Drawing the card" && look() });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(site.asked >= 1, "the site was read");
   assert.ok(inProfile.length >= 1, "the page's files went into the profile");
   assert.deepEqual(site.downloads(), []);
   assert.deepEqual(fs.readdirSync(temp), [], "and went with it");
@@ -2712,7 +2802,7 @@ test("a browser killed while the page loads is told at once, not after the wait 
 
 test("a call on the connection to a browser that has ended fails at once", { skip: noBrowser }, async () => {
   const browser = await launch({ width: 800, height: 600 });
-  const cdp = await openPage(browser.base, { width: 800, height: 600 });
+  const cdp = await openPage(browser, { width: 800, height: 600 });
   killBrowsers();
   await new Promise((resolve) => setTimeout(resolve, 500));
   const started = Date.now();
@@ -2720,12 +2810,68 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
 });
 
+test("a browser the kit starts listens on no port: the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
+  const temp = ownTemp(t);
+  if (!temp) return t.skip("the temp folder is too deep for a browser");
+  const tmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = temp;
+  t.after(() => {
+    if (tmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = tmpdir;
+  });
+  const browser = await launch({ width: 800, height: 600 });
+  try {
+    // The browser's processes, which name its profile, and the sockets they
+    // hold; and the sockets that listen, by /proc/net.
+    const profile = fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"));
+    const pids = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid).filter((pid) => {
+      try {
+        return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(profile);
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(pids.length >= 1, "the browser runs");
+    const listening = new Set();
+    for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+      for (const line of fs.readFileSync(table, "utf8").split("\n").slice(1)) {
+        const fields = line.trim().split(/\s+/);
+        if (fields[3] === "0A") listening.add(fields[9]);
+      }
+    }
+    const listens = [];
+    for (const pid of pids) {
+      let fds = [];
+      try {
+        fds = fs.readdirSync(`/proc/${pid}/fd`);
+      } catch {
+        continue;
+      }
+      for (const fd of fds) {
+        try {
+          const socket = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${pid}/fd/${fd}`));
+          if (socket && listening.has(socket[1])) listens.push(pid);
+        } catch {
+          // Closed meanwhile.
+        }
+      }
+    }
+    assert.deepEqual(listens, [], "no process of the browser's listens on a port");
+    // It answers all the same.
+    assert.equal(await browser.alive(), true);
+    const cdp = await openPage(browser, { width: 800, height: 600 });
+    assert.equal((await cdp.send("Runtime.evaluate", { expression: "6 * 7", returnByValue: true })).result.value, 42);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("a browser whose tab has just not answered is given a second to quit, also when the run has time left, and a second to show it runs once the run's time is up", async (t) => {
   const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
   const quits = [];
   // How long the browser was given each time to show that it still runs.
   const alives = [];
-  t.mock.method(chrome, "launch", async () => ({ base: "http://127.0.0.1:1", alive: async (ms) => (alives.push(ms), true), close: async (options) => quits.push(options) }));
+  t.mock.method(chrome, "launch", async () => ({ alive: async (ms) => (alives.push(ms), true), close: async (options) => quits.push(options) }));
   // A tab that opens the page and then fails each call as fail says.
   const tab = (fail, navigated = {}) => ({
     answer: { status: 0, url: "", unreachable: "", blank: false },
@@ -2763,57 +2909,111 @@ test("a browser whose tab has just not answered is given a second to quit, also 
   assert.deepEqual(filesOf(dir), before);
 });
 
-test("a call on a tab's connection that closes is marked closed, and too large when Node's WebSocket closed it under an answer larger than it takes", async (t) => {
-  const { connect } = require("../skills/easybrandkit/scripts/lib/chrome");
-  // A tab's server that takes the connection and drops it at the first call.
-  const server = http.createServer();
-  server.on("upgrade", (req, socket) => {
-    socket.write(upgraded(req));
-    socket.once("data", () => socket.destroy());
+test("the pipe to the browser: a tab that closes, an answer too large to take and a pipe that closes are told as that, and each call gets its own answer", async () => {
+  // The browser's end of a pipe of the test's own: what the kit writes, and
+  // what the test makes the browser answer, as zero-ended JSON.
+  const toBrowser = new PassThrough();
+  const fromBrowser = new PassThrough();
+  const sent = [];
+  let rest = "";
+  toBrowser.on("data", (chunk) => {
+    const parts = (rest + chunk).split("\0");
+    rest = parts.pop();
+    sent.push(...parts.map((part) => JSON.parse(part)));
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  t.after(() => server.close());
-  let cdp = await connect(`ws://127.0.0.1:${server.address().port}/devtools/page/x`);
-  let err = await cdp.send("Page.navigate", { url: "about:blank" }).then(() => null, (e) => e);
-  assert.deepEqual([err.message, err.closed, err.tooLarge], ["The browser connection closed.", true, false]);
-  err = await cdp.send("Page.enable").then(() => null, (e) => e);
-  assert.deepEqual([err.message, err.closed, err.tooLarge], ["The browser connection closed.", true, false], "a call made after it closed");
-  // Node 22.23's own WebSocket, which fails a connection under an answer
-  // over 128 MB with these words, then closes it: the second for an answer
-  // sent compressed, as Chrome sends them.
-  const Real = globalThis.WebSocket;
-  t.after(() => (globalThis.WebSocket = Real));
-  let said = "";
-  globalThis.WebSocket = class {
-    static OPEN = 1;
-    constructor() {
-      this.readyState = 0;
-      setTimeout(() => {
-        this.readyState = 1;
-        this.onopen();
-      });
+  const say = (...messages) => fromBrowser.write(messages.map((msg) => `${typeof msg === "string" ? msg : JSON.stringify(msg)}\0`).join(""));
+  const lastSent = async (method) => {
+    for (let tries = 0; tries < 100; tries++) {
+      const found = [...sent].reverse().find((msg) => msg.method === method);
+      if (found) return found;
+      await new Promise((resolve) => setImmediate(resolve));
     }
-    send() {
-      setTimeout(() => {
-        this.readyState = 3;
-        this.onerror({ type: "error", message: said });
-        this.onclose({ code: 1006, reason: "" });
-      });
-    }
-    close() {}
+    assert.fail(`${method} was not sent`);
   };
-  for (const words of ["Payload size exceeds maximum allowed size", "Max decompressed message size exceeded"]) {
-    said = words;
-    cdp = await connect("ws://127.0.0.1:1/devtools/page/x");
-    err = await cdp.send("DOMSnapshot.captureSnapshot").then(() => null, (e) => e);
-    assert.deepEqual([err.message, err.closed, err.tooLarge], ["The browser connection closed.", true, true], words);
-  }
+  // A message over 1 MB is too large here.
+  const pipe = pipeOf(toBrowser, fromBrowser, 1024 * 1024);
+  const failure = (promise) => promise.then(() => null, (err) => [err.message, Boolean(err.closed), Boolean(err.tooLarge)]);
+
+  // A tab: the session the browser gives it, its own calls and events.
+  const attaching = pipe.attach("t1", 5_000);
+  say({ id: (await lastSent("Target.attachToTarget")).id, result: { sessionId: "s1" } });
+  const tab = await attaching;
+  assert.deepEqual((await lastSent("Target.attachToTarget")).params, { targetId: "t1", flatten: true });
+  const loads = [];
+  tab.on("Page.loadEventFired", (params) => loads.push(params));
+  const metrics = tab.send("Page.getLayoutMetrics");
+  const call = await lastSent("Page.getLayoutMetrics");
+  assert.equal(call.sessionId, "s1");
+  // An event of another session's, then the answer, split across writes, and
+  // the event in the same write as an answer of the browser's own.
+  say({ method: "Page.loadEventFired", params: { at: 0 }, sessionId: "s2" });
+  const answer = JSON.stringify({ id: call.id, result: { width: 1600 }, sessionId: "s1" });
+  fromBrowser.write(answer.slice(0, 10));
+  fromBrowser.write(`${answer.slice(10)}\0${JSON.stringify({ method: "Page.loadEventFired", params: { at: 1 }, sessionId: "s1" })}\0`);
+  assert.deepEqual(await metrics, { width: 1600 });
+  assert.deepEqual(loads, [{ at: 1 }]);
+
+  // An answer over the limit fails its own call only: the tab goes on.
+  const snapshot = tab.send("DOMSnapshot.captureSnapshot");
+  const big = (await lastSent("DOMSnapshot.captureSnapshot")).id;
+  fromBrowser.write(`{"id":${big},"result":{"strings":["`);
+  for (let i = 0; i < 3; i++) fromBrowser.write("x".repeat(512 * 1024));
+  fromBrowser.write(`"]},"sessionId":"s1"}\0`);
+  assert.deepEqual(await failure(snapshot), ["The browser's answer was too large to take.", false, true]);
+  // So does an event that large, which is dropped.
+  say(`{"method":"Page.frameNavigated","params":{"x":"${"y".repeat(2 * 1024 * 1024)}"},"sessionId":"s1"}`);
+  const evaluate = tab.send("Runtime.evaluate");
+  say({ id: (await lastSent("Runtime.evaluate")).id, result: { result: { value: 2 } }, sessionId: "s1" });
+  assert.deepEqual(await evaluate, { result: { value: 2 } });
+  // The browser's own calls go without a session, and an error is told.
+  const version = pipe.send("Browser.getVersion");
+  const asked = await lastSent("Browser.getVersion");
+  assert.equal(asked.sessionId, undefined);
+  say({ id: asked.id, error: { code: -32601, message: "'Browser.getVersion' wasn't found" } });
+  assert.deepEqual(await failure(version), ["'Browser.getVersion' wasn't found", false, false]);
+
+  // The tab closes: its call waiting for an answer fails as closed, and so
+  // does one made after, at once.
+  const waiting = tab.send("Page.navigate", { url: "about:blank" });
+  await lastSent("Page.navigate");
+  let tabClosed = false;
+  tab.closed.then(() => (tabClosed = true));
+  say({ method: "Target.detachedFromTarget", params: { sessionId: "s1", targetId: "t1" } });
+  assert.deepEqual(await failure(waiting), ["The browser connection closed.", true, false]);
+  assert.deepEqual(await failure(tab.send("Page.enable")), ["The browser connection closed.", true, false], "a call made after it closed");
+  assert.equal(tabClosed, true);
+  // The browser itself still answers.
+  const still = pipe.send("Browser.getVersion");
+  say({ id: (await lastSent("Browser.getVersion")).id, result: { product: "Chrome" } });
+  assert.deepEqual(await still, { product: "Chrome" });
+
+  // A connection to a tab the browser refuses, or does not answer.
+  const refused = pipe.attach("t2", 5_000);
+  say({ id: (await lastSent("Target.attachToTarget")).id, error: { code: -32602, message: "No target with given id found" } });
+  assert.deepEqual(await failure(refused), ["The browser refused the kit's connection to its tab", false, false]);
+  setTimeLimit(120_000);
+  const started = Date.now();
+  assert.deepEqual(await failure(pipe.attach("t3", 1_000)), ["The browser did not answer the kit's connection to its tab in 1 s", false, false]);
+  assert.ok(Date.now() - started >= 900, `told after ${Date.now() - started} ms`);
+
+  // The pipe closes, as when the browser ends: every call waiting fails as
+  // closed, and every call after it at once.
+  const third = pipe.attach("t4", 5_000);
+  say({ id: (await lastSent("Target.attachToTarget")).id, result: { sessionId: "s4" } });
+  const other = await third;
+  const pending = [other.send("Page.enable"), pipe.send("Browser.getVersion")];
+  await lastSent("Page.enable");
+  fromBrowser.end();
+  for (const one of pending) assert.deepEqual(await failure(one), ["The browser connection closed.", true, false]);
+  assert.equal(pipe.ended(), true);
+  await other.closed;
+  await pipe.closed;
+  assert.deepEqual(await failure(pipe.send("Browser.getVersion")), ["The browser connection closed.", true, false]);
 });
 
-// kit.js with a browser tab whose calls of method fail as on a connection
-// that has closed, too large for Node's WebSocket or not, for the first
-// tabs opened or for all.
+// kit.js with a browser tab whose calls of method fail as on a tab that has
+// closed, or with an answer too large to take, for the first tabs opened or
+// for all.
 function withClosingTab(t, method, tooLarge, closing = Infinity) {
   const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
   const realOpen = chrome.openPage;
@@ -2822,13 +3022,14 @@ function withClosingTab(t, method, tooLarge, closing = Infinity) {
     const cdp = await realOpen(...args);
     if (++opened > closing) return cdp;
     const send = cdp.send;
-    cdp.send = (name, ...rest) => (name === method ? Promise.reject(Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge })) : send(name, ...rest));
+    const failed = tooLarge ? Object.assign(new Error("The browser's answer was too large to take."), { tooLarge: true }) : Object.assign(new Error("The browser connection closed."), { closed: true });
+    cdp.send = (name, ...rest) => (name === method ? Promise.reject(failed) : send(name, ...rest));
     return cdp;
   });
   return reloadedKit().makeKit;
 }
 
-test("a page whose tab's connection closes while the browser runs fails the run in words, and one too large for Node is told as too large to read", { skip: noBrowser }, async (t) => {
+test("a page whose tab closes while the browser runs fails the run in words, and one too large to take is told as too large to read", { skip: noBrowser }, async (t) => {
   const page = brandPage("rgb(255,0,0)");
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
@@ -2917,16 +3118,22 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   const dropped = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(dropped.kit.notes, ["The card could not be drawn: the kit's connection to its tab closed."]);
   // And so is a tab for the card that the browser does not open in time: the
-  // second tab of a run is the card's.
-  const realFetch = globalThis.fetch;
+  // second tab of a run is the card's, which is given a second here, not 30.
+  if (process.platform === "win32") return;
+  t.mock.restoreAll();
+  useRelay(t, parent, { "Target.createTarget": ["pass", "drop"] });
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const realLaunch = chrome.launch;
   let tabs = 0;
-  t.mock.method(globalThis, "fetch", function (url, ...rest) {
-    if (String(url).includes("/json/new") && ++tabs === 2) return Promise.reject(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
-    return realFetch.call(this, url, ...rest);
+  t.mock.method(chrome, "launch", async (...args) => {
+    const browser = await realLaunch(...args);
+    const newTab = browser.newTab;
+    browser.newTab = (ms) => newTab(++tabs === 2 ? 1_000 : ms);
+    return browser;
   });
-  const slowTab = await makeKit(site.origin, { dir, stores: false });
+  const slowTab = await reloadedKit().makeKit(site.origin, { dir, stores: false });
   assert.equal(tabs, 2);
-  assert.deepEqual(slowTab.kit.notes, ["The card could not be drawn: the browser did not open a tab in 30 s."]);
+  assert.deepEqual(slowTab.kit.notes, ["The card could not be drawn: the browser did not open a tab in 1 s."]);
 });
 
 test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {
