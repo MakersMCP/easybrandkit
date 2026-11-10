@@ -18,8 +18,8 @@
 const fs = require("fs");
 const path = require("path");
 const { Worker } = require("worker_threads");
-const { navigate, inOwnWorld } = require("./chrome");
-const { localByForm } = require("./address");
+const { navigate, seenOf, inOwnWorld } = require("./chrome");
+const { localByForm, onLocalNetwork, mayOpen, sameHost, portOf, LOCAL } = require("./address");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
@@ -220,15 +220,18 @@ const LONG_WORDS = 400;
 
 // One page for each subject from the links the home page shows, on the
 // same site: web pages only, on the home page's host, and on its port too
-// when that host is this machine or on a private network, where another
-// port is another program. A link whose words and address both fit wins,
-// then one in the menu or the footer, then the shorter address.
-function pickPages(model, home) {
+// when that host is on this machine or on a private network (local, which
+// readFactPages works out by what the host's name is found at too), where
+// another port is another program. A port is compared as a browser uses it,
+// so http://127.0.0.1/ is on port 80 and https://127.0.0.1/ on 443, and this
+// machine's own names on one port are one host (see address.js). A link
+// whose words and address both fit wins, then one in the menu or the footer,
+// then the shorter address.
+function pickPages(model, home, { local = localByForm(new URL(home)) } = {}) {
   const page = pageOf({ model });
   const homeUrl = new URL(home);
   const homePath = noEndSlashes(homeUrl.pathname);
   const homeSite = hostOf(home);
-  const local = localByForm(homeUrl);
   const best = new Map();
   for (const node of page.all) {
     if (node.tag !== "a" || !node.href || node.href.length > LONG_LINK || node.hidden) continue;
@@ -242,8 +245,8 @@ function pickPages(model, home) {
     } catch {
       continue;
     }
-    if (!/^https?:$/.test(url.protocol) || siteOf(url) !== homeSite || noEndSlashes(url.pathname) === homePath) continue;
-    if (local && url.port !== homeUrl.port) continue;
+    if (!/^https?:$/.test(url.protocol) || (siteOf(url) !== homeSite && !sameHost(url, homeUrl)) || noEndSlashes(url.pathname) === homePath) continue;
+    if (local && portOf(url) !== portOf(homeUrl)) continue;
     if (/\.(pdf|zip|png|jpe?g|gif|svg|webp|mp4|dmg|exe)$/i.test(url.pathname)) continue;
     const text = textOf(page, node).length > LONG_WORDS ? "" : lineOf(page, node);
     for (const [role, byText, byPath] of ROLES) {
@@ -386,22 +389,63 @@ const PAGE_TIME = 45_000;
 // 10 s), while the run has time for it. The page the kit read is read in any
 // case; the pages easybrandkit picks follow robots.txt. That page is filed as
 // the home page, or under role, "given" for an address deeper in the site
-// that was read as given because its home page could not be read.
-async function readFactPages(cdp, home, log, { role = "home" } = {}) {
+// that was read as given because its home page could not be read. given is
+// the address the user gave: a page on this machine or a private network is
+// opened or read only on its host and port (see address.js).
+async function readFactPages(cdp, home, log, { role = "home", given = home } = {}) {
   const pages = [];
   const skipped = [];
   // A page the server answered with an error, or that the browser could not
   // open, also after it has moved on: its text is not the site's page.
   const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "");
+  const homeUrl = new URL(home);
+  // Whether the home page's host is on this machine or a private network,
+  // by what its name is found at too: another port of it is another program.
+  const local = await onLocalNetwork(homeUrl, seenOf(cdp, home));
+  // An address off the site that pickPages keeps to.
+  const elsewhere = (raw) => {
+    try {
+      const url = new URL(raw);
+      if (sameHost(url, homeUrl)) return false;
+      return hostOf(raw) !== hostOf(home) || (local && portOf(url) !== portOf(homeUrl));
+    } catch {
+      return true;
+    }
+  };
+  // The address the tab is at now, as the browser lists it: "" when the tab
+  // does not say in a few seconds, as the other addresses are looked at.
+  const tabAt = async () => {
+    try {
+      const { currentIndex, entries } = await cdp.send("Page.getNavigationHistory", {}, 5_000);
+      return (entries[currentIndex] || {}).url || "";
+    } catch {
+      return "";
+    }
+  };
+  // Why the tab's page, at the addresses it gives, is not to be read: it is
+  // off the site, or on this machine or a private network where the kit
+  // reads nothing for the address given. "" when it is neither.
+  const away = async (addresses) => {
+    for (const at of new Set(addresses.filter(Boolean))) {
+      if (elsewhere(at)) return `it led to ${at}`;
+      if (!(await mayOpen(at, given, seenOf(cdp, at)))) return `it led to ${at}, which ${LOCAL}`;
+    }
+    return "";
+  };
   log("Reading the page's claims");
+  // The page the kit read is read again as it left it only while it is that
+  // page: a page can move on by its own script once the kit has read it. So
+  // where the tab is, and where the text read came from, are looked at before
+  // and after its text is read.
+  const left = notThePage() || (await away([await tabAt(), cdp.answer.url]));
+  if (left) return { pages, skipped: [{ role, url: home, reason: left }] };
   const model = await readModel(cdp).catch(() => null);
-  // A page that has moved on since the kit read it is not read as that page.
-  const notHome = notThePage() || (model && model.tree ? "" : "its text could not be read");
+  const notHome = notThePage() || (await away([model && model.url, await tabAt(), cdp.answer.url])) || (model && model.tree ? "" : "its text could not be read");
   if (notHome) return { pages, skipped: [{ role, url: home, reason: notHome }] };
   pages.push({ role, url: home, readAt: new Date().toISOString(), model });
-  const picks = pickPages(model, home);
+  const picks = pickPages(model, home, { local });
   if (!picks.length) return { pages, skipped };
-  const robots = await readRobots(new URL(home).origin);
+  const robots = await readRobots(homeUrl.origin);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
   // Once the tab's connection has closed, no page can be read in it: each
   // page not tried yet is named with the reason, and no pause is waited for.
@@ -412,18 +456,6 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
   let closedOn = "";
   cdp.closed.then(() => (ended = true));
   const notOpen = () => (closedOn ? `the kit's connection to its tab closed while the ${closedOn} page was read` : "the kit's connection to its tab had closed");
-  // An address off the site that pickPages keeps to.
-  const homeUrl = new URL(home);
-  const local = localByForm(homeUrl);
-  const elsewhere = (raw) => {
-    if (!raw) return false;
-    try {
-      const url = new URL(raw);
-      return hostOf(raw) !== hostOf(home) || (local && url.port !== homeUrl.port);
-    } catch {
-      return true;
-    }
-  };
   for (const pick of picks) {
     if (robots.error) {
       skipped.push({ ...pick, reason: `${robots.error}, so no page past the home page was read` });
@@ -441,6 +473,12 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
       skipped.push({ ...pick, reason: `too little of the run's time was left to read it, as a page past the home page is read only while ${PAGE_TIME / 1_000} s are left; give --timeout more seconds` });
       continue;
     }
+    // On a host its name is found on this machine or a private network for,
+    // a menu page is opened only when it is the host and port given.
+    if (!(await mayOpen(pick.url, given))) {
+      skipped.push({ ...pick, reason: `it ${LOCAL}, which easybrandkit does not open on its own` });
+      continue;
+    }
     let timer;
     await Promise.race([new Promise((resolve) => (timer = setTimeout(resolve, pause))), cdp.closed]);
     clearTimeout(timer);
@@ -451,8 +489,9 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
     log(`Reading the ${pick.role} page`);
     try {
       const at = await navigate(cdp, pick.url);
-      if (elsewhere(at)) {
-        skipped.push({ ...pick, reason: `it led to ${at}` });
+      const led = await away([at, cdp.answer.url]);
+      if (led) {
+        skipped.push({ ...pick, reason: led });
         continue;
       }
       if (notThePage()) {
@@ -468,9 +507,11 @@ async function readFactPages(cdp, home, log, { role = "home" } = {}) {
         skipped.push({ ...pick, reason: notThePage() });
         continue;
       }
-      // A page that has moved itself off the site since it loaded.
-      if (elsewhere(cdp.answer.url)) {
-        skipped.push({ ...pick, reason: `it led to ${cdp.answer.url}` });
+      // A page that has moved itself off the site, or to this machine or a
+      // private network, since it loaded, also as its text was read.
+      const moved = await away([read && read.url, await tabAt(), cdp.answer.url]);
+      if (moved) {
+        skipped.push({ ...pick, reason: moved });
         continue;
       }
       if (!read || !read.tree || CHALLENGE_TITLE.test(read.title || "")) {

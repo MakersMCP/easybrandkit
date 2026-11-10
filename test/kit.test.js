@@ -2480,6 +2480,47 @@ test("a tab that stops answering is told in words, and more time is advised only
   assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
+test("with --facts, the page the kit read is read for its claims only while it is still that page, and the card's tab does not tell it that it is hidden", { skip: noBrowser }, async (t) => {
+  const other = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Internal console</title><header><a href="/">${svg("rgb(0,0,255)", 120, 30)}</a></header><main><h1>Admin console</h1><p>SECRET-TOKEN-4242 is the password of the staging database.</p></main>`));
+  let home = "";
+  const when = held();
+  const site = await serve((req, res) => {
+    if (req.url === "/when") return when.ask(res);
+    res.writeHead(200, { "content-type": "text/html" }).end(home);
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    other.server.close();
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const away = `${other.origin}/`;
+  const url = `${site.origin}/`;
+  // A page that moves on to another program once it is hidden stays where it
+  // is: the card is drawn in a tab in the background.
+  home = brandPage("rgb(255,0,0)").replace("</body>", `<script>document.addEventListener("visibilitychange", () => { if (document.hidden) location.replace("${away}"); })</script></body>`);
+  const hidden = path.join(parent, "hidden");
+  const { facts } = await makeKit(site.origin, { dir: hidden, stores: false, facts: true });
+  assert.deepEqual(facts.pages.map((one) => [one.role, one.url, one.title]), [["home", url, "Acme"]]);
+  assert.deepEqual(facts.skipped, []);
+  // A page that moves on there once the kit has read it, here as the card is
+  // drawn, is not read for its claims, and FACTS.md says where it went.
+  home = brandPage("rgb(255,0,0)").replace("</body>", `<script>fetch("/when").then(() => location.replace("${away}"))</script></body>`);
+  const moved = path.join(parent, "moved");
+  const { kit, facts: left } = await makeKit(site.origin, { dir: moved, stores: false, facts: true, log: (line) => line === "Drawing the card" && when.release() });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.deepEqual(left.pages, []);
+  assert.deepEqual(left.skipped, [{ role: "home", url, reason: `it led to ${away}` }]);
+  assert.ok(fs.readFileSync(path.join(moved, "FACTS.md"), "utf8").includes(`Not read: the home page, <${url}>: it led to ${away}.`));
+  // Nothing of the other program's page is in either kit.
+  for (const dir of [hidden, moved]) {
+    for (const entry of filesOf(dir).filter((one) => !one.endsWith("/"))) {
+      const file = entry.slice(0, entry.lastIndexOf(" "));
+      assert.doesNotMatch(fs.readFileSync(path.join(dir, file), "latin1"), /SECRET-TOKEN|Admin console|Internal console/, `${dir}: ${file}`);
+    }
+  }
+});
+
 test("through a proxy, which the browser does not tell past, the kit's own lookup says where a page is", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {

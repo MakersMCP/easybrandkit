@@ -435,10 +435,12 @@ async function launch({ width, height }) {
       return !exited && Boolean(err.timedOut);
     }
   };
-  // A new tab, waited for ms at most: its id.
-  const newTab = async (ms) => {
+  // A new tab, waited for ms at most: its id. One opened in the background
+  // leaves the tab in front as it was: a page there is not told that it is
+  // hidden, which it can answer by moving on.
+  const newTab = async (ms, { background = false } = {}) => {
     try {
-      const { targetId } = await pipe.send("Target.createTarget", { url: "about:blank" }, ms);
+      const { targetId } = await pipe.send("Target.createTarget", { url: "about:blank", ...(background ? { background: true } : {}) }, ms);
       return targetId;
     } catch (err) {
       if (err.timedOut) throw noAnswer("The browser did not open a tab", ms);

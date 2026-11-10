@@ -312,7 +312,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     // links to: the kit is made the same way with or without them. A page
     // read as given is not filed as the home page.
     const role = deeper ? "given" : "home";
-    const factPages = facts ? await readFactPages(cdp, pageUrl, log, { role }).catch((err) => ({ pages: [], skipped: [{ role, url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
+    const factPages = facts ? await readFactPages(cdp, pageUrl, log, { role, given }).catch((err) => ({ pages: [], skipped: [{ role, url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
     // A browser that was killed or crashed on the way has left the kit
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.

@@ -64,13 +64,15 @@ function cardHtml(kit, dir) {
   </div></body></html>`;
 }
 
-// Drawn in a new tab of the browser the kit was read with. The tab and the
-// connection to it are waited for 30 s at most, or what the run has left: a
-// kit can do without its card, and the claims still to be read need time.
+// Drawn in a new tab of the browser the kit was read with, opened in the
+// background, so the page's own tab, whose claims can still be read, is not
+// told that it is hidden. The tab and the connection to it are waited for
+// 30 s at most, or what the run has left: a kit can do without its card, and
+// the claims still to be read need time.
 const CARD_WAIT = 30_000;
 
 async function renderCard(chrome, kit, dir) {
-  const target = await chrome.newTab(browserWait(CARD_WAIT));
+  const target = await chrome.newTab(browserWait(CARD_WAIT), { background: true });
   try {
     const cdp = await chrome.attach(target, browserWait(CARD_WAIT));
     await cdp.send("Page.enable");

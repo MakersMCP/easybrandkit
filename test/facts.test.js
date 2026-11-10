@@ -5,6 +5,7 @@
 // when none is installed) against a small site served from this process.
 
 const assert = require("node:assert/strict");
+const dns = require("node:dns");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
@@ -236,6 +237,16 @@ test("pages to read are web pages only, and on a host of this machine or of a pr
   // A public host's own pages can be on another port or scheme, and a file
   // it names is not read either.
   assert.deepEqual(pickPages(menu("https://acme.test/", ["file://acme.test/etc/pricing", "Pricing"], ["http://acme.test:8080/customers", "Customers"]), "https://acme.test/"), [{ role: "customers", url: "http://acme.test:8080/customers" }]);
+  // A port is the one the browser uses: https on this machine is port 443,
+  // another program than the home page's http on port 80.
+  const plain = pickPages(menu("http://127.0.0.1/", ["https://127.0.0.1/pricing", "Pricing"], ["http://127.0.0.1:80/customers", "Customers"]), "http://127.0.0.1/");
+  assert.deepEqual(plain, [{ role: "customers", url: "http://127.0.0.1/customers" }]);
+  // This machine's own names on one port are one host: localhost's pages
+  // are the site of 127.0.0.1's on its port, and on no other.
+  assert.deepEqual(pickPages(menu("http://127.0.0.1:8737/", ["http://localhost:8737/pricing", "Pricing"], ["http://localhost:9222/about", "About"]), "http://127.0.0.1:8737/"), [{ role: "pricing", url: "http://localhost:8737/pricing" }]);
+  // A host by name is on this machine or a private network when readFactPages
+  // finds it there.
+  assert.deepEqual(pickPages(menu("http://dev.test:8737/", ["http://dev.test:9222/pricing", "Pricing"], ["http://dev.test:8737/customers", "Customers"]), "http://dev.test:8737/", { local: true }), [{ role: "customers", url: "http://dev.test:8737/customers" }]);
 });
 
 test("a page that is not a web page is not opened", async () => {
@@ -586,17 +597,24 @@ test("what comes back from a page is looked at again here: no control character 
   assert.ok(md.includes(`<${story.link}>`), md);
 });
 
-test("a home page that has moved on since the kit read it is not read as the home page", async () => {
+test("a home page that has moved on since the kit read it is not read as the home page", async (t) => {
   setTimeLimit(120_000);
+  // The bare name is found on a private network; the others on the web.
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "acme.test" ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
   const home = model("https://acme.test/", [el("h1", {}, "Service Unavailable")]);
-  const tab = (model_, after) => {
+  // A tab on the page the kit read; after changes it as the page's text is
+  // read, and at says where the browser lists the tab before that.
+  let reads = 0;
+  const tab = (model_, after, at = "") => {
     const cdp = {
-      answer: { status: 200, url: "https://acme.test/", unreachable: "", blank: false },
+      answer: { status: 200, url: model_ && model_.url ? model_.url : "https://acme.test/", unreachable: "", blank: false },
       closed: new Promise(() => {}),
       on: () => {},
       send: async (method, params = {}) => {
         if (WORLD[method]) return WORLD[method];
+        if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at || cdp.answer.url }] };
         if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+          reads++;
           if (after) after(cdp.answer);
           return { result: { value: model_ } };
         }
@@ -605,8 +623,8 @@ test("a home page that has moved on since the kit read it is not read as the hom
     };
     return cdp;
   };
-  const skippedOf = async (cdp) => {
-    const read = await readFactPages(cdp, "https://acme.test/", () => {});
+  const skippedOf = async (cdp, url = "https://acme.test/") => {
+    const read = await readFactPages(cdp, url, () => {}, { given: url });
     assert.deepEqual(read.pages, []);
     return read.skipped.map((one) => [one.role, one.url, one.reason]);
   };
@@ -616,6 +634,29 @@ test("a home page that has moved on since the kit read it is not read as the hom
   assert.deepEqual(await skippedOf(tab(home, (answer) => (answer.unreachable = "http://acme.test:9/"))), [["home", url, "it could not be opened"]]);
   assert.deepEqual(await skippedOf(tab({ url, title: "", jsonLd: [], tree: null })), [["home", url, "its text could not be read"]]);
   assert.deepEqual(await skippedOf(tab(null)), [["home", url, "its text could not be read"]]);
+  // A page that moved on by its own script once the kit read it, off the
+  // site or to another program on this machine, before its text is read:
+  // nothing of it is read.
+  reads = 0;
+  assert.deepEqual(await skippedOf(tab(home, null, "http://127.0.0.1:9222/json/list")), [["home", url, "it led to http://127.0.0.1:9222/json/list"]]);
+  assert.deepEqual(await skippedOf(tab(home, null, "https://other.test/")), [["home", url, "it led to https://other.test/"]]);
+  assert.equal(reads, 0);
+  // The same as its text is read: by where the text came from, or where the
+  // tab is after.
+  assert.deepEqual(await skippedOf(tab({ ...home, url: "http://127.0.0.1:9222/" })), [["home", url, "it led to http://127.0.0.1:9222/"]]);
+  assert.deepEqual(await skippedOf(tab(home, (answer) => (answer.url = "https://other.test/inside"))), [["home", url, "it led to https://other.test/inside"]]);
+  // On the site's own name, found on a private network, when the address
+  // given is www's: what the kit's lookup finds, or where the browser says
+  // it got the page, though its name is found on the web.
+  const www = model("https://www.acme.test/", [el("h1", {}, "Acme")]);
+  assert.deepEqual(await skippedOf(tab(www, null, "https://acme.test/"), "https://www.acme.test/"), [["home", "https://www.acme.test/", "it led to https://acme.test/, which is on a local or private network"]]);
+  const bare = model("https://acme.test/", [el("h1", {}, "Acme")]);
+  const rebound = tab(bare, (answer) => Object.assign(answer, { url: "https://www.acme.test/x", space: "Loopback", ip: "127.0.0.1" }));
+  assert.deepEqual(await skippedOf(rebound), [["home", url, "it led to https://www.acme.test/x, which is on a local or private network"]]);
+  // A page that stays on the site is read, wherever on it.
+  const shop = model("https://www.acme.test/shop", [el("h1", {}, "Acme")]);
+  const stays = await readFactPages(tab(shop, null, "https://www.acme.test/shop"), "https://www.acme.test/", () => {}, { given: "https://www.acme.test/" });
+  assert.deepEqual(stays.pages.map((one) => one.role), ["home"]);
 });
 
 test("a browser that ends during --facts is not waited for through the site's crawl delay", async (t) => {
@@ -735,6 +776,82 @@ test("a menu page that leads off the site, or moves itself there once it has loa
       { role: "customers", url: `${base}/customers`, reason: `it led to ${away}` },
     ], base);
   }
+});
+
+test("a menu page whose name is found on this machine or a private network is opened only on the host and port given, and one that leads there is not read", async (t) => {
+  setTimeLimit(120_000);
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  // dev.test is this machine's own name; acme.test is the site's bare name,
+  // found on a private network, and www.acme.test is the site on the web.
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "dev.test" ? "127.0.1.1" : host === "acme.test" ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
+  // A tab whose pages lead where redirects says, and move where moves says
+  // as their text is read, each page read as a page. read lists where each
+  // text read came from.
+  const tabOn = (home, redirects = {}, moves = {}) => {
+    let at = home.url;
+    let loaded = () => {};
+    const opened = [];
+    const read = [];
+    const cdp = {
+      opened,
+      read,
+      answer: { status: 200, url: home.url, unreachable: "", blank: false },
+      closed: new Promise(() => {}),
+      on: (method, listener) => {
+        if (method === "Page.loadEventFired") loaded = listener;
+      },
+      send: async (method, params = {}) => {
+        if (WORLD[method]) return WORLD[method];
+        if (method === "Page.navigate") {
+          opened.push(params.url);
+          at = redirects[params.url] || params.url;
+          cdp.answer.url = at;
+          loaded();
+          return {};
+        }
+        if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
+        if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+          read.push(at);
+          const value = at === home.url ? home : model(at, [el("h1", {}, "Page")]);
+          if (moves[at]) cdp.answer.url = at = moves[at];
+          return { result: { value } };
+        }
+        if (method === "Runtime.evaluate") return { result: { value: "" } };
+        if (method === "DOMSnapshot.captureSnapshot") return { documents: [{ nodes: { nodeName: [0] } }], strings: ["A"] };
+        return {};
+      },
+    };
+    return cdp;
+  };
+  const nav = (url, ...links) => model(url, [el("nav", { region: "nav" }, ...links.map(([href, words]) => link(href, words)))]);
+  // Given by this machine's own name: another port of it is another program,
+  // also the http port when the home page is on another.
+  const dev = tabOn(nav("http://dev.test:8737/", ["http://dev.test:9222/pricing", "Pricing"], ["http://dev.test/about", "About"], ["http://dev.test:8737/customers", "Customers"]));
+  const local = await readFactPages(dev, "http://dev.test:8737/", () => {}, { given: "http://dev.test:8737/" });
+  assert.deepEqual(local.pages.map((one) => one.role), ["home", "customers"]);
+  assert.deepEqual(local.skipped, []);
+  assert.deepEqual(dev.opened, ["http://dev.test:8737/customers"]);
+  // Given by 127.0.0.1, a page by another name of this machine on the same
+  // port is the site's own, also once it is opened.
+  const loop = tabOn(nav("http://127.0.0.1:8737/", ["http://localhost:8737/pricing", "Pricing"]));
+  const own = await readFactPages(loop, "http://127.0.0.1:8737/", () => {}, { given: "http://127.0.0.1:8737/" });
+  assert.deepEqual(own.pages.map((one) => [one.role, one.url]), [["home", "http://127.0.0.1:8737/"], ["pricing", "http://localhost:8737/pricing"]]);
+  assert.deepEqual(own.skipped, []);
+  // Given by the site's name on the web: a link to its bare name, found on a
+  // private network, is not opened, a page that leads there is not read, and
+  // one that moves there as its text is read is not kept.
+  const links = [["https://acme.test/pricing", "Pricing"], ["https://www.acme.test/customers", "Customers"], ["https://www.acme.test/security", "Security"], ["https://www.acme.test/about", "About"]];
+  const www = tabOn(nav("https://www.acme.test/", ...links), { "https://www.acme.test/customers": "https://acme.test/customers" }, { "https://www.acme.test/security": "https://acme.test/security" });
+  const site = await readFactPages(www, "https://www.acme.test/", () => {}, { given: "https://www.acme.test/" });
+  assert.deepEqual(site.pages.map((one) => one.role), ["home", "about"]);
+  assert.deepEqual(site.skipped, [
+    { role: "pricing", url: "https://acme.test/pricing", reason: "it is on a local or private network, which easybrandkit does not open on its own" },
+    { role: "customers", url: "https://www.acme.test/customers", reason: "it led to https://acme.test/customers, which is on a local or private network" },
+    { role: "security", url: "https://www.acme.test/security", reason: "it led to https://acme.test/security, which is on a local or private network" },
+  ]);
+  assert.deepEqual(www.opened, ["https://www.acme.test/customers", "https://www.acme.test/security", "https://www.acme.test/about"]);
+  // The page that led there was not read at all.
+  assert.deepEqual(www.read, ["https://www.acme.test/", "https://www.acme.test/security", "https://www.acme.test/about"]);
 });
 
 test("a menu page whose read fails is told on one line, and an exception in it not by what it says", async (t) => {
