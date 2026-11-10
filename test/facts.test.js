@@ -854,6 +854,54 @@ test("a menu page whose name is found on this machine or a private network is op
   assert.deepEqual(www.read, ["https://www.acme.test/", "https://www.acme.test/security", "https://www.acme.test/about"]);
 });
 
+test("robots.txt: its redirects are followed five at most, each only to a page the kit may open, and one to another program on this machine is never asked for", async (t) => {
+  setTimeLimit(120_000);
+  const asked = [];
+  const other = http.createServer((req, res) => {
+    asked.push(req.url);
+    res.writeHead(200, { "content-type": "text/plain" }).end("User-agent: *\nAllow: /\n");
+  });
+  await new Promise((resolve) => other.listen(0, "127.0.0.1", resolve));
+  let lead = "";
+  let last = 0;
+  const site = http.createServer((req, res) => {
+    // /hop/<n> leads on to /hop/<n+1>, and to the rules once n is last.
+    const hop = /^\/hop\/(\d+)$/.exec(req.url);
+    if (req.url === "/rules.txt") return res.writeHead(200, { "content-type": "text/plain" }).end("User-agent: *\nDisallow: /private\n");
+    if (hop) return res.writeHead(302, { location: Number(hop[1]) === last ? "/rules.txt" : `/hop/${Number(hop[1]) + 1}` }).end();
+    if (lead === "here") return res.writeHead(301, { location: "/rules.txt" }).end();
+    if (lead === "far") return res.writeHead(302, { location: "/hop/1" }).end();
+    if (lead === "away") return res.writeHead(302, { location: `http://127.0.0.1:${other.address().port}/robots.txt` }).end();
+    if (lead === "file") return res.writeHead(302, { location: "file:///etc/hosts" }).end();
+    if (lead === "data") return res.writeHead(302, { location: "data:text/plain,User-agent:%20*%0ADisallow:%20/" }).end();
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    other.close();
+    site.close();
+  });
+  const origin = `http://127.0.0.1:${site.address().port}`;
+  // A redirect on the site is followed, and so are five in a row; six are
+  // not.
+  const rules = { rules: [{ allow: false, path: "/private" }], delay: 0 };
+  lead = "here";
+  assert.deepEqual(await readRobots(origin, `${origin}/`), rules);
+  lead = "far";
+  last = 4;
+  assert.deepEqual(await readRobots(origin, `${origin}/`), rules);
+  last = 5;
+  assert.deepEqual(await readRobots(origin, `${origin}/`), { error: "its robots.txt could not be read" });
+  // Another port of this machine, or a file, is not asked for at all.
+  lead = "away";
+  assert.deepEqual(await readRobots(origin, `${origin}/`), { error: `its robots.txt led to http://127.0.0.1:${other.address().port}/robots.txt, which is on a local or private network` });
+  for (lead of ["file", "data"]) assert.deepEqual(await readRobots(origin, `${origin}/`), { error: "its robots.txt could not be read" }, lead);
+  assert.deepEqual(asked, []);
+  // Given that program's own address, it is asked.
+  assert.deepEqual(await readRobots(`http://127.0.0.1:${other.address().port}`, `http://127.0.0.1:${other.address().port}/`), { rules: [{ allow: true, path: "/" }], delay: 0 });
+  assert.deepEqual(asked, ["/robots.txt"]);
+});
+
 test("a menu page whose read fails is told on one line, and an exception in it not by what it says", async (t) => {
   setTimeLimit(120_000);
   t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));

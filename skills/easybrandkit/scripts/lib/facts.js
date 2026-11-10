@@ -362,20 +362,38 @@ async function firstBytes(res, limit) {
   return Buffer.concat(chunks).subarray(0, limit).toString("utf8");
 }
 
+// How many redirects of robots.txt are followed, as RFC 9309 asks.
+const ROBOTS_HOPS = 5;
+
 // A robots.txt the site does not have (4xx) lets every page be read; one
-// that cannot be read (5xx, no answer) lets none.
-async function readRobots(origin) {
+// that cannot be read (5xx, no answer) lets none. The kit asks for it
+// itself, so its redirects are followed one at a time, five at most, and
+// each only to a page the kit may open for the address the user gave
+// (given): one that leads to a page on this machine or a private network is
+// not asked for, and counts as a robots.txt that could not be read.
+async function readRobots(origin, given = origin) {
+  const headers = { "user-agent": `${AGENT}/${version} (+https://github.com/EminBudak/easybrandkit)` };
+  const signal = AbortSignal.timeout(Math.max(2_000, Math.min(10_000, timeLeft() - 30_000)));
+  let url = `${origin}/robots.txt`;
   try {
-    const res = await fetch(`${origin}/robots.txt`, {
-      headers: { "user-agent": `${AGENT}/${version} (+https://github.com/EminBudak/easybrandkit)` },
-      signal: AbortSignal.timeout(Math.max(2_000, Math.min(10_000, timeLeft() - 30_000))),
-    });
-    if (res.status >= 500) return { error: `its robots.txt answered with an error (HTTP ${res.status})` };
-    if (!res.ok) return { rules: [], delay: 0 };
-    return robotsRules(res.body ? await firstBytes(res, 500_000) : "");
+    for (let hop = 0; hop <= ROBOTS_HOPS; hop++) {
+      const res = await fetch(url, { headers, signal, redirect: "manual" });
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!location) {
+        if (res.status >= 500) return { error: `its robots.txt answered with an error (HTTP ${res.status})` };
+        if (!res.ok) return { rules: [], delay: 0 };
+        return robotsRules(res.body ? await firstBytes(res, 500_000) : "");
+      }
+      if (res.body) res.body.cancel().catch(() => {});
+      const next = new URL(location, url);
+      if (!/^https?:$/.test(next.protocol)) break;
+      if (!(await mayOpen(next.href, given))) return { error: `its robots.txt led to ${next.href}, which ${LOCAL}` };
+      url = next.href;
+    }
   } catch {
-    return { error: "its robots.txt could not be read" };
+    // Told below.
   }
+  return { error: "its robots.txt could not be read" };
 }
 
 // ---- Reading the pages ----
@@ -445,7 +463,7 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
   pages.push({ role, url: home, readAt: new Date().toISOString(), model });
   const picks = pickPages(model, home, { local });
   if (!picks.length) return { pages, skipped };
-  const robots = await readRobots(homeUrl.origin);
+  const robots = await readRobots(homeUrl.origin, given);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
   // Once the tab's connection has closed, no page can be read in it: each
   // page not tried yet is named with the reason, and no pause is waited for.
