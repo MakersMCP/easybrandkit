@@ -607,6 +607,15 @@ function killBrowsers() {
 // of the run's time, where more of it can help: such a run does not go on.
 const pageFailed = (message, what, spent = false) => Object.assign(new Error(message), { pageFailed: what, outOfTime: spent });
 
+// A call on a connection that has closed while the browser may still run,
+// marked closed. Node's own WebSocket closes it itself when an answer is
+// larger than it takes, 128 MB in Node 22.23, as the snapshot of a very large
+// page can be, and says so in its error: "Payload size exceeds maximum
+// allowed size", or, for an answer the browser sent compressed, as Chrome
+// does, "Max decompressed message size exceeded". Such a call is marked
+// tooLarge too.
+const connectionClosed = (why) => Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge: /(payload|message) size|exceeds maximum/i.test(why) });
+
 // A connection to the browser or to one of its tabs, waited for ms at most: a
 // browser that takes the connection and never answers it would otherwise
 // hold the run for minutes.
@@ -618,6 +627,8 @@ function connect(wsUrl, ms = browserWait()) {
     let nextId = 0;
     let markClosed;
     const closed = new Promise((done) => (markClosed = done));
+    // What the WebSocket said when it failed, for a call it leaves unanswered.
+    let failure = "";
     const timer = setTimeout(() => {
       reject(noAnswer("The browser did not answer the kit's connection to its tab", ms));
       ws.close();
@@ -646,12 +657,15 @@ function connect(wsUrl, ms = browserWait()) {
       clearTimeout(timer);
       reject(browserSaid("The browser refused the kit's connection to its tab"));
     };
-    ws.onerror = refused;
+    ws.onerror = (event) => {
+      failure = String((event && (event.message || (event.error && event.error.message))) || "");
+      refused();
+    };
     ws.onclose = () => {
       refused();
       for (const waiter of pending.values()) {
         clearTimeout(waiter.timer);
-        waiter.reject(new Error("The browser connection closed."));
+        waiter.reject(connectionClosed(failure));
       }
       pending.clear();
       markClosed();
@@ -664,7 +678,7 @@ function connect(wsUrl, ms = browserWait()) {
         send(method, params = {}, timeoutMs = 30_000) {
           // On a connection that has closed the message would be dropped
           // without a word, and only the timer would end the wait.
-          if (ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("The browser connection closed."));
+          if (ws.readyState !== WebSocket.OPEN) return Promise.reject(connectionClosed(failure));
           const id = ++nextId;
           return new Promise((res, rej) => {
             const timer = setTimeout(() => {

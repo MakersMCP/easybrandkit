@@ -253,7 +253,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
       // would otherwise go into the kit.
       if (err.syscall) throw err;
       const said = String(err.message || err);
-      cardError = err.timedOut ? "the browser tab stopped answering" : err.browserSaid ? said.charAt(0).toLowerCase() + said.slice(1) : said;
+      cardError = err.timedOut ? "the browser tab stopped answering" : err.closed ? "the kit's connection to its tab closed" : err.browserSaid ? said.charAt(0).toLowerCase() + said.slice(1) : said;
       return null;
     });
     // The claims last, from the page as the kit leaves it and the pages it
@@ -278,6 +278,10 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
       const spent = outOfTime();
       throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent);
     }
+    // The tab's connection closed while the browser runs: Node closes it
+    // under an answer too large for it, as a very large page's snapshot.
+    if (err.closed && err.tooLarge) throw pageFailed(`${url} is too large to read, so no kit was made.`, "is too large to read");
+    if (err.closed) throw new Error(`The kit's connection to the browser tab closed while it read ${url}, so no kit was made. Try again.`);
     throw err;
   } finally {
     // In this order: the browser refuses downloads only as long as this

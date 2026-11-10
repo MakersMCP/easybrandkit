@@ -439,7 +439,8 @@ async function readFactPages(cdp, home, log) {
       pages.push({ role: pick.role, url: at, readAt: new Date().toISOString(), model: read });
     } catch (err) {
       // The note that tells it names the address already, and is one line.
-      skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : plainText(String(err.message || err)) });
+      const closed = err.closed && (err.tooLarge ? "it is too large to read" : "the kit's connection to its tab closed");
+      skipped.push({ ...pick, reason: err.pageFailed ? `it ${err.pageFailed}` : err.timedOut ? "it stopped answering" : closed || plainText(String(err.message || err)) });
     }
   }
   return { pages, skipped };

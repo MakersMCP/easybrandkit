@@ -2697,6 +2697,98 @@ test("a browser whose tab has just not answered is given a second to quit, also 
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("a call on a tab's connection that closes is marked closed, and too large when Node's WebSocket closed it under an answer larger than it takes", async (t) => {
+  const { connect } = require("../skills/easybrandkit/scripts/lib/chrome");
+  // A tab's server that takes the connection and drops it at the first call.
+  const server = http.createServer();
+  server.on("upgrade", (req, socket) => {
+    socket.write(upgraded(req));
+    socket.once("data", () => socket.destroy());
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  let cdp = await connect(`ws://127.0.0.1:${server.address().port}/devtools/page/x`);
+  let err = await cdp.send("Page.navigate", { url: "about:blank" }).then(() => null, (e) => e);
+  assert.deepEqual([err.message, err.closed, err.tooLarge], ["The browser connection closed.", true, false]);
+  err = await cdp.send("Page.enable").then(() => null, (e) => e);
+  assert.deepEqual([err.message, err.closed, err.tooLarge], ["The browser connection closed.", true, false], "a call made after it closed");
+  // Node 22.23's own WebSocket, which fails a connection under an answer
+  // over 128 MB with these words, then closes it: the second for an answer
+  // sent compressed, as Chrome sends them.
+  const Real = globalThis.WebSocket;
+  t.after(() => (globalThis.WebSocket = Real));
+  let said = "";
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    constructor() {
+      this.readyState = 0;
+      setTimeout(() => {
+        this.readyState = 1;
+        this.onopen();
+      });
+    }
+    send() {
+      setTimeout(() => {
+        this.readyState = 3;
+        this.onerror({ type: "error", message: said });
+        this.onclose({ code: 1006, reason: "" });
+      });
+    }
+    close() {}
+  };
+  for (const words of ["Payload size exceeds maximum allowed size", "Max decompressed message size exceeded"]) {
+    said = words;
+    cdp = await connect("ws://127.0.0.1:1/devtools/page/x");
+    err = await cdp.send("DOMSnapshot.captureSnapshot").then(() => null, (e) => e);
+    assert.deepEqual([err.message, err.closed, err.tooLarge], ["The browser connection closed.", true, true], words);
+  }
+});
+
+// kit.js with a browser tab whose calls of method fail as on a connection
+// that has closed, too large for Node's WebSocket or not, for the first
+// tabs opened or for all.
+function withClosingTab(t, method, tooLarge, closing = Infinity) {
+  const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
+  const realOpen = chrome.openPage;
+  let opened = 0;
+  t.mock.method(chrome, "openPage", async (...args) => {
+    const cdp = await realOpen(...args);
+    if (++opened > closing) return cdp;
+    const send = cdp.send;
+    cdp.send = (name, ...rest) => (name === method ? Promise.reject(Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge })) : send(name, ...rest));
+    return cdp;
+  });
+  return reloadedKit().makeKit;
+}
+
+test("a page whose tab's connection closes while the browser runs fails the run in words, and one too large for Node is told as too large to read", { skip: noBrowser }, async (t) => {
+  const page = brandPage("rgb(255,0,0)");
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const url = `${site.origin}/`;
+  let make = withClosingTab(t, "DOMSnapshot.captureSnapshot", true);
+  await assert.rejects(make(site.origin, { dir, stores: false }), (err) => err.message === `${url} is too large to read, so no kit was made.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  t.mock.restoreAll();
+  make = withClosingTab(t, "Page.getLayoutMetrics", false);
+  await assert.rejects(make(site.origin, { dir, stores: false }), (err) => err.message === `The kit's connection to the browser tab closed while it read ${url}, so no kit was made. Try again.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  // A home page too large to read is a page that failed like any other.
+  t.mock.restoreAll();
+  make = withClosingTab(t, "DOMSnapshot.captureSnapshot", true, 1);
+  const asked = `${url}deep`;
+  const { kit } = await make(asked, { dir: path.join(parent, "deep"), stores: false });
+  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it is too large to read. ${asked} was read as given, and its header and colors can differ from the home page's.`]);
+});
+
 test("files of someone's that come into a folder made during the run are refused, not taken for a kit", { skip: noBrowser }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
@@ -2754,6 +2846,10 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   drawn = Object.assign(new Error("Page.captureScreenshot timed out"), { timedOut: true });
   const stalled = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(stalled.kit.notes, ["The card could not be drawn: the browser tab stopped answering."]);
+  // And so is a connection to its tab that closed while the browser runs.
+  drawn = Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge: false });
+  const dropped = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(dropped.kit.notes, ["The card could not be drawn: the kit's connection to its tab closed."]);
   // And so is a tab for the card that the browser does not open in time: the
   // second tab of a run is the card's.
   const realFetch = globalThis.fetch;

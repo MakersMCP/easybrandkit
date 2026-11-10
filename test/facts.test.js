@@ -702,6 +702,47 @@ test("a menu page whose read fails is told on one line, and an exception in it n
   ]);
 });
 
+test("a menu page too large for Node's connection, or whose tab's connection closes, is told in words", async (t) => {
+  setTimeLimit(120_000);
+  t.after(() => setTimeLimit(120_000));
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"))]);
+  // As a call on a connection that closed comes back: Node's WebSocket
+  // closes it under an answer larger than it takes, and says so.
+  const closed = (tooLarge) => Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge });
+  let at = "";
+  let loaded = () => {};
+  const cdp = {
+    answer: { status: 0, url: "", unreachable: "", blank: false },
+    closed: new Promise(() => {}),
+    on: (method, listener) => {
+      if (method === "Page.loadEventFired") loaded = listener;
+    },
+    send: async (method, params = {}) => {
+      if (WORLD[method]) return WORLD[method];
+      if (method === "Page.navigate") {
+        at = params.url;
+        loaded();
+        return {};
+      }
+      if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{ url: at }] };
+      if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
+        if (!at) return { result: { value: home } };
+        throw closed(at.endsWith("/pricing"));
+      }
+      if (method === "Runtime.evaluate") return { result: { value: "" } };
+      if (method === "DOMSnapshot.captureSnapshot") return { documents: [{ nodes: { nodeName: [0] } }], strings: ["A"] };
+      return {};
+    },
+  };
+  let { pages, skipped } = await readFactPages(cdp, "https://acme.test/", () => {});
+  assert.deepEqual(pages.map((one) => one.role), ["home"]);
+  assert.deepEqual(skipped, [
+    { role: "pricing", url: "https://acme.test/pricing", reason: "it is too large to read" },
+    { role: "customers", url: "https://acme.test/customers", reason: "the kit's connection to its tab closed" },
+  ]);
+});
+
 test("--facts: a menu page that makes the kit's own read of it throw says only that its text could not be read", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
   const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/about">About</a></nav></header>`;
