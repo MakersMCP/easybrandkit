@@ -36,7 +36,7 @@ const { brandYml } = require("./brandyml");
 const { readFactPages, writeFacts } = require("./facts");
 const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
-const { SaveError, toldPlainly, startRun, discardRun, saveRun } = require("./run");
+const { SaveError, toldPlainly, removedFrom, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
 const { mayOpen, LOCAL } = require("./address");
 const { plainText } = require("./text");
@@ -566,10 +566,14 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     return { dir: target, kit, facts: claims };
   } catch (err) {
     if (err instanceof SaveError || !(err instanceof Error)) throw err;
-    const plain = toldPlainly(err, run);
+    // A write that failed because the folder the new kit was made in was
+    // removed meanwhile is told as that, and an earlier kit only while it is
+    // still there.
+    const removed = removedFrom(run);
+    const plain = removed && err.syscall ? new Error(removed.said) : toldPlainly(err, run);
     // For the CLI, which says that an earlier kit is as it was. saveRun's
     // own errors say what the folder holds.
-    if (run.earlier) plain.earlierKit = target;
+    if (removed ? removed.earlier : run.earlier) plain.earlierKit = target;
     throw plain;
   } finally {
     discardRun(run);

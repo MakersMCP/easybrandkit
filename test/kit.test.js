@@ -2619,6 +2619,43 @@ test("with --facts, the page the kit read is read for its claims only while it i
   }
 });
 
+test("a kit's folder removed while a run makes its kit is told as that, not as a file the run could not write", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // Removed as the logos are cut, as someone cleaning up might.
+  const removing = (...folders) => (line) => {
+    if (!line.startsWith("Cutting out")) return;
+    for (const folder of folders.flatMap((one) => (typeof one === "function" ? one() : [one]))) fs.rmSync(folder, { recursive: true, force: true });
+  };
+  // The kit's folder, with an earlier kit in it: that kit is gone too.
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, log: removing(dir) }), (err) => {
+    assert.equal(err.message, `${dir} was removed while the kit was made, so no kit was saved.`);
+    assert.equal(err.earlierKit, undefined);
+    return true;
+  });
+  assert.equal(fs.existsSync(dir), false);
+  // The folder a new kit's folder was to be made in.
+  const above = path.join(parent, "new");
+  await assert.rejects(makeKit(site.origin, { dir: path.join(above, "kit"), stores: false, log: removing(above) }), (err) => err.message === `${above} was removed while the kit was made, so no kit was saved.` && err.earlierKit === undefined);
+  // Only the hidden folder the new kit was made in: the earlier kit is as it
+  // was, and the run says so.
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const parts = () => fs.readdirSync(dir).filter((name) => name.startsWith(".easybrandkit-part-")).map((name) => path.join(dir, name));
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, log: removing(parts) }), (err) => {
+    assert.equal(err.message, `The hidden folder the new kit was made in was removed from ${dir} while the kit was made, so no kit was saved.`);
+    assert.equal(err.earlierKit, dir);
+    return true;
+  });
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("through a proxy, which the browser does not tell past, the kit's own lookup says where a page is", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {

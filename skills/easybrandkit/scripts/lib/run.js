@@ -137,6 +137,20 @@ function toldPlainly(err, run) {
   return err;
 }
 
+// A run whose part folder was removed while it went on, as by someone
+// cleaning up: a write into it then fails with an error that names a file of
+// the part folder and says nothing of the site. What was removed, in words
+// for the run's error (said), and whether the kit's folder still holds an
+// earlier kit (earlier); null when the part folder is there.
+function removedFrom(run) {
+  if (!run.work || lstat(run.work)) return null;
+  const shown = shownFrom(run.dir, run.home);
+  const said = lstat(run.home)
+    ? `The hidden folder the new kit was made in was removed from ${shown} while the kit was made, so no kit was saved.`
+    : `${shown} was removed while the kit was made, so no kit was saved.`;
+  return { said, earlier: run.earlier && Boolean(lstat(path.join(run.target, "brand.json"))) };
+}
+
 // The runs of this process that have not ended, and the folders of those
 // that were saved.
 const runs = new Set();
@@ -640,4 +654,4 @@ function sweep(folder) {
   }
 }
 
-module.exports = { PART, KEPT, LOCK, COMING, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
+module.exports = { PART, KEPT, LOCK, COMING, STALE, LOCK_STALE, SaveError, isRunName, swapping, shownFrom, toldPlainly, removedFrom, startRun, discardRun, discardRuns, savedRuns, saveRun, sweep };
