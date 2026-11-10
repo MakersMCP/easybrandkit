@@ -216,6 +216,22 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "Acme\n\t-  Payments", "https://acme.com/"), "Acme");
   assert.equal(brandName("", "", "https://www.acme.com/"), "Acme");
+  // A home page's logo does not name it, and its title's first part does.
+  assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/", { logo: "Globex" }), "Acme");
+  // A page past the home page, read as given, puts its own subject first:
+  // the part of its title that its logo or its host names, else the last.
+  const deeper = (title, url, logo) => brandName("", title, url, { deeper: true, logo });
+  assert.equal(deeper("Features \u00b7 Brightmoss", "http://127.0.0.1:8737/features.html", "Brightmoss"), "Brightmoss");
+  assert.equal(deeper("Features \u00b7 Brightmoss", "http://127.0.0.1:8737/features.html", ""), "Brightmoss");
+  assert.equal(deeper("Brightmoss | Features", "http://127.0.0.1:8737/features.html", "Brightmoss logo"), "Brightmoss");
+  assert.equal(deeper("Acme Cloud - Pricing", "https://acmecloud.com/pricing", "Back to the home page"), "Acme Cloud");
+  assert.equal(deeper("Pricing \u2013 Linear", "https://linear.app/pricing", "Go to homepage"), "Linear");
+  // A title of one part may be the page's subject: the logo's alt text, when
+  // it names something, comes first.
+  assert.equal(deeper("Pricing", "https://getacme.com/pricing", "Acme logo"), "Acme");
+  assert.equal(deeper("Acme", "https://getacme.com/pricing", "Home"), "Acme");
+  assert.equal(deeper("", "https://www.acme.com/pricing", ""), "Acme");
+  assert.equal(brandName("Acme", "Features \u00b7 Brightmoss", "https://acme.com/x", { deeper: true, logo: "Globex" }), "Acme");
 });
 
 test("text a site wrote: control characters out, line breaks kept only where asked, cut to its length", () => {
@@ -1977,7 +1993,7 @@ test("a deeper address whose home page fails is read as given and says so, and i
   });
   const url = `${site.origin}/`;
   const asked = `${url}project/`;
-  const noteOf = (what) => `The home page, ${url}, could not be read: it ${what}. ${asked} was read as given, and its header and colors can differ from the home page's.`;
+  const noteOf = (what) => `The home page, ${url}, could not be read: it ${what}. ${asked} was read as given, and its name, header and colors can differ from the home page's.`;
   const kitNames = ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "screen-01.png"];
   const cases = [
     ["a 404", answer(404, ""), "answered 404"],
@@ -2002,6 +2018,16 @@ test("a deeper address whose home page fails is read as given and says so, and i
   const { kit } = await makeKit(asked, { dir: late, stores: false, log: (line) => line === "Taking the first screen" && when.release() });
   assert.deepEqual(kit.notes, [noteOf(`led to ${site.origin}/gone, which answered 410`)]);
   assert.deepEqual(fs.readdirSync(late).sort(), kitNames);
+
+  // The page given is named by the brand's part of its title, not by its
+  // own subject, which comes first in it.
+  home = answer(404, "");
+  deep = answer(200, brandPage("rgb(0,0,255)").replace("<title>Acme</title>", "<title>Features &middot; Acme Cloud</title>"));
+  const named = path.join(parent, "named");
+  const { kit: titled } = await makeKit(asked, { dir: named, stores: false });
+  assert.equal(titled.name, "Acme Cloud");
+  assert.match(fs.readFileSync(path.join(named, "BRAND.md"), "utf8"), /^# Acme Cloud brand kit\n/);
+  deep = answer(200, brandPage("rgb(0,0,255)"));
 
   // The home page that works is read, as ever, and the page given is not.
   home = answer(200);
@@ -2231,7 +2257,7 @@ test("a tab that stops answering is told in words, and more time is advised only
   const stalledOnce = withStalledTab(t, "Page.getLayoutMetrics", 1);
   const asked = `${url}deep`;
   const { kit } = await stalledOnce(asked, { dir: path.join(parent, "deep"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its header and colors can differ from the home page's.`]);
+  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
 // A site whose page tries to save a file every 25 ms for as long as it is
@@ -2380,7 +2406,7 @@ test("what a page says reaches no terminal with its control characters, and a no
   const went = await run(`${site.origin}/project/`, "kit");
   assert.equal(went.code, 0, went.stderr);
   assert.doesNotMatch(went.stdout, CONTROL, "the note");
-  const note = `The home page, ${site.origin}/, could not be read: it answered with a bot check ("Just a moment [2J [Hcleared by it"). ${site.origin}/project/ was read as given, and its header and colors can differ from the home page's.`;
+  const note = `The home page, ${site.origin}/, could not be read: it answered with a bot check ("Just a moment [2J [Hcleared by it"). ${site.origin}/project/ was read as given, and its name, header and colors can differ from the home page's.`;
   assert.ok(went.stdout.includes(`  Note    ${note}\n`), went.stdout);
   assert.ok(fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8").endsWith(`## Notes\n\n- ${note}\n`));
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8")).notes, [note]);
@@ -2602,7 +2628,7 @@ test("a home page the run used up its time on ends the run, with the advice to g
   // With time to spare, a home page that does not answer is a page that failed.
   const stalledOnce = withStalledTab(t, "Page.navigate", 1);
   const { kit } = await stalledOnce(deeper, { dir: path.join(parent, "deeper"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, ${home}, could not be read: it did not answer. ${deeper} was read as given, and its header and colors can differ from the home page's.`]);
+  assert.deepEqual(kit.notes, [`The home page, ${home}, could not be read: it did not answer. ${deeper} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
 test("a short time limit reads what a page shows, and says so when the page shows nothing and there is no time to wait", { skip: noBrowser }, async (t) => {
@@ -2786,7 +2812,7 @@ test("a page whose tab's connection closes while the browser runs fails the run 
   make = withClosingTab(t, "DOMSnapshot.captureSnapshot", true, 1);
   const asked = `${url}deep`;
   const { kit } = await make(asked, { dir: path.join(parent, "deep"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it is too large to read. ${asked} was read as given, and its header and colors can differ from the home page's.`]);
+  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it is too large to read. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
 test("files of someone's that come into a folder made during the run are refused, not taken for a kit", { skip: noBrowser }, async (t) => {

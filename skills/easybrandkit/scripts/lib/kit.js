@@ -123,15 +123,39 @@ function prepareDir(dir) {
   }
 }
 
+// What a logo's alt text names, without the word logo: "" when that leaves
+// nothing, says where its link goes ("Back to the home page"), or is more
+// than a name could be.
+function logoName(alt) {
+  const name = plainText(alt, 200)
+    .replace(/(^|\s)logo(type)?(?=\s|$)/gi, " ")
+    .trim();
+  return name.length <= 40 && !/(^|\s)home( ?page)?(\s|$)/i.test(name) ? name : "";
+}
+
 // The site's name: og:site_name, else the title up to its first separator
-// ("Acme | Payments for teams" is Acme), else the host name.
-function brandName(siteName, title, url) {
+// ("Acme | Payments for teams" is Acme), else the host name. A page past the
+// home page, read as given when the home page could not be read (deeper),
+// can put its own subject first ("Features · Acme"): when its title has
+// more than one part, its name is the part that its logo's alt text (logo)
+// or its host names, else the last part, and a title of one part comes
+// after what that alt text names.
+function brandName(siteName, title, url, { deeper = false, logo = "" } = {}) {
   const own = plainText(siteName, 200);
   if (own) return own;
-  // By now one space stands between two words, whatever the page wrote.
-  const first = plainText(title).split(/ [|·•:\u2013\u2014-] /)[0];
-  if (first && first.length <= 40) return first;
   const label = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
+  // By now one space stands between two words, whatever the page wrote.
+  const parts = plainText(title).split(/ [|·•:\u2013\u2014-] /);
+  const fits = (part) => Boolean(part) && part.length <= 40;
+  const mark = deeper ? logoName(logo) : "";
+  if (deeper && parts.length > 1) {
+    const same = (a, b) => a.replace(/\s+/g, "").toLowerCase() === b.replace(/\s+/g, "").toLowerCase();
+    const named = parts.find((part) => fits(part) && ((mark && same(part, mark)) || same(part, label)));
+    if (named) return named;
+    if (fits(parts[parts.length - 1])) return parts[parts.length - 1];
+  }
+  if (mark) return mark;
+  if (fits(parts[0])) return parts[0];
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
@@ -185,7 +209,9 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
   if (what) throw pageFailed(`${url} ${what}, so no kit was made.`, what);
 }
 
-async function readPage(url, dir, log, alsoNamed = "", facts = false) {
+// deeper: the page is one past the home page, read as given when the home
+// page could not be read.
+async function readPage(url, dir, log, alsoNamed = "", facts = false, deeper = false) {
   const chrome = await launch(SCREEN);
   let cdp;
   // A browser that has just not answered is not waited for again as it is
@@ -244,7 +270,7 @@ async function readPage(url, dir, log, alsoNamed = "", facts = false) {
     log("Taking the first screen");
     const screenshots = await captureFirstScreen(cdp, dir);
     refuseOtherPage(cdp, url, pageUrl, "");
-    const name = brandName(found.siteName, found.title, pageUrl);
+    const name = brandName(found.siteName, found.title, pageUrl, { deeper, logo: (logos.find((logo) => logo.alt) || {}).alt });
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");
     let cardError = "the browser gave back an empty picture";
@@ -450,7 +476,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
         failed = err.pageFailed;
         for (const name of fs.readdirSync(work)) if (!had.includes(name)) fs.rmSync(path.join(work, name), { recursive: true, force: true });
       }
-      if (failed && !listing) read = await readPage(asked, work, log, appName, facts);
+      if (failed && !listing) read = await readPage(asked, work, log, appName, facts, true);
     }
     // A listing none of whose pictures came, and no website to read: a name
     // alone is no kit to put in the place of an earlier one.
@@ -463,7 +489,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     else if (listing && read) notes.push(`${asked} is a store listing: its ${gave.withSite} ${gave.plural ? "come" : "comes"} from the listing, the rest from the website it names, ${page}.`);
     else if (listing && failed) notes.push(`${asked} is a store listing, and the website it names, ${page}, ${failed}, ${onlyListing} For those, give an address of the product's site that opens.`);
     else if (listing) notes.push(`${asked} is a store listing that names no website, ${onlyListing} Give the product's website for those.`);
-    else if (failed) notes.push(`The home page, ${page}, could not be read: it ${failed}. ${asked} was read as given, and its header and colors can differ from the home page's.`);
+    else if (failed) notes.push(`The home page, ${page}, could not be read: it ${failed}. ${asked} was read as given, and its name, header and colors can differ from the home page's.`);
     else if (page !== asked) notes.push(`${asked} is not the home page, so ${page} was read instead: the home page carries the brand's own header and colors.`);
     const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
     if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
