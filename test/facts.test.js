@@ -11,13 +11,15 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { findClaims, pageOf, regionOf } = require("../skills/easybrandkit/scripts/lib/claims");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const { pickPages, robotsRules, robotsAllow, readRobots, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome, launch, openPage, navigate, inOwnWorld } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
+const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
 // What a fake tab answers when the kit asks for its own world.
 const WORLD = { "Page.getFrameTree": { frameTree: { frame: { id: "main" } } }, "Page.createIsolatedWorld": { executionContextId: 7 } };
@@ -492,6 +494,8 @@ test("with no page read the rules have nothing to go through, so no thread of th
     const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
     assert.match(md, /No page could be read\./);
     assert.doesNotMatch(md, /could not be listed/);
+    // And nothing is said to be missing from pages that were not read.
+    assert.doesNotMatch(md, /## Not found|showed nothing/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -725,6 +729,40 @@ test("--facts: a menu page that makes the kit's own read of it throw says only t
   assert.deepEqual(facts.pages.map((p) => p.role), ["home", "pricing"]);
   assert.deepEqual(facts.skipped, [{ role: "about", url: `${origin}/about`, reason: "its text could not be read" }]);
   assert.doesNotMatch(fs.readFileSync(path.join(dir, "FACTS.md"), "utf8"), /forged|evil\.example/i);
+});
+
+test("--facts: when no page could be read, the summary sends no one to claims, and FACTS.md says why", { skip: noBrowser }, async (t) => {
+  const head = `<!doctype html><html><head><meta charset="utf-8"><title>Acme</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
+  const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a></nav></header>`;
+  // The home page has a field named after a method of its form, which every
+  // world sees, so the kit's read of its text throws.
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`${head}${nav}<main><h1>Tools</h1><form><input name="getAttribute"></form></main></body></html>`);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  const dir = path.join(parent, "kit");
+  t.after(() => {
+    server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const cli = spawn(process.execPath, [CLI, `${origin}/`, "--out", dir, "--no-stores", "--facts", "--timeout", "150"], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  cli.stdout.on("data", (chunk) => (stdout += chunk));
+  cli.stderr.on("data", (chunk) => (stderr += chunk));
+  const [code] = await once(cli, "close");
+  assert.equal(code, 0, stderr);
+  const lines = stdout.trim().split("\n");
+  assert.ok(lines.includes("  Facts   none found, from 0 pages"), stdout);
+  assert.ok(lines.includes(`  Note    Did not read ${origin}/: its text could not be read.`), stdout);
+  assert.equal(lines.pop(), `${dir}/FACTS.md says no page could be read, and why.`);
+  const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+  assert.match(md, /\n## Pages read\n\nNo page could be read\.\n\nNot read: the home page, <http:\/\/127\.0\.0\.1:\d+\/>: its text could not be read\.\n/);
+  assert.doesNotMatch(md, /## Not found/);
+  assert.equal(fs.existsSync(path.join(dir, "pages")), false);
 });
 
 test("--facts: a menu page that cannot be opened, moves on or goes blank is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {

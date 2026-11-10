@@ -605,7 +605,9 @@ function factsMarkdown(facts) {
   section("Company", facts.company, (list) => {
     for (const item of list) lines.push(`- ${item.field}: ${md(item.value)} (${from(item)}, in its JSON-LD)`);
   });
-  if (empty.length && !facts.claimsError) lines.push("", "## Not found", "", `The pages read showed nothing for: ${empty.join(", ")}. That is no claim that the site has none.`);
+  // Nothing is said to be missing from pages that were not read, or that no
+  // rule went through.
+  if (empty.length && !facts.claimsError && facts.pages.length) lines.push("", "## Not found", "", `The pages read showed nothing for: ${empty.join(", ")}. That is no claim that the site has none.`);
   return lines.join("\n") + "\n";
 }
 
