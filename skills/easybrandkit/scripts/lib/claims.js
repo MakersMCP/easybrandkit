@@ -8,7 +8,7 @@
 // the page it came from. Nothing is reworded or added: a claim the rules
 // cannot pin to a name, a label or a price is left out.
 
-const { noControls } = require("./text");
+const { noControls, noEndSlashes } = require("./text");
 
 const isNode = (n) => n !== null && typeof n === "object";
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
@@ -451,9 +451,9 @@ function childPath(href, base) {
   try {
     const url = new URL(href);
     const root = new URL(base);
-    const prefix = root.pathname.replace(/\/+$/, "");
+    const prefix = noEndSlashes(root.pathname);
     if (url.host !== root.host || !prefix) return "";
-    const rest = url.pathname.replace(/\/+$/, "");
+    const rest = noEndSlashes(url.pathname);
     return rest.startsWith(`${prefix}/`) && !rest.slice(prefix.length + 1).includes("/") ? rest.slice(prefix.length + 1) : "";
   } catch {
     return "";

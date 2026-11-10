@@ -416,14 +416,25 @@ test("a link's run of slashes costs what its length does, wherever a link is rea
   const { classify } = require("../skills/easybrandkit/scripts/lib/stores");
   assert.deepEqual(classify("https://x.com/acme///"), { type: "x", url: "https://x.com/acme" });
   assert.equal(classify("https://x.com///"), null);
+  // A customer story or an integration one level below its listing page.
+  const { childPath } = require("../skills/easybrandkit/scripts/lib/claims");
+  assert.equal(childPath("https://acme.test/customers/ramp///", "https://acme.test/customers//"), "ramp");
+  assert.equal(childPath("https://acme.test/customers//ramp", "https://acme.test/customers"), "");
+  assert.equal(childPath("https://acme.test/customers/ramp", "https://acme.test///"), "");
   // Each of these took minutes.
   endsInTime(`
     const { classify } = require(lib + "/stores.js");
     const { brandLink } = require(lib + "/logos.js");
+    const { childPath, findClaims } = require(lib + "/claims.js");
     const long = "/x" + "/".repeat(1960) + "a";
     for (let i = 0; i < 40000; i++) if (classify("https://x.com" + long + i).type !== "x") throw new Error("not x");
     for (let i = 0; i < 40000; i++) if (brandLink("https://x.com" + long + i, "https://acme.test/").type !== "x") throw new Error("not x");
     if (classify("https://x.com/x" + "/".repeat(300000) + "a").type !== "x") throw new Error("not x");
+    // A listing page's links, and a listing page whose own address has such a run.
+    const listing = "https://acme.test/customers";
+    for (let i = 0; i < 40000; i++) if (childPath(listing + long + i, listing + long) !== "") throw new Error("a story");
+    const kids = Array.from({ length: 40000 }, (_, i) => ({ tag: "a", href: listing + long + i, kids: ["x"] }));
+    findClaims([{ role: "customers", url: listing, readAt: "2026-01-01T00:00:00Z", model: { url: listing, title: "", jsonLd: [], tree: { tag: "body", block: 1, kids } } }]);
   `);
 });
 
