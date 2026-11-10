@@ -1110,24 +1110,58 @@ test("a browser that is slow to answer still runs; one that refuses its port or 
   assert.equal(await browser.alive(), false, "ended");
 });
 
+// The answer that takes a WebSocket connection, for a server of a test's own.
+function upgraded(req) {
+  const accept = crypto.createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+  return `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`;
+}
+
+// A port nothing listens on.
+async function closedPort() {
+  const server = http.createServer().listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
 test("a browser slow to start, to open a tab or to answer the connection to it is waited for as long as the run has left, and then told in words", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
   // The browser's DevTools server, as slow as each case needs: it takes every
-  // connection and answers none of them, but /json/new once tab is set, that
-  // many ms after it is asked, with a tab whose connection it never answers.
-  // It counts the times it is asked for /json/version.
+  // connection and answers none of them, but these. /json/new once tab is
+  // set, that many ms after it is asked, with a tab whose connection it never
+  // answers, or one at tabAt. /json/version once quit is set, with the
+  // address of the browser's own connection, which it takes and then answers
+  // nothing on ("mute"), or never takes ("deaf"). /json/close at once. It
+  // counts the times it is asked for /json/version and /json/close.
   let tab = 0;
+  let tabAt = "";
+  let quit = "";
   let versions = 0;
+  let closes = 0;
   const devtools = http.createServer((req, res) => {
-    if (req.url.startsWith("/json/version")) versions++;
+    const json = (body) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body));
+    const at = `ws://127.0.0.1:${devtools.address().port}/devtools`;
+    if (req.url.startsWith("/json/version")) {
+      versions++;
+      if (quit) json({ webSocketDebuggerUrl: `${at}/browser/x` });
+      return;
+    }
+    if (req.url.startsWith("/json/close")) {
+      closes++;
+      return res.end("Target is closing");
+    }
     if (!tab || !req.url.startsWith("/json/new")) return;
-    const target = { id: "x", webSocketDebuggerUrl: `ws://127.0.0.1:${devtools.address().port}/devtools/page/x` };
-    setTimeout(() => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(target)), tab);
+    const target = { id: "x", webSocketDebuggerUrl: tabAt || `${at}/page/x` };
+    setTimeout(() => json(target), tab);
   });
   const upgrades = new Set();
-  devtools.on("upgrade", (req, socket) => upgrades.add(socket));
+  devtools.on("upgrade", (req, socket) => {
+    upgrades.add(socket);
+    if (quit === "mute" && req.url.includes("/devtools/browser/")) socket.write(upgraded(req));
+  });
   devtools.listen(0, "127.0.0.1");
   await once(devtools, "listening");
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
@@ -1145,7 +1179,8 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   });
   process.env.TMPDIR = temp;
   // What a wait ended with, once the run's time has run out, where it took
-  // a fixed 10 or 20 s, or went on past the run's limit for minutes.
+  // a fixed 10 or 20 s, or went on past the run's limit for minutes; at most
+  // more ms after least.
   const ended = async (promise, least, more = 6_000) => {
     const started = Date.now();
     const end = await Promise.race([promise.then(() => "went on", (err) => err), new Promise((resolve) => setTimeout(resolve, least + more, "still waiting"))]);
@@ -1165,7 +1200,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
 
   // One that says where they are at once, and is slow from then on.
   const slow = path.join(parent, "chrome");
-  fs.writeFileSync(slow, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\nprintf '${devtools.address().port}\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"\nexec sleep 60\n`, { mode: 0o755 });
+  fs.writeFileSync(slow, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\nprintf '${devtools.address().port}\\n/devtools/browser/x\\n' > "$profile/DevToolsActivePort"\nexec sleep 120\n`, { mode: 0o755 });
   process.env.CHROME_PATH = slow;
   setTimeLimit(120_000);
   const browser = await launch({ width: 800, height: 600 });
@@ -1184,6 +1219,20 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   setTimeLimit(2_500);
   end = await ended(renderCard(browser.base, {}, parent), 2_500);
   assert.equal(end.message, `The browser did not open a tab ${late}`);
+  // Its connection is waited for 30 s at most, however much time the run has
+  // left, and the tab is closed again.
+  tab = 1;
+  setTimeLimit(120_000);
+  end = await ended(renderCard(browser.base, {}, parent), 30_000);
+  assert.equal(end.message, "The browser did not answer the kit's connection to its tab in 30 s");
+  assert.equal(closes, 1, "the card's tab is closed");
+  // A connection to its tab that the browser refuses is told in words, and
+  // the tab is closed all the same.
+  tabAt = `ws://127.0.0.1:${await closedPort()}/devtools/page/x`;
+  end = await ended(renderCard(browser.base, {}, parent), 0, 5_000);
+  assert.equal(end.message, "The browser refused the kit's connection to its tab");
+  assert.equal(closes, 2, "the card's tab is closed");
+  tabAt = "";
   // Under a time limit longer than any timer can be, as a program that calls
   // makeKit can give it, a tab that comes is taken.
   tab = 300;
@@ -1191,11 +1240,24 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.equal((await newTab(browser.base, browserWait())).id, "x");
   await browser.close();
 
+  // A browser asked to quit that never takes the connection for it is
+  // killed within seconds, also when the run has minutes left.
+  quit = "deaf";
+  setTimeLimit(120_000);
+  const quitting = await launch({ width: 800, height: 600 });
+  const started = Date.now();
+  end = await ended(quitting.close(), 0, 10_000);
+  assert.equal(end, "went on");
+  assert.ok(Date.now() - started < 4_000, `a browser deaf ended ${Date.now() - started} ms after it was asked to quit`);
+  assert.deepEqual(fs.readdirSync(temp), [], "the browser's profile is removed");
+  setTimeLimit(120_000);
+
   // A run whose browser opens no tab keeps the earlier kit, and says so. The
   // browser has just been waited for, so it is not asked again whether it
   // still runs, which would add seconds past the run's limit: /json/version
   // is asked for only to ask the browser to quit.
   tab = 0;
+  quit = "";
   versions = 0;
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -1204,6 +1266,15 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.equal(end.message, `The browser did not open a tab ${late}, so no kit was made. Try again, or give it more time with --timeout.`);
   assert.equal(end.earlierKit, dir);
   assert.equal(versions, 1);
+  assert.deepEqual(filesOf(dir), before);
+  assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
+  // One whose tab's connection the browser refuses keeps it too.
+  tab = 1;
+  tabAt = `ws://127.0.0.1:${await closedPort()}/devtools/page/x`;
+  quit = "deaf";
+  end = await ended(makeKit("https://acme.example/", { dir, stores: false, timeLimit: 30_000 }), 0, 15_000);
+  assert.equal(end.message, "The browser refused the kit's connection to its tab, so no kit was made. Try again.");
+  assert.equal(end.earlierKit, dir);
   assert.deepEqual(filesOf(dir), before);
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
