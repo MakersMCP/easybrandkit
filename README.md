@@ -12,6 +12,15 @@ Ask a coding agent for a landing page, a launch video or a pitch deck for a prod
 
 Read the story behind it on my blog: [easybrandkit: A Brand Kit for Coding Agents](https://eminbudak.com/blog/easybrandkit-brand-kit-for-coding-agents/).
 
+## Requirements
+
+- Node.js 22 or newer.
+- Google Chrome, Chromium, Edge or Brave, which opens the site and draws the card. It has been tested with Google Chrome only: 155 on Ubuntu 26.04, 157 on Ubuntu 22.04 and the one GitHub's ubuntu-latest runner comes with. No test has run with Chromium, Edge or Brave. easybrandkit looks for all four on your PATH on Linux and where macOS installs them; on Windows it looks only where Chrome and Edge install themselves. Set `CHROME_PATH` to use another build, as a path.
+- Linux, where it is tested: on GitHub's ubuntu-latest runner (Ubuntu 24.04 at this release), on every push and before every release. This release has also run on Ubuntu 26.04 with Node.js 22.22, and on Ubuntu 22.04 with Node.js 22.23. It is written for macOS and Windows as well, but this release has not been run on either.
+- Room on the disk for the kit and the one before it, as the earlier kit stays until the new one is in place: a kit took 0.5 to 3 MB on the sites tried, an app's store pictures included. On the same sites the browser's profile took 4 to 18 MB in the temp folder while the run lasted.
+- On Linux, a temp folder whose path leaves Chrome room for the socket it makes there: 66 bytes at most. A run in a longer one stops and says how much shorter `TMPDIR` has to be.
+- Network access to the site and, unless you give `--no-stores`, to the store listings and social profiles it links to. Installing it needs the network, and `npx easybrandkit@latest` asks npm for the newest version each time it runs. No ffmpeg, no account, no API key and no npm dependencies.
+
 ## What you get
 
 ```
@@ -99,7 +108,7 @@ So a run that printed its summary, which starts with `Saved the`, or `brand.json
 
 Installed globally (`npm install -g easybrandkit`), the command is `easybrandkit`. npx keeps the copy an earlier run fetched, so `npx easybrandkit@latest` is how you get a newer version. To stop a run started with npx, press Ctrl-C or send the signal to its whole process group (`kill -- -<pgid>`). A kill sent to the npx process alone may not reach easybrandkit: where `/bin/sh` is dash, as on Debian and Ubuntu, the run goes on and puts its kit in place if it ends well.
 
-It needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set `CHROME_PATH` to pick the browser. There are no npm dependencies and nothing is downloaded: easybrandkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile. A download a page tries to start is refused, or lands in that profile and goes with it, so nothing reaches your Downloads folder.
+Nothing is downloaded to run it: easybrandkit drives the browser you already have over the Chrome DevTools Protocol, with a throwaway profile (see [Requirements](#requirements)). A download a page tries to start is refused, or lands in that profile and goes with it, so nothing reaches your Downloads folder.
 
 ### If a run is killed outright
 
