@@ -492,7 +492,10 @@ test("with no page read the rules have nothing to go through, so no thread of th
       });
     `);
     const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
-    assert.match(md, /No page could be read\./);
+    // It says no page was read from its first line on, and nothing it says
+    // is about pages read or text quoted from them.
+    assert.match(md, /^# Acme facts\n\neasybrandkit 0\.0\.0 tried to read <https:\/\/acme\.test\/> on \d{4}-\d\d-\d\d, and no page could be read, so this file holds no claim\.\n\n## Pages read\n\nNo page could be read\.\n\nNot read: the home page, <https:\/\/acme\.test\/>: it answered 500\.\n$/);
+    assert.doesNotMatch(md, /Read from|quoted|pages\//);
     assert.doesNotMatch(md, /could not be listed/);
     // And nothing is said to be missing from pages that were not read.
     assert.doesNotMatch(md, /## Not found|showed nothing/);
@@ -797,12 +800,14 @@ test("--facts: when no page could be read, the summary sends no one to claims, a
   const [code] = await once(cli, "close");
   assert.equal(code, 0, stderr);
   const lines = stdout.trim().split("\n");
-  assert.ok(lines.includes("  Facts   none found, from 0 pages"), stdout);
+  assert.ok(lines.includes("  Facts   not read: no page could be read"), stdout);
+  assert.doesNotMatch(stdout, /none found/);
   assert.ok(lines.includes(`  Note    Did not read ${origin}/: its text could not be read.`), stdout);
   assert.equal(lines.pop(), `${dir}/FACTS.md says no page could be read, and why.`);
   const md = fs.readFileSync(path.join(dir, "FACTS.md"), "utf8");
+  assert.match(md, /^# Acme facts\n\neasybrandkit \d+\.\d+\.\d+ tried to read <http:\/\/127\.0\.0\.1:\d+\/> on \d{4}-\d\d-\d\d, and no page could be read, so this file holds no claim\.\n/);
   assert.match(md, /\n## Pages read\n\nNo page could be read\.\n\nNot read: the home page, <http:\/\/127\.0\.0\.1:\d+\/>: its text could not be read\.\n/);
-  assert.doesNotMatch(md, /## Not found/);
+  assert.doesNotMatch(md, /## Not found|Read from|pages\//);
   assert.equal(fs.existsSync(path.join(dir, "pages")), false);
 });
 

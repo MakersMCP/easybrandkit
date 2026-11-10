@@ -102,7 +102,10 @@ function summary({ dir, kit, facts }) {
       [facts.ratings.length, "rating"],
       [facts.faqs.length, "question"],
     ].filter(([n]) => n).map(([n, word]) => `${n} ${word}${n === 1 ? "" : "s"}`);
-    lines.push(`  Facts   ${facts.claimsError ? "not listed" : list(counts)}, from ${facts.pages.length} page${facts.pages.length === 1 ? "" : "s"}`);
+    // No page read, or rules that did not finish, say nothing of what the
+    // site claims: neither is "none found".
+    if (!facts.pages.length) lines.push("  Facts   not read: no page could be read");
+    else lines.push(`  Facts   ${facts.claimsError ? "not listed" : list(counts)}, from ${facts.pages.length} page${facts.pages.length === 1 ? "" : "s"}`);
     for (const skip of facts.skipped) lines.push(`  Note    Did not read ${skip.url}: ${skip.reason}.`);
     if (facts.claimsError) lines.push(`  Note    Could not list the claims of ${facts.site}: ${facts.claimsError}.`);
   }
