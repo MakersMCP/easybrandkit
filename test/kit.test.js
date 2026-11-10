@@ -2720,10 +2720,12 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
 });
 
-test("a browser whose tab has just not answered is given a second to quit, also when the run has time left", async (t) => {
+test("a browser whose tab has just not answered is given a second to quit, also when the run has time left, and a second to show it runs once the run's time is up", async (t) => {
   const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
   const quits = [];
-  t.mock.method(chrome, "launch", async () => ({ base: "http://127.0.0.1:1", alive: async () => true, close: async (options) => quits.push(options) }));
+  // How long the browser was given each time to show that it still runs.
+  const alives = [];
+  t.mock.method(chrome, "launch", async () => ({ base: "http://127.0.0.1:1", alive: async (ms) => (alives.push(ms), true), close: async (options) => quits.push(options) }));
   // A tab that opens the page and then fails each call as fail says.
   const tab = (fail, navigated = {}) => ({
     answer: { status: 0, url: "", unreachable: "", blank: false },
@@ -2752,6 +2754,12 @@ test("a browser whose tab has just not answered is given a second to quit, also 
   opens = tab(() => assert.fail("not asked"), { errorText: "net::ERR_NAME_NOT_RESOLVED" });
   await assert.rejects(reloadedKit().makeKit("https://acme.example/", { dir, stores: false }), /^Error: Could not open https:\/\/acme\.example\/: net::ERR_NAME_NOT_RESOLVED/);
   assert.deepEqual(quits, [{ hurry: true }, { hurry: false }]);
+  // With time left, the browser has 5 s to show that it still runs. A run
+  // whose tab does not answer once its time is up gives it a second.
+  opens = tab((method) => Object.assign(new Error(`${method} timed out`), { timedOut: true }));
+  await assert.rejects(reloadedKit().makeKit("https://acme.example/", { dir, stores: false, timeLimit: 1 }), /^Error: The browser tab stopped answering while it read https:\/\/acme\.example\/, so no kit was made\. Try again, or give it more time with --timeout\.$/);
+  assert.deepEqual(quits, [{ hurry: true }, { hurry: false }, { hurry: true }]);
+  assert.deepEqual(alives, [undefined, undefined, 1_000]);
   assert.deepEqual(filesOf(dir), before);
 });
 
