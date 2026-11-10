@@ -122,27 +122,35 @@ async function get(raw, { binary = false, accept = "*/*" } = {}) {
     const url = await checkFetchUrl(current);
     const left = timeLeft();
     if (left < 2_000) throw new Error("out of time");
-    const res = await fetch(url, {
-      redirect: "manual",
-      headers: { "user-agent": UA, accept, "accept-language": "en-US,en;q=0.8" },
-      signal: AbortSignal.timeout(Math.min(25_000, left - 1_000)),
-    });
-    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-      current = new URL(res.headers.get("location"), url).href;
-      continue;
+    const wait = Math.min(25_000, left - 1_000);
+    try {
+      const res = await fetch(url, {
+        redirect: "manual",
+        headers: { "user-agent": UA, accept, "accept-language": "en-US,en;q=0.8" },
+        signal: AbortSignal.timeout(wait),
+      });
+      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+        current = new URL(res.headers.get("location"), url).href;
+        continue;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status} from ${url.hostname}`);
+      const declared = Number(res.headers.get("content-length") || 0);
+      if (declared > MAX_BYTES) throw new Error(`larger than 15 MB: ${url.hostname}`);
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of res.body) {
+        size += chunk.length;
+        if (size > MAX_BYTES) throw new Error(`larger than 15 MB: ${url.hostname}`);
+        chunks.push(chunk);
+      }
+      const body = Buffer.concat(chunks);
+      return { body: binary ? body : body.toString("utf8"), type: res.headers.get("content-type") || "", url: url.href };
+    } catch (err) {
+      // Told by the server that did not answer, not in the words of Node's
+      // timer, which name nothing.
+      if (err.name === "TimeoutError") throw new Error(`${url.hostname} did not answer in ${Math.round(wait / 1_000)} s`);
+      throw err;
     }
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url.hostname}`);
-    const declared = Number(res.headers.get("content-length") || 0);
-    if (declared > MAX_BYTES) throw new Error(`larger than 15 MB: ${url.hostname}`);
-    const chunks = [];
-    let size = 0;
-    for await (const chunk of res.body) {
-      size += chunk.length;
-      if (size > MAX_BYTES) throw new Error(`larger than 15 MB: ${url.hostname}`);
-      chunks.push(chunk);
-    }
-    const body = Buffer.concat(chunks);
-    return { body: binary ? body : body.toString("utf8"), type: res.headers.get("content-type") || "", url: url.href };
   }
   throw new Error(`too many redirects: ${raw}`);
 }

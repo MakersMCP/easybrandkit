@@ -11,6 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const stores = require("../skills/easybrandkit/scripts/lib/stores");
+const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 
 test("classifies store listings and social profiles, and nothing else", () => {
   assert.deepEqual(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), {
@@ -175,6 +176,22 @@ test("a picture that does not come is skipped, a host that cannot be found is to
   const unknown = await stores.readSource(link, dir);
   assert.equal(unknown.ok, false);
   assert.match(unknown.error, /ENOTFOUND/);
+});
+
+test("a store that does not answer in time is named, not told in the words of Node's timer", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  t.after(() => {
+    setTimeLimit(120_000);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  setTimeLimit(120_000);
+  t.mock.method(globalThis, "fetch", async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  });
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
+  const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir);
+  assert.equal(source.ok, false);
+  assert.equal(source.error, "itunes.apple.com did not answer in 25 s");
 });
 
 test("what a listing says comes in without control characters, and its description keeps its lines", async (t) => {
