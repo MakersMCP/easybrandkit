@@ -2359,9 +2359,11 @@ test("a page a site leads to on this machine or a private network is not read, u
   // on this machine's own address is another program's page.
   let lead = "redirect";
   let port = "";
+  const when = held();
   const site = await serve((req, res) => {
     const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
     const host = String(req.headers.host || "");
+    if (req.url === "/when") return when.ask(res);
     // A local site whose own address is localhost sends a visitor that
     // comes by 127.0.0.1 there.
     if (lead === "its own address" && host === `127.0.0.1:${port}`) return res.writeHead(301, { location: `http://localhost:${port}/` }).end();
@@ -2377,6 +2379,9 @@ test("a page a site leads to on this machine or a private network is not read, u
     // A name the kit's own lookup finds on the web, which the browser finds
     // on this machine, as a site that rebinds its name does.
     if (lead === "a name found elsewhere") return res.writeHead(302, { location: `http://rebind.test:${port}/inside` }).end();
+    // A page that moves on once the kit has cut its logos, so that only the
+    // look after the first screen sees where it went.
+    if (lead === "a script after the logos") return html(brandPage("rgb(255,0,0)").replace("</body>", `<script>fetch("/when").then(() => location.replace("http://127.0.0.1:${port}/inside"))</script></body>`));
     html(brandPage("rgb(255,0,0)").replace("</body>", `<script>setTimeout(() => location.replace("http://127.0.0.1:${port}/inside"), 300)</script></body>`));
   });
   port = new URL(site.origin).port;
@@ -2400,6 +2405,17 @@ test("a page a site leads to on this machine or a private network is not read, u
     await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} led to ${to}, which is on a local or private network, so no kit was made.` && err.earlierKit === dir, how);
     assert.deepEqual(filesOf(dir), before, how);
   }
+  // A page that moves there as the first screen is taken is told then, and
+  // its picture is not kept.
+  lead = "a script after the logos";
+  const steps = [];
+  const log = (line) => {
+    steps.push(line);
+    if (line === "Taking the first screen") when.release();
+  };
+  await assert.rejects(makeKit(given, { dir, stores: false, log }), (err) => err.message === `${given} led to http://127.0.0.1:${port}/inside, which is on a local or private network, so no kit was made.` && err.earlierKit === dir);
+  assert.equal(steps[steps.length - 1], "Taking the first screen");
+  assert.deepEqual(filesOf(dir), before, "a script after the logos");
   // A local site that sends its visitors from 127.0.0.1 to its own address,
   // localhost on the same port, is read there.
   lead = "its own address";
