@@ -218,20 +218,38 @@ test("addresses: bare domains get https, sub-pages point to the home page", () =
   assert.equal(brandName("", "", "https://www.acme.com/"), "Acme");
   // A home page's logo does not name it, and its title's first part does.
   assert.equal(brandName("", "Acme | Payments for teams", "https://acme.com/", { logo: "Globex" }), "Acme");
-  // A page past the home page, read as given, puts its own subject first:
-  // the part of its title that its logo or its host names, else the last.
+  // A page past the home page, read as given, can put its own subject first
+  // or its brand: the part of its title that its logo or its host names,
+  // else of those that do not just say what kind of page it is, the one of
+  // fewest words, the last of two as short.
   const deeper = (title, url, logo) => brandName("", title, url, { deeper: true, logo });
   assert.equal(deeper("Features \u00b7 Brightmoss", "http://127.0.0.1:8737/features.html", "Brightmoss"), "Brightmoss");
   assert.equal(deeper("Features \u00b7 Brightmoss", "http://127.0.0.1:8737/features.html", ""), "Brightmoss");
   assert.equal(deeper("Brightmoss | Features", "http://127.0.0.1:8737/features.html", "Brightmoss logo"), "Brightmoss");
   assert.equal(deeper("Acme Cloud - Pricing", "https://acmecloud.com/pricing", "Back to the home page"), "Acme Cloud");
   assert.equal(deeper("Pricing \u2013 Linear", "https://linear.app/pricing", "Go to homepage"), "Linear");
+  // The brand first, with an alt text that names no one and a host that does
+  // not name it either, as on a project's own pages.
+  assert.equal(deeper("Brightmoss | Features", "http://127.0.0.1:8737/brandfirst.html", "Go to the home page"), "Brightmoss");
+  assert.equal(deeper("Acme Cloud | Changelog", "http://127.0.0.1:8737/changes", ""), "Acme Cloud");
+  assert.equal(deeper("PDF.js - Home", "https://mozilla.github.io/pdf.js/", ""), "PDF.js");
+  assert.equal(deeper("Jekyll \u2022 Simple, blog-aware, static sites", "https://someone.github.io/jekyll/", ""), "Jekyll");
+  assert.equal(deeper("Quickstart | Jekyll \u2022 Simple, blog-aware, static sites", "https://someone.github.io/jekyll/docs/", ""), "Jekyll");
+  assert.equal(deeper("Plant care that remembers \u00b7 Brightmoss", "http://127.0.0.1:8737/care.html", ""), "Brightmoss");
+  assert.equal(deeper("Release notes \u00b7 Brightmoss", "http://127.0.0.1:8737/notes.html", ""), "Brightmoss");
+  assert.equal(deeper("Gallery | Brightmoss", "http://127.0.0.1:8737/gallery.html", ""), "Brightmoss");
   // A title of one part may be the page's subject: the logo's alt text, when
-  // it names something, comes first.
+  // it names something, comes first, and a title that only says what kind of
+  // page it is is no name.
   assert.equal(deeper("Pricing", "https://getacme.com/pricing", "Acme logo"), "Acme");
   assert.equal(deeper("Acme", "https://getacme.com/pricing", "Home"), "Acme");
   assert.equal(deeper("", "https://www.acme.com/pricing", ""), "Acme");
+  assert.equal(deeper("Pricing", "https://getacme.com/pricing", ""), "Getacme");
+  assert.equal(deeper("Features | Pricing", "https://getacme.com/pricing", ""), "Getacme");
   assert.equal(brandName("Acme", "Features \u00b7 Brightmoss", "https://acme.com/x", { deeper: true, logo: "Globex" }), "Acme");
+  // A home page is named as it was.
+  assert.equal(brandName("", "Home", "https://acme.com/"), "Home");
+  assert.equal(brandName("", "Brightmoss | Features", "http://127.0.0.1:8737/"), "Brightmoss");
 });
 
 test("text a site wrote: control characters out, line breaks kept only where asked, cut to its length", () => {

@@ -133,26 +133,36 @@ function logoName(alt) {
   return name.length <= 40 && !/(^|\s)home( ?page)?(\s|$)/i.test(name) ? name : "";
 }
 
+// A part of a page's title that only says what kind of page it is, in the
+// words sites give their menus and their home page: no brand is named that.
+const PAGE_KIND = /^(home|home ?page|start|welcome|overview|features?|products?|solutions|pricing|plans|plans (and|&) pricing|prices|about|about us|company|team|careers|jobs|blog|news|press|docs|documentation|guides?|tutorials?|getting started|get started|quick ?start|introduction|downloads?|installation|help|help cent(er|re)|support|faqs?|contact|contact us|customers|case studies|testimonials|security|trust cent(er|re)|integrations|changelog|roadmap|log ?in|sign (in|up)|privacy|privacy policy|terms|terms of (service|use))$/i;
+
 // The site's name: og:site_name, else the title up to its first separator
 // ("Acme | Payments for teams" is Acme), else the host name. A page past the
 // home page, read as given when the home page could not be read (deeper),
-// can put its own subject first ("Features · Acme"): when its title has
+// can put its own subject first ("Features · Acme") or its brand ("PDF.js -
+// Home", "Jekyll • Simple, blog-aware, static sites"). When its title has
 // more than one part, its name is the part that its logo's alt text (logo)
-// or its host names, else the last part, and a title of one part comes
-// after what that alt text names.
+// or its host names; else, of the parts that do not just say what kind of
+// page it is, the one of fewest words, as a brand's name is shorter than a
+// tagline next to it, and of two as short, the last, as most such titles
+// put the page first. A title of one part comes after what that alt text
+// names, and is not taken when it only says what kind of page it is.
 function brandName(siteName, title, url, { deeper = false, logo = "" } = {}) {
   const own = plainText(siteName, 200);
   if (own) return own;
   const label = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
   // By now one space stands between two words, whatever the page wrote.
   const parts = plainText(title).split(/ [|·•:\u2013\u2014-] /);
-  const fits = (part) => Boolean(part) && part.length <= 40;
+  const fits = (part) => Boolean(part) && part.length <= 40 && !(deeper && PAGE_KIND.test(part));
   const mark = deeper ? logoName(logo) : "";
   if (deeper && parts.length > 1) {
     const same = (a, b) => a.replace(/\s+/g, "").toLowerCase() === b.replace(/\s+/g, "").toLowerCase();
     const named = parts.find((part) => fits(part) && ((mark && same(part, mark)) || same(part, label)));
     if (named) return named;
-    if (fits(parts[parts.length - 1])) return parts[parts.length - 1];
+    const words = (part) => part.split(" ").length;
+    const shortest = parts.filter(fits).reduce((best, part) => (!best || words(part) <= words(best) ? part : best), "");
+    if (shortest) return shortest;
   }
   if (mark) return mark;
   if (fits(parts[0])) return parts[0];
