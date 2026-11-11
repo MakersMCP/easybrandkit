@@ -234,9 +234,10 @@ async function refuseLocal(cdp, url, pageUrl, given) {
 
 // alsoNamed: more names the brand goes by. deeper: the page is one past the
 // home page, read as given when the home page could not be read. given: the
-// address the user gave.
-async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, given = url } = {}) {
-  const chrome = await launch(SCREEN);
+// address the user gave. browser: one started for it, which it closes as it
+// would its own.
+async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, given = url, browser = null } = {}) {
+  const chrome = browser || (await launch(SCREEN));
   // A browser that has just not answered is not waited for again as it is
   // asked to quit.
   let unanswered = false;
@@ -471,7 +472,17 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     throw err;
   }
   const work = run.work;
+  // The browser, once the folder is known to take the kit and before any
+  // work: one that cannot be started stops the run here, before anything is
+  // read. The first page read takes it.
+  let browser = null;
+  const take = () => {
+    const one = browser;
+    browser = null;
+    return one;
+  };
   try {
+    browser = await launch(SCREEN);
     let given = null;
     let read = null;
     let page = "";
@@ -497,13 +508,13 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       try {
         // A page the kit chose on a local or private network is not opened.
         if (page !== asked && !(await mayOpen(page, asked))) throw pageFailed(`${page} ${LOCAL}, so no kit was made.`, `${LOCAL}, which easybrandkit does not open on its own`);
-        read = await readPage(page, work, log, { alsoNamed: appName, facts, given: asked });
+        read = await readPage(page, work, log, { alsoNamed: appName, facts, given: asked, browser: take() });
       } catch (err) {
         if (!err.pageFailed || page === asked || err.outOfTime) throw err;
         failed = err.pageFailed;
         for (const name of fs.readdirSync(work)) if (!had.includes(name)) fs.rmSync(path.join(work, name), { recursive: true, force: true });
       }
-      if (failed && !listing) read = await readPage(asked, work, log, { alsoNamed: appName, facts, deeper: true, given: asked });
+      if (failed && !listing) read = await readPage(asked, work, log, { alsoNamed: appName, facts, deeper: true, given: asked, browser: take() });
     }
     // A listing none of whose pictures came, and no website to read: a name
     // alone is no kit to put in the place of an earlier one.
@@ -576,6 +587,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (removed ? removed.earlier : run.earlier) plain.earlierKit = target;
     throw plain;
   } finally {
+    if (browser) await take().close();
     discardRun(run);
   }
 }

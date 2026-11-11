@@ -1191,7 +1191,8 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   const cli = (...args) => spawnSync(process.execPath, [CLI, "acme.example", ...args], { encoding: "utf8", env });
   const failed = cli("--out", dir);
   assert.equal(failed.status, 1);
-  const said = `No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary. The kit already in ${dir} is as it was.`;
+  const none = `No Chrome, Chromium, Edge or Brave found: CHROME_PATH is ${path.join(parent, "no-chrome")}, and there is nothing there. Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it.`;
+  const said = `${none} The kit already in ${dir} is as it was.`;
   assert.equal(failed.stderr, `easybrandkit: ${said}\n`);
   assert.deepEqual(filesOf(dir), before);
   const json = cli("--out", dir, "--json");
@@ -1199,7 +1200,7 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   assert.deepEqual(JSON.parse(json.stdout), { ok: false, error: said });
   const fresh = cli("--out", path.join(parent, "new", "acme"));
   assert.equal(fresh.status, 1);
-  assert.equal(fresh.stderr, "easybrandkit: No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.\n");
+  assert.equal(fresh.stderr, `easybrandkit: ${none}\n`);
   assert.deepEqual(fs.readdirSync(parent), ["kit"]);
   // A file, a folder below a file, and a link to nothing, also written with
   // a slash at its end, are no folders.

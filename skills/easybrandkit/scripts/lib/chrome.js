@@ -11,51 +11,16 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
+const { browserPlace, couldNotStart, endedEarly } = require("./program");
 
-const MAC = [
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-];
-const LINUX = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"];
-const WINDOWS = [
-  ["PROGRAMFILES", "Google\\Chrome\\Application\\chrome.exe"],
-  ["PROGRAMFILES(X86)", "Google\\Chrome\\Application\\chrome.exe"],
-  ["LOCALAPPDATA", "Google\\Chrome\\Application\\chrome.exe"],
-  ["PROGRAMFILES(X86)", "Microsoft\\Edge\\Application\\msedge.exe"],
-  ["PROGRAMFILES", "Microsoft\\Edge\\Application\\msedge.exe"],
-];
-
-function onPath(name) {
-  for (const dir of String(process.env.PATH || "").split(path.delimiter)) {
-    if (!dir) continue;
-    const file = path.join(dir, name);
-    try {
-      fs.accessSync(file, fs.constants.X_OK);
-      return file;
-    } catch {
-      // Not in this directory.
-    }
-  }
-  return "";
-}
-
+// The browser this run would start, or "" when none is found or what is
+// found cannot be started (browserPlace in program.js says why).
 function findChrome() {
-  if (process.env.CHROME_PATH) return fs.existsSync(process.env.CHROME_PATH) ? process.env.CHROME_PATH : "";
-  if (process.platform === "darwin") return MAC.find((file) => fs.existsSync(file)) || "";
-  if (process.platform === "win32") {
-    for (const [root, rest] of WINDOWS) {
-      const file = process.env[root] ? path.join(process.env[root], rest) : "";
-      if (file && fs.existsSync(file)) return file;
-    }
+  try {
+    return browserPlace().file;
+  } catch {
     return "";
   }
-  for (const name of LINUX) {
-    const file = onPath(name);
-    if (file) return file;
-  }
-  return "";
 }
 
 // The browsers this process has open, so that a run that is stopped can end
@@ -319,14 +284,42 @@ const LOW_WAIT = 3_000;
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
 async function launch({ width, height }) {
-  const binary = findChrome();
-  if (!binary) {
-    throw new Error("No Chrome, Chromium, Edge or Brave found. Install one, or point CHROME_PATH at its binary.");
-  }
-  const name = path.basename(binary);
+  // A browser that cannot be started is told before anything is made.
+  const place = browserPlace();
   const temp = os.tmpdir();
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
+  // What is made in the profile before the browser starts: on a disk with
+  // no room for it, the browser would have none for its own files either,
+  // and would wait for the run's whole time.
+  const room = (err, at) => {
+    dropProfile();
+    return NO_ROOM.has(err.code) ? Object.assign(err, { path: err.path || at }) : null;
+  };
+  // The profile removed. With no file left to open, a folder cannot be
+  // listed, so what was made in it is removed by name.
+  const dropProfile = () => {
+    try {
+      fs.rmSync(profile, { recursive: true, force: true });
+      return;
+    } catch {
+      // Too short of files to list it.
+    }
+    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "easybrandkit-output")]) {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        // Not made.
+      }
+    }
+    for (const dir of [path.join(profile, "Default"), profile]) {
+      try {
+        fs.rmdirSync(dir);
+      } catch {
+        // Not made, or left for the system's temp clean-up.
+      }
+    }
+  };
   // A download that starts while the browser takes no refusal (see below)
   // goes into the throwaway profile and is removed with it, not into the
   // Downloads folder of the user the browser runs as.
@@ -335,51 +328,85 @@ async function launch({ width, height }) {
     fs.mkdirSync(path.join(profile, "Default"));
     fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false } }));
   } catch (err) {
-    // A disk with no room for this has none for the browser's own files
-    // either, and the browser would wait for the run's whole time. For
-    // anything else, the refusal still holds.
-    if (NO_ROOM.has(err.code)) {
-      fs.rmSync(profile, { recursive: true, force: true });
-      throw Object.assign(err, { path: err.path || preferences });
-    }
+    // For anything but no room, the refusal still holds.
+    if (NO_ROOM.has(err.code)) throw room(err, preferences);
   }
   // Chrome on Linux has its crash handler write the reports of its processes
   // into the user's own browser's folder (~/.config/google-chrome/Crash
   // Reports), where nothing removes them; Ctrl-\ asks for one from each of
   // its helpers. BREAKPAD_DUMP_LOCATION puts them in the throwaway profile.
   const env = { ...process.env, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
+  // What the browser prints, in one file in the profile, in the order it
+  // printed it: its first line says why one that ends before it answers
+  // did, and nothing has to read it while the browser runs.
+  const output = path.join(profile, "easybrandkit-output");
+  let printing;
+  try {
+    printing = fs.openSync(output, "a", 0o600);
+  } catch (err) {
+    const full = room(err, output);
+    if (full) throw full;
+    throw new Error(couldNotStart(place, err));
+  }
   // --remote-debugging-pipe: the browser takes the DevTools protocol on its
   // file descriptors 3 and 4, which only this process holds, and opens no
   // port for it.
-  const child = spawn(
-    binary,
-    [
-      "--headless=new",
-      "--remote-debugging-pipe",
-      `--user-data-dir=${profile}`,
-      `--window-size=${width},${height}`,
-      "--hide-scrollbars",
-      "--mute-audio",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-extensions",
-      "--disable-sync",
-      "--use-mock-keychain",
-      "--password-store=basic",
-      // Chrome refuses to start as root without it (a container, a CI box).
-      ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
-      "about:blank",
-    ],
-    { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"], env },
-  );
-  const pipe = pipeOf(child.stdio[3], child.stdio[4]);
+  let child;
+  try {
+    child = spawn(
+      place.file,
+      [
+        "--headless=new",
+        "--remote-debugging-pipe",
+        `--user-data-dir=${profile}`,
+        `--window-size=${width},${height}`,
+        "--hide-scrollbars",
+        "--mute-audio",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-sync",
+        "--use-mock-keychain",
+        "--password-store=basic",
+        // Chrome refuses to start as root without it (a container, a CI box).
+        ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
+        "about:blank",
+      ],
+      { stdio: ["ignore", printing, printing, "pipe", "pipe"], env },
+    );
+  } catch (err) {
+    // A program the system will not start in a way Node does not hand back
+    // as an event.
+    fs.closeSync(printing);
+    room(err, output);
+    throw new Error(couldNotStart(place, err));
+  }
+  fs.closeSync(printing);
+  // How the browser ended, and the error the system gave if it could not
+  // start it at all.
   let exited = false;
+  let ending = { code: null, signal: null };
+  let notStarted = null;
+  // Out of files to start it with, the system gives no pipe at all, and its
+  // error comes a moment later.
+  if (!(child.stdio && child.stdio[3])) {
+    const err = await new Promise((resolve) => child.once("error", resolve));
+    room(err, output);
+    throw new Error(couldNotStart(place, err));
+  }
+  const pipe = pipeOf(child.stdio[3], child.stdio[4]);
   const ended = () => {
     exited = true;
     pipe.end();
   };
-  child.on("exit", ended);
-  child.on("error", ended);
+  child.on("exit", (code, signal) => {
+    ending = { code, signal };
+    ended();
+  });
+  child.on("error", (err) => {
+    notStarted = err;
+    ended();
+  });
   const entry = { child, profile, temp, before };
   open.add(entry);
   // Whether the browser has answered on its pipe: one that never has is not
@@ -511,16 +538,33 @@ async function launch({ width, height }) {
   // profile: a browser that ended at once can have found no room either.
   const tooLong = exited ? socketTooLong(temp, before) : 0;
   const full = exited && !tooLong ? noRoomIn(profile) : null;
+  const printed = exited && !notStarted ? firstBytes(output) : "";
   await close();
   if (tooLong) {
-    throw new Error(`${name} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
+    throw new Error(`${place.name} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
   }
   if (full) throw full;
   if (running) {
-    const late = noKit(noAnswer(`${name} was started but did not answer`, wait));
+    const late = noKit(noAnswer(`${place.name} was started but did not answer`, wait));
     throw Object.assign(late, { message: `${late.message} If it happens again, point CHROME_PATH at another browser.` });
   }
-  throw new Error(`${name} did not start. Try again, or point CHROME_PATH at another browser.`);
+  if (notStarted) throw new Error(couldNotStart(place, notStarted));
+  throw new Error(endedEarly(place, { output: printed, ...ending }));
+}
+
+// The first bytes of a file the browser printed into, as text: "" when it
+// cannot be read.
+function firstBytes(file, most = 8_192) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const bytes = Buffer.alloc(most);
+    return bytes.subarray(0, fs.readSync(fd, bytes, 0, most, 0)).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 // A socket's path on Linux holds 108 bytes, the last of them a zero.

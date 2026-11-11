@@ -940,7 +940,7 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
     const pidFile = path.join(parent, "quick.pid");
     fs.writeFileSync(quick, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\n'${process.execPath}' -e 'setTimeout(() => {}, 30000)' "$profile" &\necho $! > "${pidFile}"\n`, { mode: 0o755 });
     process.env.CHROME_PATH = quick;
-    await assert.rejects(launch({ width: 800, height: 600 }), /^Error: quick did not start\./);
+    await assert.rejects(launch({ width: 800, height: 600 }), /^Error: quick did not start: CHROME_PATH is .*, which ended before it answered: it printed nothing and exited with 0\. /);
     const helper = Number(fs.readFileSync(pidFile, "utf8"));
     t.after(() => {
       if (!ended(helper)) process.kill(helper, "SIGKILL");
@@ -1541,7 +1541,7 @@ test("a browser that cannot start because the temp folder's path is too long for
   const temp = ownTemp(t);
   if (!temp) return;
   process.env.TMPDIR = temp;
-  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === "chrome did not start. Try again, or point CHROME_PATH at another browser.");
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === `chrome did not start: CHROME_PATH is ${chrome}, which ended before it answered: it printed nothing and exited with 134. Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it.`);
   assert.deepEqual(fs.readdirSync(temp), []);
 });
 
