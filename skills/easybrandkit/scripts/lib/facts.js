@@ -442,11 +442,13 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
   };
   // Why the tab's page, at the addresses it gives, is not to be read: it is
   // off the site, or on this machine or a private network where the kit
-  // reads nothing for the address given. "" when it is neither.
-  const away = async (addresses) => {
+  // reads nothing for the address given. "" when it is neither. The page
+  // the kit opened (opened) is there itself, as when only the browser finds
+  // its name there; one the page went on to is where it led.
+  const away = async (addresses, opened = "") => {
     for (const at of new Set(addresses.filter(Boolean))) {
       if (elsewhere(at)) return `it led to ${at}`;
-      if (!(await mayOpen(at, given, seenOf(cdp, at)))) return `it led to ${at}, which ${LOCAL}`;
+      if (!(await mayOpen(at, given, seenOf(cdp, at)))) return at.split("#")[0] === opened.split("#")[0] ? `it ${LOCAL}` : `it led to ${at}, which ${LOCAL}`;
     }
     return "";
   };
@@ -455,10 +457,10 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
   // page: a page can move on by its own script once the kit has read it. So
   // where the tab is, and where the text read came from, are looked at before
   // and after its text is read.
-  const left = notThePage() || (await away([await tabAt(), cdp.answer.url]));
+  const left = notThePage() || (await away([await tabAt(), cdp.answer.url], home));
   if (left) return { pages, skipped: [{ role, url: home, reason: left }] };
   const model = await readModel(cdp).catch(() => null);
-  const notHome = notThePage() || (await away([model && model.url, await tabAt(), cdp.answer.url])) || (model && model.tree ? "" : "its text could not be read");
+  const notHome = notThePage() || (await away([model && model.url, await tabAt(), cdp.answer.url], home)) || (model && model.tree ? "" : "its text could not be read");
   if (notHome) return { pages, skipped: [{ role, url: home, reason: notHome }] };
   pages.push({ role, url: home, readAt: new Date().toISOString(), model });
   const picks = pickPages(model, home, { local });
@@ -507,7 +509,7 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
     log(`Reading the ${pick.role} page`);
     try {
       const at = await navigate(cdp, pick.url);
-      const led = await away([at, cdp.answer.url]);
+      const led = await away([at, cdp.answer.url], pick.url);
       if (led) {
         skipped.push({ ...pick, reason: led });
         continue;
@@ -527,7 +529,7 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
       }
       // A page that has moved itself off the site, or to this machine or a
       // private network, since it loaded, also as its text was read.
-      const moved = await away([read && read.url, await tabAt(), cdp.answer.url]);
+      const moved = await away([read && read.url, await tabAt(), cdp.answer.url], pick.url);
       if (moved) {
         skipped.push({ ...pick, reason: moved });
         continue;

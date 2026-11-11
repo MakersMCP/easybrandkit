@@ -3849,6 +3849,47 @@ test("a page's own move to an address that is not a web address is cancelled in 
   assert.deepEqual(startedSoFar(), []);
 });
 
+test("a page the kit chose that only the browser finds on this machine is opened but not read, and told as there itself", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  // Every name under .test is on the web for the kit's own lookup. The
+  // browser reaches www.brand.test and blog.brand.test through a proxy,
+  // which says nothing of where they are, and brand.test itself, at this
+  // machine's address: the kit opens a page there, and only the browser's
+  // answer says where it is.
+  const asked = [];
+  const other = await serve((req, res) => {
+    asked.push(`${req.headers.host} ${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end("<!doctype html><title>Console</title><h1>Admin console</h1><p>Used by 12 engineers.</p>");
+  });
+  const otherPort = new URL(other.origin).port;
+  const site = await serve((req, res) => {
+    if (req.url === "/robots.txt") return res.writeHead(404).end();
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="http://brand.test:${otherPort}/pricing">Pricing</a>`));
+  });
+  const port = new URL(site.origin).port;
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    other.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const proxy = await proxyOf(t);
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=brand.test"]);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  // The kit's own robots.txt request, which goes by its own lookup: none.
+  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  // With --facts, a menu page on another port of such a name: its program is
+  // asked for it, and nothing of it is read.
+  const { facts } = await makeKit(`http://www.brand.test:${port}/`, { dir: path.join(parent, "menu"), stores: false, facts: true });
+  assert.deepEqual(facts.skipped.map(({ role, url, reason }) => [role, url, reason]), [["pricing", `http://brand.test:${otherPort}/pricing`, "it is on a local or private network"]]);
+  assert.ok(asked.includes(`brand.test:${otherPort} /pricing`), asked.join(", "));
+  assert.doesNotMatch(fs.readFileSync(path.join(parent, "menu", "FACTS.md"), "utf8"), /12 engineers|Admin console/);
+  // A blog's address, whose home page is on the site's bare name: that home
+  // page is there itself, and the blog's page is read as given.
+  const blog = `http://blog.brand.test:${port}/post`;
+  const { kit } = await makeKit(blog, { dir: path.join(parent, "blog"), stores: false });
+  assert.deepEqual(kit.notes, [`The home page, http://brand.test:${port}/, could not be read: it is on a local or private network. ${blog} was read as given, and its name, header and colors can differ from the home page's.`]);
+});
+
 test("what the guard cancelled is asked of each frame for a few seconds at most, and not past a frame that does not answer", async () => {
   const { triedSoFar } = require("../skills/easybrandkit/scripts/lib/chrome");
   // A page of twenty frames whose thread is busy: no world is made in any.

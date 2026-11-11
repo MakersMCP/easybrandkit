@@ -225,10 +225,13 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
 // site's redirect or its script can lead there, and what such a page shows
 // is not read. Where the browser says it got the page counts too, so a name
 // that the kit's own lookup does not find there, or finds elsewhere, is
-// still told by where the browser found it.
+// still told by where the browser found it: then the page opened, url, can
+// be there itself, which it is told as.
 async function refuseLocal(cdp, url, pageUrl, given) {
   for (const at of new Set([pageUrl, cdp.answer.url].filter(Boolean))) {
-    if (!(await mayOpen(at, given, seenOf(cdp, at)))) throw pageFailed(`${url} led to ${at}, which ${LOCAL}, so no kit was made.`, `led to ${at}, which ${LOCAL}`);
+    if (await mayOpen(at, given, seenOf(cdp, at))) continue;
+    if (at.split("#")[0] === url.split("#")[0]) throw pageFailed(`${url} ${LOCAL}, so no kit was made.`, LOCAL);
+    throw pageFailed(`${url} led to ${at}, which ${LOCAL}, so no kit was made.`, `led to ${at}, which ${LOCAL}`);
   }
 }
 
@@ -528,7 +531,9 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (page) {
       const had = fs.readdirSync(work);
       try {
-        // A page the kit chose on a local or private network is not opened.
+        // A page the kit chose that its own lookup finds on a local or
+        // private network is not opened; one only the browser finds there
+        // is opened and then refused (refuseLocal).
         if (page !== asked && !(await mayOpen(page, asked))) throw pageFailed(`${page} ${LOCAL}, so no kit was made.`, `${LOCAL}, which easybrandkit does not open on its own`);
         read = await readPage(page, work, log, { alsoNamed: appName, facts, given: asked, browser: take() });
       } catch (err) {
