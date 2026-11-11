@@ -8,7 +8,7 @@
     {
       "name": "easybrandkit",
       "description": "Reads a product's website in a headless browser and saves its logos (cut on their real background), colors, fonts, first screen and app store images as brand.json and BRAND.md.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "source": "./",
       "skills": ["./skills/easybrandkit"],
       "author": {
