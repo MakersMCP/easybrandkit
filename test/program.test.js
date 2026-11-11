@@ -382,7 +382,7 @@ test("a browser whose pipe closes a moment before it ends is told by how it ende
   stoppedBeforeAnyWork(run(parent, { CHROME_PATH: handed }), `not-handed did not start: CHROME_PATH is ${handed}, which ended before it answered: it printed "${notOpen}" and exited with 13. ${handOn}`);
 });
 
-test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it, as Windows looks for it", (t) => {
+test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it, in folders written in quotes too, as Windows looks for it", (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-names-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const bin = path.join(parent, "bin");
@@ -395,6 +395,21 @@ test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it
   // A name with no extension is not taken as it is there, as Windows does
   // not start such a file by that name.
   assert.equal(lookOnPath("brave", folders, true).file, "");
+  // A folder in quotes, as one with a space or a ; in its name can be
+  // written in PATH, is taken without them, as libuv takes it for Node's
+  // spawn there: a ; inside the quotes is part of the folder's name, and a
+  // quote that is not closed runs to the end.
+  const spaced = path.join(parent, "Program Files", "Chrome");
+  const parted = path.join(parent, "a;b");
+  for (const dir of [spaced, parted]) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "chrome.exe"), "", { mode: 0o755 });
+  }
+  const none = path.join(parent, "none");
+  assert.equal(lookOnPath("chrome", `${none};"${spaced}"`, true).file, path.join(spaced, "chrome.exe"));
+  assert.equal(lookOnPath("chrome", `"${none}";'${spaced}';${bin}`, true).file, path.join(spaced, "chrome.exe"));
+  assert.equal(lookOnPath("chrome", `"${parted}";${bin}`, true).file, path.join(parted, "chrome.exe"));
+  assert.equal(lookOnPath("chrome", `${none};"${spaced}`, true).file, path.join(spaced, "chrome.exe"));
   // Elsewhere a name is looked for as it is.
   if (linux) {
     assert.equal(lookOnPath("chrome", bin, false).file, "");

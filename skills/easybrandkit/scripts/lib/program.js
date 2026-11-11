@@ -163,13 +163,32 @@ function wrongWith(at) {
 // name that has an extension as it is first; elsewhere a name is as it is.
 const namesOf = (name, windows = WINDOWS) => (!windows ? [name] : [...(path.win32.extname(name) ? [name] : []), `${name}.com`, `${name}.exe`]);
 
+// The folders of a PATH. On Windows a folder can be written in quotes, as
+// one with a space or a ; in its name is: libuv, which Node's spawn uses
+// there, takes a folder that starts with a quote up to the quote that
+// closes it, a ; inside it too, and drops its quotes. Elsewhere PATH is
+// parted at each delimiter, and a quote is part of a folder's name.
+function foldersOf(value, windows = WINDOWS) {
+  const text = String(value || "");
+  if (!windows) return text.split(path.delimiter);
+  const folders = [];
+  for (let at = 0; at < text.length; ) {
+    const quote = text[at] === '"' || text[at] === "'" ? text.indexOf(text[at], at + 1) : at;
+    const semi = text.indexOf(";", quote === -1 ? text.length : quote);
+    const end = semi === -1 ? text.length : semi;
+    folders.push(text.slice(at, end).replace(/^["']/, "").replace(/["']$/, ""));
+    at = end + 1;
+  }
+  return folders;
+}
+
 // The program called `name` on PATH, the way the system looks it up: the
 // first one this user may run, past those it may not. { file } for that
 // one, and { seen }, each match before it that it may not run, with what is
 // wrong with it. windows: whether to look as Windows does.
 function lookOnPath(name, folders = process.env.PATH, windows = WINDOWS) {
   const seen = [];
-  for (const dir of String(folders || "").split(windows ? ";" : path.delimiter)) {
+  for (const dir of foldersOf(folders, windows)) {
     if (!dir) continue;
     for (const one of namesOf(name, windows)) {
       const at = path.resolve(dir, one);
