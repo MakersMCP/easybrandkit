@@ -340,12 +340,21 @@ test("a browser that ends before it answers is told by the line that says why, p
   const sandbox = "Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted";
   const boxed = write("no-sandbox", printing([bus, sandbox, "[1:1:1111/044331.800000:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:202] Check failed: . : Invalid argument (22)"], "kill -TRAP $$"));
   stoppedBeforeAnyWork(run(parent, { CHROME_PATH: boxed }), said(boxed, `it printed "${sandbox}" and was stopped by SIGTRAP`, "Its sandbox could not start: on Linux a browser's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined."));
-  // Nothing but those lines: the first is quoted.
+  // Nothing but those lines, as a browser that crashes or is killed as it
+  // starts prints: none of them is quoted, as none says why it ended.
   const only = write("only-noise", printing([bus], "exit 5"));
-  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: only }), said(only, `it printed "${bus}" and exited with 5`));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: only }), said(only, "it printed only the lines Chrome prints on every start and exited with 5"));
+  const crashed = write("crashed", printing(noise.slice(0, 3), "kill -SEGV $$"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: crashed }), said(crashed, "it was stopped by SIGSEGV"));
+  // Unless one of them says that there were too many files open, as the
+  // D-Bus line of a browser that had no file left to open for its socket
+  // does.
+  const busFiles = "[1:2:1111/071329.445107:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Failed to open socket: Too many open files";
+  const noFiles = write("bus-short-of-files", printing([noise[2], busFiles], "exit 6"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: noFiles }), said(noFiles, `it printed "${busFiles}" and exited with 6`, "The browser had as many files open as it may: raise that limit, as ulimit -n does, and run it again."));
   // As the lines come by themselves.
   assert.equal(firstLine(`${noise.join("\n")}\n  the cause  \nlater`), "the cause");
-  assert.equal(firstLine(noise.slice(2).join("\n")), noise[2]);
+  assert.equal(firstLine(noise.slice(2).join("\n")), "");
 });
 
 test("a browser whose pipe closes a moment before it ends is told by how it ended, and one that closes the pipe and keeps running is told as that", { skip }, (t) => {

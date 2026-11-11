@@ -294,12 +294,15 @@ const SAID = [
 ];
 
 // The line of what a program printed that says the most of why it ended:
-// the first that holds words of SAID, else the first that is not one of
-// Chrome's NOISE, else the first, each trimmed; "" when it printed nothing.
+// the first that holds words of SAID, one of Chrome's NOISE only when no
+// other does, else the first that is not one of NOISE, each trimmed; ""
+// when it printed nothing, or nothing but NOISE, which says nothing of why
+// it ended.
 function tellingLine(output) {
   const lines = String(output || "").split("\n").map((one) => one.trim()).filter(Boolean);
   const telling = lines.filter((one) => !NOISE.test(one));
-  return telling.find((one) => SAID.some(([words]) => words.test(one))) || telling[0] || lines[0] || "";
+  const said = (one) => SAID.some(([words]) => words.test(one));
+  return telling.find(said) || lines.find(said) || telling[0] || "";
 }
 
 // That line of what a program printed, quoted as it is: cut to about 200
@@ -313,12 +316,14 @@ function firstLine(output) {
 
 // The message for a browser that ended before it answered on its pipe: the
 // line it printed that says the most, its exit status or the signal that
-// stopped it, and what to do, as that line says when it is one of SAID.
+// stopped it, and what to do, as that line says when it is one of SAID. One
+// that printed only Chrome's NOISE is not quoted.
 function endedEarly(place, { output = "", code = null, signal = null }) {
   const line = firstLine(output);
   const exited = code !== null && code !== undefined;
   const end = exited ? `exited with ${code}` : signal ? `was stopped by ${signal}` : "ended";
-  const what = line ? `it printed "${line}" and ${end}` : exited ? `it printed nothing and ${end}` : `it ${end}`;
+  const printed = /\S/.test(output) ? "only the lines Chrome prints on every start" : "nothing";
+  const what = line ? `it printed "${line}" and ${end}` : exited ? `it printed ${printed} and ${end}` : `it ${end}`;
   const [, fix = place.value ? FIX_SET : FIX_FOUND] = SAID.find(([words]) => words.test(tellingLine(output))) || [];
   return `${place.name} did not start: ${place.subject} ended before it answered: ${what}. ${fix}`;
 }
