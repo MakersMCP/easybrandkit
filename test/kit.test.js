@@ -3755,29 +3755,43 @@ test("a site cannot make the browser start a program of this machine with an add
   const mail = "mailto:hello@acme.example?subject=Hi";
   let way = "";
   const page = brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="/pricing">Pricing</a>`);
+  // Another site, whose frame's address redirects to one.
+  const far = await serve((req, res) => res.writeHead(302, { location: "mailto:far@acme.example" }).end());
+  const farFrame = far.origin.replace("127.0.0.1", "localhost");
   const site = await serve((req, res) => {
     const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
     if (req.url === "/robots.txt") return res.writeHead(404).end();
     if (req.url === "/pricing") return way === "a menu page's redirect" ? res.writeHead(302, { location: "mailto:sales@acme.example" }).end() : html(brandPage("rgb(255,0,0)"));
+    if (req.url === "/to-mail") return res.writeHead(302, { location: "mailto:redirect@acme.example" }).end();
     if (req.url !== "/") return res.writeHead(404).end();
     if (way === "a redirect") return res.writeHead(302, { location: mail }).end();
+    const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
     const ways = {
       "its script": `<script>location.href = ${JSON.stringify(mail)};</script>`,
       "a refresh": `<meta http-equiv="refresh" content="0;url=${mail}">`,
-      "a frame": `<iframe src="${mail}" style="width:1px;height:1px;border:0"></iframe>`,
+      "a frame": frame(mail),
       "a window": `<script>window.open(${JSON.stringify(mail)});</script>`,
       "a later move": `<script>setTimeout(() => location.assign("news:comp.lang.misc"), 500);</script>`,
-      "four frames": [1, 2, 3, 4].map((n) => `<iframe src="mailto:${n}@acme.example" style="width:1px;height:1px;border:0"></iframe>`).join(""),
+      "a frame's redirect": frame("/to-mail"),
+      "the redirect of another site's frame": frame(`${farFrame}/to-mail`),
+      "a frame the page sends there": `<iframe id="sent" style="width:1px;height:1px;border:0"></iframe><script>document.getElementById("sent").contentWindow.location = "mailto:sent@acme.example";</script>`,
+      "four frames": [1, 2, 3, 4].map((n) => frame(`mailto:${n}@acme.example`)).join(""),
     };
     html(page.replace("</body>", `${ways[way] || ""}</body>`));
   });
-  t.after(() => site.server.close());
+  t.after(() => {
+    site.server.close();
+    far.server.close();
+  });
   const not = (url) => `${site.origin}/ tried to open ${url}, which is not a web address: it was not opened.`;
   // A page's own move, by its script, a refresh or a later script, is
   // cancelled before the browser acts on it, and a window it asks for is not
-  // opened without a click. A frame's own address reaches the browser, and
-  // its stand-ins take it. Each is in the kit's notes, and the page is read.
-  for (const [name, url] of [["its script", mail], ["a refresh", mail], ["a frame", mail], ["a window", mail], ["a later move", "news:comp.lang.misc"]]) {
+  // opened without a click. A frame's own address, the redirect of a frame's
+  // address, of another site's frame too, and a frame the page makes and
+  // sends there by its script reach the browser, and its cut bus and its
+  // stand-ins take them. Each is in the kit's notes, and the page is read.
+  const ways = [["its script", mail], ["a refresh", mail], ["a frame", mail], ["a window", mail], ["a later move", "news:comp.lang.misc"], ["a frame's redirect", "mailto:redirect@acme.example"], ["the redirect of another site's frame", "mailto:far@acme.example"], ["a frame the page sends there", "mailto:sent@acme.example"]];
+  for (const [name, url] of ways) {
     way = name;
     const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, name.replace(/ /g, "-")), stores: false });
     assert.deepEqual(startedSoFar(), [], `nothing started for ${name}`);
@@ -3810,10 +3824,12 @@ test("a site cannot make the browser start a program of this machine with an add
   await assert.rejects(makeKit(`${site.origin}/`, { dir: path.join(parent, "redirect"), stores: false }), (err) => err.message === `${site.origin}/ led to ${mail}, which is not a web address, so no kit was made.`);
   assert.deepEqual(startedSoFar(), [], "nothing started for a redirect");
   assert.equal(fs.existsSync(path.join(parent, "redirect")), false);
-  // A menu page that redirects to one is named as not read.
+  // A menu page that redirects to one is named as not read, and the kit's
+  // notes say the address was not opened.
   way = "a menu page's redirect";
-  const { facts } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "menu"), stores: false, facts: true });
+  const { kit: menu, facts } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "menu"), stores: false, facts: true });
   assert.deepEqual(facts.skipped.map(({ role, reason }) => [role, reason]), [["pricing", "it led to mailto:sales@acme.example, which is not a web address"]]);
+  assert.deepEqual(menu.notes, [`${site.origin}/pricing tried to open mailto:sales@acme.example, which is not a web address: it was not opened.`]);
   assert.deepEqual(startedSoFar(), [], "nothing started for a menu page");
 });
 

@@ -939,9 +939,10 @@ const GUARD = `(() => {
 
 // The guard in each new document of the tab, and what the tab says of the
 // rest: an address that is not a web address that the browser began to go
-// to in the page or a frame, and a window a page asked for with one, which
-// the browser does not open without a click. Each is kept in cdp.tried with
-// the page the kit had opened (cdp.page), the address and how it came.
+// to in the page or a frame, one a document's redirect led to, in a frame of
+// another site too, and a window a page asked for with one, which the
+// browser does not open without a click. Each is kept in cdp.tried with the
+// page the kit had opened (cdp.page), the address and how it came.
 async function guard(cdp) {
   cdp.tried = [];
   const keep = (url, how) => {
@@ -949,6 +950,10 @@ async function guard(cdp) {
   };
   cdp.on("Page.frameStartedNavigating", ({ url }) => keep(url, "started"));
   cdp.on("Page.windowOpen", ({ url }) => keep(url, "window"));
+  // A redirect's new address comes as the next request of the same document.
+  cdp.on("Network.requestWillBeSent", ({ type, request }) => {
+    if (type === "Document" && request) keep(request.url, "started");
+  });
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD });
 }
 
