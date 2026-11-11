@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
-const { browserPlace, couldNotStart, endedEarly } = require("./program");
+const { browserPlace, wrongWith, couldNotStart, endedEarly, systemWords } = require("./program");
 
 // The browser this run would start, or "" when none is found or what is
 // found cannot be started (browserPlace in program.js says why).
@@ -21,6 +21,32 @@ function findChrome() {
   } catch {
     return "";
   }
+}
+
+// The programs Chrome on Linux hands an address that is not a web address
+// to, such as mailto:, news: and snews:, which it opens without asking:
+// xdg-settings, asked first whether the browser is itself the one for such
+// addresses, xdg-email and xdg-open, and the browsers xdg-open goes on to.
+const HANDLERS = ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser"];
+// Where the browser gets those stand-ins: on Linux, and on the other systems
+// whose Chrome hands such addresses on through PATH, not macOS or Windows.
+const STAND_INS = process.platform !== "win32" && process.platform !== "darwin";
+
+// A folder in the profile of stand-ins for those programs, put first on the
+// browser's PATH, so that the system finds them instead: each a link to the
+// system's own true, which does nothing and exits 0. A folder on a disk
+// mounted noexec takes such a link as well, since the system runs the file
+// it leads to. Where there is no true, each is a link to itself, which the
+// system cannot follow, so its search ends there and starts nothing.
+function standIns(profile) {
+  const dir = path.join(profile, "stand-ins");
+  fs.mkdirSync(dir, { mode: 0o700 });
+  const nothing = ["/usr/bin/true", "/bin/true"].find((file) => !wrongWith(file));
+  for (const name of HANDLERS) {
+    const at = path.join(dir, name);
+    fs.symlinkSync(nothing || at, at);
+  }
+  return dir;
 }
 
 // The browsers this process has open, so that a run that is stopped can end
@@ -305,14 +331,15 @@ async function launch({ width, height }) {
     } catch {
       // Too short of files to list it.
     }
-    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "easybrandkit-output")]) {
+    const stands = path.join(profile, "stand-ins");
+    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "easybrandkit-output"), ...HANDLERS.map((name) => path.join(stands, name))]) {
       try {
         fs.unlinkSync(file);
       } catch {
         // Not made.
       }
     }
-    for (const dir of [path.join(profile, "Default"), profile]) {
+    for (const dir of [path.join(profile, "Default"), stands, profile]) {
       try {
         fs.rmdirSync(dir);
       } catch {
@@ -336,6 +363,21 @@ async function launch({ width, height }) {
   // Reports), where nothing removes them; Ctrl-\ asks for one from each of
   // its helpers. BREAKPAD_DUMP_LOCATION puts them in the throwaway profile.
   const env = { ...process.env, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
+  // A site can send the browser to mailto:, news: or snews:, which Chrome
+  // on Linux hands to a program of the machine through PATH without asking:
+  // the mail program, started as the user who runs the kit, with the site's
+  // address. The stand-ins come first on its PATH, the rest as it was. On
+  // macOS and Windows the browser asks the system instead, and the guard in
+  // each page (openPage) is what holds there.
+  if (STAND_INS) {
+    try {
+      env.PATH = [standIns(profile), process.env.PATH || "/usr/local/bin:/usr/bin:/bin"].join(path.delimiter);
+    } catch (err) {
+      const full = room(err, path.join(profile, "stand-ins"));
+      if (full) throw full;
+      throw new Error(`${place.name} was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: ${systemWords(err)}.`);
+    }
+  }
   // What the browser prints, in one file in the profile, in the order it
   // printed it: its first line says why one that ends before it answers
   // did, and nothing has to read it while the browser runs.
@@ -828,6 +870,7 @@ function pipeOf(input, output, most = MESSAGE_MOST) {
 async function openPage(chrome, { width, height }) {
   const cdp = await chrome.attach(await chrome.newTab(browserWait()), browserWait());
   await cdp.send("Page.enable");
+  await guard(cdp);
   cdp.answer = await watchAnswer(cdp);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
   const { userAgent = "" } = await cdp.send("Browser.getVersion").catch(() => ({}));
@@ -835,6 +878,94 @@ async function openPage(chrome, { width, height }) {
     await cdp.send("Emulation.setUserAgentOverride", { userAgent: userAgent.replace("HeadlessChrome", "Chrome") });
   }
   return cdp;
+}
+
+// The kinds of address a page may go to: web pages, and the browser's own
+// documents, which no program of the machine opens.
+const WEB_SCHEME = /^(https?|data|blob|about|javascript|chrome-error):$/i;
+const webAddress = (raw) => {
+  try {
+    return WEB_SCHEME.test(new URL(raw).protocol);
+  } catch {
+    return true;
+  }
+};
+
+// The world each document of a tab's pages gets before its own scripts run,
+// and the guard it runs there: a page's move to an address that is not a
+// web address, by its script, a refresh, a form or a link, in the page or a
+// frame of the same site, is cancelled before the browser acts on it, on
+// every system, and the address is kept for the kit's notes. The page's own
+// scripts cannot reach this world. A frame's first address and a redirect
+// are not moves of a page and reach the browser: on Linux its stand-ins
+// take those (see launch).
+const GUARD_WORLD = "easybrandkit-guard";
+const GUARD = `(() => {
+  if (typeof navigation === "undefined") return;
+  const tried = (globalThis.easybrandkitTried = []);
+  const web = ${WEB_SCHEME};
+  navigation.addEventListener("navigate", (event) => {
+    let scheme = "";
+    try {
+      scheme = new URL(event.destination.url).protocol;
+    } catch {}
+    if (web.test(scheme) || !event.cancelable) return;
+    event.preventDefault();
+    if (tried.length < 20) tried.push(String(event.destination.url).slice(0, 300));
+  });
+})();`;
+
+// The guard in each new document of the tab, and what the tab says of the
+// rest: an address that is not a web address that the browser began to go
+// to in the page or a frame, and a window a page asked for with one, which
+// the browser does not open without a click. Each is kept in cdp.tried with
+// the page the kit had opened (cdp.page), the address and how it came.
+async function guard(cdp) {
+  cdp.tried = [];
+  const keep = (url, how) => {
+    if (!webAddress(url) && cdp.tried.length < 50) cdp.tried.push({ page: cdp.page || "", url: String(url).slice(0, 300), how });
+  };
+  cdp.on("Page.frameStartedNavigating", ({ url }) => keep(url, "started"));
+  cdp.on("Page.windowOpen", ({ url }) => keep(url, "window"));
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: GUARD, worldName: GUARD_WORLD });
+}
+
+// The addresses the guard cancelled in the tab's page so far, in its frames
+// too, taken out of their worlds into cdp.tried. Called before the kit
+// leaves a page, and once it has read the last one. A frame that cannot be
+// asked, as one of another site that runs apart, keeps its own. It takes a
+// few seconds at most, and stops at a call the tab does not answer: a page
+// whose own script keeps its thread busy answers none of them.
+async function triedSoFar(cdp) {
+  if (!cdp.tried) return [];
+  const until = Date.now() + Math.min(3_000, Math.max(1_000, timeLeft()));
+  const waitLeft = () => Math.max(1, until - Date.now());
+  const ask = (method, params) => cdp.send(method, params, waitLeft());
+  try {
+    const { frameTree } = await ask("Page.getFrameTree", {});
+    const frames = [];
+    for (let next = [frameTree]; next.length && frames.length < 20; ) {
+      const node = next.shift();
+      frames.push(node.frame.id);
+      next.push(...(node.childFrames || []));
+    }
+    for (const frameId of frames) {
+      if (Date.now() >= until) break;
+      let cancelled = [];
+      try {
+        const { executionContextId } = await ask("Page.createIsolatedWorld", { frameId, worldName: GUARD_WORLD });
+        const { result } = await ask("Runtime.evaluate", { expression: "(globalThis.easybrandkitTried || []).splice(0, 20)", contextId: executionContextId, returnByValue: true });
+        if (Array.isArray(result && result.value)) cancelled = result.value;
+      } catch (err) {
+        if (err.timedOut || err.closed) break;
+        // A frame between two documents, or gone.
+      }
+      for (const url of cancelled) if (typeof url === "string" && cdp.tried.length < 50) cdp.tried.push({ page: cdp.page || "", url: url.slice(0, 300), how: "cancelled" });
+    }
+  } catch {
+    // A tab that does not answer, or has closed.
+  }
+  return cdp.tried;
 }
 
 // What the tab's own page came from, kept up to date as the page moves on:
@@ -850,7 +981,7 @@ async function openPage(chrome, { width, height }) {
 async function watchAnswer(cdp) {
   const { frameTree } = await cdp.send("Page.getFrameTree");
   const main = frameTree.frame.id;
-  const answer = { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "" };
+  const answer = { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "" };
   // The main frame's document request, and the space of each answer to it,
   // its redirects' first: each comes apart from the answer it belongs to,
   // before it or after it.
@@ -862,9 +993,16 @@ async function watchAnswer(cdp) {
     request = requestId;
     spaces = [];
   });
-  cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode, resourceIPAddressSpace }) => {
+  cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode, headers, resourceIPAddressSpace }) => {
     if (requestId !== request) return;
     spaces.push({ status: statusCode, space: resourceIPAddressSpace || "" });
+    // A redirect to an address that is not a web address, which the browser
+    // hands to the system: the navigation ends there, with no answer of its
+    // own.
+    if (statusCode >= 300 && statusCode < 400 && headers) {
+      const location = Object.entries(headers).find(([key]) => key.toLowerCase() === "location");
+      if (location && /^[a-z][a-z0-9+.-]*:/i.test(String(location[1])) && !webAddress(String(location[1]).trim())) answer.leftTo = String(location[1]).trim().slice(0, 300);
+    }
     if (requestId === answered && statusCode === answer.status) answer.space = resourceIPAddressSpace || "";
   });
   cdp.on("Network.responseReceived", ({ requestId, type, frameId, response }) => {
@@ -908,8 +1046,11 @@ async function navigate(cdp, url) {
     // Not an address at all.
   }
   if (!web) throw pageFailed(`${url} is not a web address, so no kit was made.`, "is not a web address");
+  // What the guard cancelled in the page the tab leaves now.
+  if (cdp.page) await triedSoFar(cdp);
+  cdp.page = url;
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
-  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "" });
+  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "" });
   // A site gets 30 s to answer, or what the run has left: one the kit chose
   // to read that never answers leaves the run time to go on without it.
   const limit = Math.max(1_000, Math.min(30_000, timeLeft()));
@@ -923,6 +1064,11 @@ async function navigate(cdp, url) {
   }
   if (errorText) {
     if (cdp.answer.status >= 400) return url;
+    // A redirect to an address that is not a web address ends the
+    // navigation as aborted, and what the redirect said can come a moment
+    // after the browser's answer.
+    for (let waited = 0; errorText === "net::ERR_ABORTED" && !cdp.answer.leftTo && waited < 1_000; waited += 50) await sleep(50);
+    if (cdp.answer.leftTo) throw pageFailed(`${url} led to ${cdp.answer.leftTo}, which is not a web address, so no kit was made.`, `led to ${cdp.answer.leftTo}, which is not a web address`);
     throw pageFailed(`Could not open ${url}: ${errorText}`, `could not be opened (${errorText})`);
   }
   // The timer goes once the page has loaded, so it does not keep the
@@ -980,4 +1126,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, seenOf, inOwnWorld, pageFailed, noKit };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, seenOf, inOwnWorld, pageFailed, noKit, HANDLERS, STAND_INS };

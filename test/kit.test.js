@@ -3696,3 +3696,169 @@ test("a run stopped by SIGINT, SIGQUIT, SIGTERM or SIGHUP leaves the earlier kit
   assert.notEqual(now.find((line) => line.startsWith("brand.json ")), good.find((line) => line.startsWith("brand.json ")), "the new kit");
   assert.deepEqual(tempLeft(), [], "nothing left in the temp folder after a late stop");
 });
+
+// What a program of the machine would be started for, recorded: stand-ins
+// of the test's own, first on PATH, as a backstop for the kit's own, so that
+// no real mail program starts here even where the kit has none, with no
+// session bus and no display to reach one either. Gives what was started
+// so far.
+function recordHandlers(t) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-handlers-"));
+  const handlers = path.join(parent, "handlers");
+  const started = path.join(parent, "started.log");
+  fs.mkdirSync(handlers);
+  for (const name of ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser", "gio", "xdg-mime"]) {
+    fs.writeFileSync(path.join(handlers, name), `#!/bin/sh\necho "${name} $*" >> "${started}"\nexit 0\n`, { mode: 0o755 });
+  }
+  const names = ["PATH", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY"];
+  const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  process.env.PATH = `${handlers}${path.delimiter}${process.env.PATH}`;
+  process.env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(parent, "no-bus")}`;
+  delete process.env.DISPLAY;
+  delete process.env.WAYLAND_DISPLAY;
+  return () => (fs.existsSync(started) ? fs.readFileSync(started, "utf8").trim().split("\n").filter(Boolean) : []);
+}
+
+test("a site cannot make the browser start a program of this machine with an address that is not a web address", { skip: noBrowser || (process.platform !== "linux" && "on macOS and Windows such an address in a frame would open the system's own program") }, async (t) => {
+  const startedSoFar = recordHandlers(t);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const mail = "mailto:hello@acme.example?subject=Hi";
+  let way = "";
+  const page = brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="/pricing">Pricing</a>`);
+  const site = await serve((req, res) => {
+    const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
+    if (req.url === "/robots.txt") return res.writeHead(404).end();
+    if (req.url === "/pricing") return way === "a menu page's redirect" ? res.writeHead(302, { location: "mailto:sales@acme.example" }).end() : html(brandPage("rgb(255,0,0)"));
+    if (req.url !== "/") return res.writeHead(404).end();
+    if (way === "a redirect") return res.writeHead(302, { location: mail }).end();
+    const ways = {
+      "its script": `<script>location.href = ${JSON.stringify(mail)};</script>`,
+      "a refresh": `<meta http-equiv="refresh" content="0;url=${mail}">`,
+      "a frame": `<iframe src="${mail}" style="width:1px;height:1px;border:0"></iframe>`,
+      "a window": `<script>window.open(${JSON.stringify(mail)});</script>`,
+      "a later move": `<script>setTimeout(() => location.assign("news:comp.lang.misc"), 500);</script>`,
+      "four frames": [1, 2, 3, 4].map((n) => `<iframe src="mailto:${n}@acme.example" style="width:1px;height:1px;border:0"></iframe>`).join(""),
+    };
+    html(page.replace("</body>", `${ways[way] || ""}</body>`));
+  });
+  t.after(() => site.server.close());
+  const not = (url) => `${site.origin}/ tried to open ${url}, which is not a web address: it was not opened.`;
+  // A page's own move, by its script, a refresh or a later script, is
+  // cancelled before the browser acts on it, and a window it asks for is not
+  // opened without a click. A frame's own address reaches the browser, and
+  // its stand-ins take it. Each is in the kit's notes, and the page is read.
+  for (const [name, url] of [["its script", mail], ["a refresh", mail], ["a frame", mail], ["a window", mail], ["a later move", "news:comp.lang.misc"]]) {
+    way = name;
+    const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, name.replace(/ /g, "-")), stores: false });
+    assert.deepEqual(startedSoFar(), [], `nothing started for ${name}`);
+    assert.deepEqual(kit.notes, [not(url)], name);
+    assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], name);
+  }
+  // More than three are named by their number.
+  way = "four frames";
+  const four = await makeKit(`${site.origin}/`, { dir: path.join(parent, "four"), stores: false });
+  assert.deepEqual(startedSoFar(), [], "nothing started for four frames");
+  assert.deepEqual(four.kit.notes, [not("mailto:1@acme.example"), not("mailto:2@acme.example"), not("mailto:3@acme.example"), "1 more address that is not a web address was tried as well."]);
+  // Where the browser hands such an address to the system itself, as on
+  // macOS and Windows, a frame's is not said to be held; the page's own move
+  // still is. (The browser here still has its stand-ins.)
+  const chromeModule = require("../skills/easybrandkit/scripts/lib/chrome");
+  const standIns = chromeModule.STAND_INS;
+  chromeModule.STAND_INS = false;
+  t.after(() => (chromeModule.STAND_INS = standIns));
+  const elsewhere = reloadedKit().makeKit;
+  chromeModule.STAND_INS = standIns;
+  way = "a frame";
+  const framed = await elsewhere(`${site.origin}/`, { dir: path.join(parent, "frame-elsewhere"), stores: false });
+  assert.deepEqual(framed.kit.notes, [`${site.origin}/ tried to open ${mail}, which is not a web address, in a way easybrandkit stops only on Linux.`]);
+  way = "its script";
+  const own = await elsewhere(`${site.origin}/`, { dir: path.join(parent, "script-elsewhere"), stores: false });
+  assert.deepEqual(own.kit.notes, [not(mail)]);
+  // A redirect of the address given to one: the run says where it led, and
+  // the stand-ins take it.
+  way = "a redirect";
+  await assert.rejects(makeKit(`${site.origin}/`, { dir: path.join(parent, "redirect"), stores: false }), (err) => err.message === `${site.origin}/ led to ${mail}, which is not a web address, so no kit was made.`);
+  assert.deepEqual(startedSoFar(), [], "nothing started for a redirect");
+  assert.equal(fs.existsSync(path.join(parent, "redirect")), false);
+  // A menu page that redirects to one is named as not read.
+  way = "a menu page's redirect";
+  const { facts } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "menu"), stores: false, facts: true });
+  assert.deepEqual(facts.skipped.map(({ role, reason }) => [role, reason]), [["pricing", "it led to mailto:sales@acme.example, which is not a web address"]]);
+  assert.deepEqual(startedSoFar(), [], "nothing started for a menu page");
+});
+
+test("a page's own move to an address that is not a web address is cancelled in the page, before the browser acts on it", { skip: noBrowser || (process.platform !== "linux" && "the stand-ins that record what is started work on Linux only") }, async (t) => {
+  const { navigate, triedSoFar } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const startedSoFar = recordHandlers(t);
+  const ways = {
+    "/script": `<script>location.href = "mailto:a@acme.example";</script>`,
+    "/refresh": `<meta http-equiv="refresh" content="0;url=mailto:b@acme.example">`,
+    "/form": `<form action="mailto:c@acme.example" method="post"><input name="x" value="y"></form><script>addEventListener("load", () => document.forms[0].submit());</script>`,
+    "/link": `<a id="m" href="news:comp.lang.misc">news</a><script>document.getElementById("m").click();</script>`,
+    "/inner": `<script>setTimeout(() => (location.href = "mailto:d@acme.example"), 200);</script>`,
+    "/framed": `<iframe src="/inner"></iframe>`,
+  };
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Acme</title><h1>Acme</h1>${ways[req.url] || ""}`));
+  const chrome = await launch({ width: 800, height: 600 });
+  t.after(async () => {
+    await chrome.close();
+    site.server.close();
+  });
+  const cdp = await openPage(chrome, { width: 800, height: 600 });
+  // The guard's own record says it cancelled each, and the browser never
+  // began to go there, which it says of each address it begins to go to.
+  for (const [where, url] of [["/script", "mailto:a@acme.example"], ["/refresh", "mailto:b@acme.example"], ["/form", "mailto:c@acme.example?body=x%3Dy"], ["/link", "news:comp.lang.misc"], ["/framed", "mailto:d@acme.example"]]) {
+    cdp.tried.length = 0;
+    await navigate(cdp, `${site.origin}${where}`);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const tried = await triedSoFar(cdp);
+    assert.deepEqual(tried, [{ page: `${site.origin}${where}`, url, how: "cancelled" }], where);
+    const { result } = await cdp.send("Runtime.evaluate", { expression: "location.href", returnByValue: true });
+    assert.equal(result.value, `${site.origin}${where}`, `${where} stays where it was`);
+  }
+  assert.deepEqual(startedSoFar(), []);
+});
+
+test("what the guard cancelled is asked of each frame for a few seconds at most, and not past a frame that does not answer", async () => {
+  const { triedSoFar } = require("../skills/easybrandkit/scripts/lib/chrome");
+  // A page of twenty frames whose thread is busy: no world is made in any.
+  const asked = [];
+  const busy = {
+    tried: [],
+    page: "https://acme.test/",
+    send: async (method, params, timeoutMs) => {
+      asked.push(method);
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" }, childFrames: Array.from({ length: 19 }, (_, i) => ({ frame: { id: `f${i}` } })) } };
+      await new Promise((resolve) => setTimeout(resolve, Math.min(timeoutMs, 1_000)));
+      throw Object.assign(new Error(`${method} timed out`), { timedOut: true });
+    },
+  };
+  const started = Date.now();
+  assert.deepEqual(await triedSoFar(busy), []);
+  assert.ok(Date.now() - started < 2_500, `${Date.now() - started} ms`);
+  assert.deepEqual(asked, ["Page.getFrameTree", "Page.createIsolatedWorld"]);
+  // One that answers gives what each frame's guard kept, in order.
+  const kept = { main: ["mailto:a@acme.test"], f0: ["news:comp.lang.misc"] };
+  const answering = {
+    tried: [{ page: "https://acme.test/", url: "mailto:b@acme.test", how: "window" }],
+    page: "https://acme.test/",
+    send: async (method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" }, childFrames: [{ frame: { id: "f0" } }, { frame: { id: "f1" } }] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: params.frameId };
+      return { result: { value: kept[params.contextId] || [] } };
+    },
+  };
+  assert.deepEqual(await triedSoFar(answering), [
+    { page: "https://acme.test/", url: "mailto:b@acme.test", how: "window" },
+    { page: "https://acme.test/", url: "mailto:a@acme.test", how: "cancelled" },
+    { page: "https://acme.test/", url: "news:comp.lang.misc", how: "cancelled" },
+  ]);
+});
