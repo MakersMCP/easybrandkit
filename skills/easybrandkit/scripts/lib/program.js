@@ -314,18 +314,44 @@ function closedEarly(place, { output = "" } = {}) {
   return `${place.name} did not start: ${place.subject} closed the kit's pipe before it answered and kept running${line ? `, having printed "${line}"` : ""}. ${FIX_PIPE}`;
 }
 
+// The real path of `at`, every link on the way followed, or `or` when it
+// cannot be followed to something that is there.
+function realOf(at, or) {
+  try {
+    return fs.realpathSync(at);
+  } catch {
+    return or;
+  }
+}
+
+// `at`, and each path its links lead to in turn, one a link gives as a
+// relative path read from the real folder of that link, as the system reads
+// it: 41 at most, for links that lead round in a loop.
+function linksFrom(at) {
+  const hops = [at];
+  for (let link = at; hops.length <= 40; ) {
+    let target;
+    try {
+      target = fs.readlinkSync(link);
+    } catch {
+      break;
+    }
+    link = path.resolve(realOf(path.dirname(link), path.dirname(link)), target);
+    hops.push(link);
+  }
+  return hops;
+}
+
 // Whether the browser at `file` is one installed as a snap or a Flatpak,
 // which runs in a sandbox of its own: snap's own program, where the links in
 // /snap/bin lead, or one under /snap/, or one in a Flatpak's folders, as the
-// links in its exports/bin and the app folder they lead to are.
+// links in its exports/bin and the app folder they lead to are. Each link on
+// the way counts, and so does where it ends: a link outside /snap to one in
+// /snap/bin is a snap, and snap's own program can be a link itself, as
+// /usr/bin/snap to /usr/lib/snapd/snapd on Ubuntu 26.04.
 function ownSandbox(file) {
-  let real = file;
-  try {
-    real = fs.realpathSync(file);
-  } catch {
-    // Looked at as given.
-  }
-  return [file, real].some((at) => at === "/usr/bin/snap" || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at));
+  const snap = realOf("/usr/bin/snap", "/usr/bin/snap");
+  return [...linksFrom(file), realOf(file, file)].some((at) => at === "/usr/bin/snap" || at === snap || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at));
 }
 
 module.exports = { browserPlace, wrongWith, lookOnPath, noexecMount, couldNotStart, endedEarly, closedEarly, firstLine, systemWords, ownSandbox, NONE };

@@ -269,7 +269,7 @@ test("the certain checks, and the first line, by themselves", { skip: !linux && 
   }
 });
 
-test("a browser installed as a snap or a Flatpak is told from its path", () => {
+test("a browser installed as a snap or a Flatpak is told from its path", (t) => {
   assert.equal(ownSandbox("/snap/bin/chromium"), true);
   assert.equal(ownSandbox("/snap/chromium/3235/usr/lib/chromium-browser/chrome"), true);
   assert.equal(ownSandbox("/usr/bin/snap"), true);
@@ -277,6 +277,29 @@ test("a browser installed as a snap or a Flatpak is told from its path", () => {
   assert.equal(ownSandbox("/home/someone/.local/share/flatpak/exports/bin/com.google.Chrome"), true);
   assert.equal(ownSandbox("/usr/bin/google-chrome-stable-not-there"), false);
   assert.equal(ownSandbox(process.execPath), false);
+  if (process.platform === "win32") return;
+  // Through links outside /snap, as one in ~/.local/bin or /usr/local/bin
+  // to /snap/bin/chromium is: each link on the way counts, read from the
+  // real folder of the one before it, as the system reads it, whether or not
+  // a snap is installed here.
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-snap-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const link = (name, to) => {
+    const at = path.join(parent, name);
+    fs.mkdirSync(path.dirname(at), { recursive: true });
+    fs.symlinkSync(to, at);
+    return at;
+  };
+  assert.equal(ownSandbox(link("chromium", link("bin/chromium", "/snap/bin/chromium"))), true, "a link to a link into /snap/bin");
+  assert.equal(ownSandbox(link("snap-run", "/usr/bin/snap")), true, "a link to snap's own program");
+  const real = path.join(parent, "real");
+  fs.mkdirSync(real);
+  fs.symlinkSync(path.relative(fs.realpathSync(real), "/snap/bin/chromium"), path.join(real, "chromium"));
+  assert.equal(ownSandbox(path.join(link("deeper/still/apps", real), "chromium")), true, "a link that climbs from the real folder it is in");
+  assert.equal(ownSandbox(link("node", link("bin/node", process.execPath))), false);
+  // Where snap's own program is a link too, as on Ubuntu 26.04, a link to
+  // where it leads.
+  if (fs.existsSync("/usr/bin/snap")) assert.equal(ownSandbox(link("snapd", fs.realpathSync("/usr/bin/snap"))), true, "a link to where /usr/bin/snap leads");
 });
 
 test("a browser that ends before it answers is told by the line that says why, past the lines Chrome prints on every start", { skip }, (t) => {
