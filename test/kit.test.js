@@ -3747,7 +3747,7 @@ function recordHandlers(t) {
   for (const name of ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser", "gio", "xdg-mime"]) {
     fs.writeFileSync(path.join(handlers, name), `#!/bin/sh\necho "${name} $*" >> "${started}"\nexit 0\n`, { mode: 0o755 });
   }
-  const names = ["PATH", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY"];
+  const names = ["PATH", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => {
     for (const [name, value] of Object.entries(env)) {
@@ -3758,8 +3758,9 @@ function recordHandlers(t) {
   });
   process.env.PATH = `${handlers}${path.delimiter}${process.env.PATH}`;
   process.env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${path.join(parent, "no-bus")}`;
+  process.env.WAYLAND_DISPLAY = path.join(parent, "no-display");
+  delete process.env.WAYLAND_SOCKET;
   delete process.env.DISPLAY;
-  delete process.env.WAYLAND_DISPLAY;
   return () => (fs.existsSync(started) ? fs.readFileSync(started, "utf8").trim().split("\n").filter(Boolean) : []);
 }
 
@@ -3896,31 +3897,64 @@ function setEnv(t, values) {
   }
 }
 
+// A Wayland client, as a program the browser starts would be one: it says
+// whether libwayland found a display where the environment it was given
+// leads.
+const WAYLAND_CLIENT = "import ctypes; l = ctypes.CDLL('libwayland-client.so.0'); l.wl_display_connect.restype = ctypes.c_void_p; l.wl_display_connect.argtypes = [ctypes.c_char_p]; print('a display' if l.wl_display_connect(None) else 'no display')";
+
 test("on Linux the browser starts with a session bus where nothing listens, no display and the stand-ins first on its PATH, whatever this process has", { skip: process.platform !== "linux" && "the bus and the stand-ins are given on Linux" }, async (t) => {
+  const net = require("node:net");
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // A bus of this process's that a connection would reach, as a desktop's
-  // session bus is, and a display's names, which nothing here serves.
+  // session bus is, a Wayland display in a runtime folder of the test's own,
+  // as a desktop has one in XDG_RUNTIME_DIR, and an X display's name, which
+  // nothing here serves.
   const desktop = path.join(parent, "desktop-bus");
-  const listening = require("node:net").createServer().listen(desktop);
+  const listening = net.createServer().listen(desktop);
   await once(listening, "listening");
   t.after(() => listening.close());
-  // A stand-in browser that writes down what it was given, and whether the
-  // bus it was given leads anywhere, and ends.
+  const runtime = path.join(parent, "runtime");
+  fs.mkdirSync(runtime, { mode: 0o700 });
+  let shown = 0;
+  const display = net.createServer((socket) => {
+    shown++;
+    socket.destroy();
+  }).listen(path.join(runtime, "wayland-0"));
+  await once(display, "listening");
+  t.after(() => display.close());
+  // A Wayland client with no WAYLAND_DISPLAY finds that display, where
+  // python3 and libwayland-client are there to make one.
+  const asked = spawnSync("python3", ["-I", "-c", WAYLAND_CLIENT], { encoding: "utf8", timeout: 10_000, env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: runtime } });
+  const client = asked.status === 0 && asked.stdout.trim() === "a display";
+  for (let waited = 0; client && waited < 5_000 && !shown; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  if (client) assert.equal(shown, 1, "the Wayland client reached the test's display");
+  // A stand-in browser that writes down what it was given, whether the bus
+  // and the Wayland display it was given lead anywhere, and what a Wayland
+  // client it starts finds, and ends. The client is started without
+  // WAYLAND_SOCKET, which the test gives this process and which would end
+  // its search for a display at once.
   const seen = path.join(parent, "seen.txt");
   const browser = path.join(parent, "browser");
-  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "display \${DISPLAY-unset} \${WAYLAND_DISPLAY-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; } > "${seen}"\nexit 3\n`, { mode: 0o755 });
-  setEnv(t, { CHROME_PATH: browser, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-99", TMPDIR: parent });
+  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "\${WAYLAND_DISPLAY-unset}"; [ -e "$WAYLAND_DISPLAY" ] && echo there || echo nothing; echo "DISPLAY \${DISPLAY-unset}, WAYLAND_SOCKET \${WAYLAND_SOCKET-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; ${client ? `(unset WAYLAND_SOCKET; python3 -I -c "${WAYLAND_CLIENT}")` : "echo no client"}; } > "${seen}"\nexit 3\n`, { mode: 0o755 });
+  setEnv(t, { CHROME_PATH: browser, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-0", WAYLAND_SOCKET: "9", XDG_RUNTIME_DIR: runtime, TMPDIR: parent });
   await assert.rejects(launch({ width: 800, height: 600 }), /ended before it answered: it printed nothing and exited with 3\./);
-  const [address, there, display, first, ...links] = fs.readFileSync(seen, "utf8").trim().split("\n");
-  assert.equal(display, "display unset unset", "the browser has no display");
+  const [address, there, wayland, waylandThere, x, first, ...rest] = fs.readFileSync(seen, "utf8").trim().split("\n");
   const profile = /^unix:path=(.+)\/no-bus$/.exec(address);
   assert.ok(profile, address);
   assert.match(path.basename(profile[1]), /^easybrandkit-chrome-/);
   assert.equal(there, "nothing", "the bus the browser was given leads nowhere");
+  // No display: a Wayland display at a path in the profile, which
+  // libwayland takes as the socket itself, where nothing is, and no X
+  // display.
+  assert.equal(rest[6], client ? "no display" : "no client", "a Wayland client the browser starts finds no display");
+  assert.equal(shown, client ? 1 : 0, "nothing the browser started reached the test's display");
+  assert.equal(wayland, path.join(profile[1], "no-display"), "the Wayland display the browser was given is a path in its profile");
+  assert.equal(waylandThere, "nothing", "the Wayland display the browser was given leads nowhere");
+  assert.equal(x, "DISPLAY unset, WAYLAND_SOCKET unset", "the browser has no X display and no Wayland connection");
   assert.equal(first, path.join(profile[1], "stand-ins"));
   const nothing = ["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file));
-  assert.deepEqual(links, Array(6).fill(nothing));
+  assert.deepEqual(rest.slice(0, 6), Array(6).fill(nothing));
   // A temp folder whose path has a : in it, which parts the folders of
   // PATH, is refused before anything is made in it.
   const parted = path.join(parent, "te:mp");

@@ -384,9 +384,13 @@ async function launch({ width, height }) {
   // made (left unset, libdbus can look for the desktop's own bus in
   // XDG_RUNTIME_DIR), no display, which a headless browser does not use and
   // a program it starts could open a window on, and the stand-ins first on
-  // its PATH, the rest as it was. On macOS and Windows the browser asks the
-  // system instead, and the guard in each page (openPage) is what holds
-  // there.
+  // its PATH, the rest as it was. No display is DISPLAY unset and
+  // WAYLAND_DISPLAY another socket in its profile that is never made, which
+  // libwayland, as the path starts with /, takes as the socket itself: left
+  // unset, it looks for the desktop's own wayland-0 in XDG_RUNTIME_DIR. A
+  // WAYLAND_SOCKET would name a connection it has open already. On macOS
+  // and Windows the browser asks the system instead, and the guard in each
+  // page (openPage) is what holds there.
   if (STAND_INS) {
     try {
       env.PATH = [standIns(profile), process.env.PATH || "/usr/local/bin:/usr/bin:/bin"].join(path.delimiter);
@@ -396,8 +400,9 @@ async function launch({ width, height }) {
       throw new Error(`${place.name} was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: ${systemWords(err)}.`);
     }
     env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath(path.join(profile, "no-bus"))}`;
+    env.WAYLAND_DISPLAY = path.join(profile, "no-display");
+    delete env.WAYLAND_SOCKET;
     delete env.DISPLAY;
-    delete env.WAYLAND_DISPLAY;
   }
   // What the browser prints, in one file in the profile, in the order it
   // printed it: its first line says why one that ends before it answers
