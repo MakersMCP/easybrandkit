@@ -325,6 +325,40 @@ test("a browser that ends before it answers is told by the line that says why, p
   assert.equal(firstLine(noise.slice(2).join("\n")), noise[2]);
 });
 
+test("a browser whose pipe closes a moment before it ends is told by how it ended, and one that closes the pipe and keeps running is told as that", { skip }, (t) => {
+  const parent = place(t);
+  const at = (...names) => path.join(parent, ...names);
+  const write = (name, body) => {
+    fs.writeFileSync(at(name), body, { mode: 0o755 });
+    return at(name);
+  };
+  // A browser closes its pipe as it ends, and its end can be told a moment
+  // later: one that closes the pipe first, as a stand-in can, says why it
+  // ends and ends.
+  const sandbox = "[1:1:1111/044331.800000:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:127] No usable sandbox! Update your kernel or see https://chromium.googlesource.com/chromium/src/+/main/docs/linux/suid_sandbox_development.md";
+  const late = write("late", `#!/bin/sh\nexec 3>&- 4>&-\necho "${sandbox}" >&2\nsleep 0.2\nexit 3\n`);
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: late }), `late did not start: CHROME_PATH is ${late}, which ended before it answered: it printed "${sandbox.slice(0, 200)}..." and exited with 3. Its sandbox could not start: on Linux a browser's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined.`);
+  // A program that starts the browser without handing it the pipe, as one
+  // that closes its file descriptors first does: the run says so, and
+  // stops it.
+  const pid = at("pid");
+  const keeps = write("keeps", `#!/bin/sh\nexec 3>&- 4>&-\necho $$ > "${pid}"\necho "starting the browser" >&2\nexec sleep 60\n`);
+  const handOn = "A program that starts the browser has to hand it the kit's pipe, its file descriptors 3 and 4: point CHROME_PATH at the browser's own program.";
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: keeps }), `keeps did not start: CHROME_PATH is ${keeps}, which closed the kit's pipe before it answered and kept running, having printed "starting the browser". ${handOn}`);
+  let state = "";
+  try {
+    const stat = fs.readFileSync(`/proc/${fs.readFileSync(pid, "utf8").trim()}/stat`, "utf8");
+    state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3);
+  } catch {
+    // Gone.
+  }
+  assert.ok(!state || state === "Z" || state === "X", "the program that kept running was stopped");
+  // Chrome started that way says that it was not handed the pipe, and ends.
+  const notOpen = "[1111/200056.474282:ERROR:chrome/app/chrome_main_delegate.cc:1171] Remote debugging pipe file descriptors are not open.";
+  const handed = write("not-handed", `#!/bin/sh\nexec 3>&- 4>&-\necho "${notOpen}" >&2\nexit 13\n`);
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: handed }), `not-handed did not start: CHROME_PATH is ${handed}, which ended before it answered: it printed "${notOpen}" and exited with 13. ${handOn}`);
+});
+
 test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it, as Windows looks for it", (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-names-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));

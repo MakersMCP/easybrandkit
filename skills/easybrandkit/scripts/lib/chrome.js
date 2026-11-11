@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
-const { browserPlace, wrongWith, couldNotStart, endedEarly, systemWords, ownSandbox } = require("./program");
+const { browserPlace, wrongWith, couldNotStart, endedEarly, closedEarly, systemWords, ownSandbox } = require("./program");
 
 // The browser this run would start, or "" when none is found or what is
 // found cannot be started (browserPlace in program.js says why).
@@ -603,17 +603,25 @@ async function launch({ width, height }) {
     // sandbox the stand-ins and the bus may not be the ones it finds.
     return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms), sandboxed: ownSandbox(place.file) };
   }
+  // A browser's pipe closes as it ends, and can close a moment before the
+  // system tells that it has ended: one whose pipe has closed is given a
+  // second to end, so that it is told by how it ended. One that still runs
+  // then has closed the pipe itself, as a program that starts the browser
+  // without handing it the pipe does.
+  const pipeClosed = Boolean(said && said.err && said.err.closed);
+  for (let waited = 0; pipeClosed && !exited && waited < 1_000; waited += 50) await sleep(50);
   const running = !exited;
   // Told before close, which removes the folder the browser made and the
   // profile: a browser that ended at once can have found no room either.
   const tooLong = exited ? socketTooLong(temp, before) : 0;
   const full = exited && !tooLong ? noRoomIn(profile) : null;
-  const printed = exited && !notStarted ? firstBytes(output) : "";
+  const printed = (exited && !notStarted) || pipeClosed ? firstBytes(output) : "";
   await close();
   if (tooLong) {
     throw new Error(`${place.name} did not start: the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${tooLong} bytes where Linux allows ${SOCKET_MAX}. Set TMPDIR to a folder whose path is at least ${tooLong - SOCKET_MAX} ${tooLong - SOCKET_MAX === 1 ? "byte" : "bytes"} shorter.`);
   }
   if (full) throw full;
+  if (running && pipeClosed) throw new Error(closedEarly(place, { output: printed }));
   if (running) {
     const late = noKit(noAnswer(`${place.name} was started but did not answer`, wait));
     throw Object.assign(late, { message: `${late.message} If it happens again, point CHROME_PATH at another browser.` });

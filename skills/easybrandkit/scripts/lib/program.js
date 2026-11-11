@@ -34,6 +34,9 @@ const WINDOWS_PLACES = [
 const NONE = "No Chrome, Chromium, Edge or Brave found";
 const FIX_SET = "Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it.";
 const FIX_FOUND = "Install Chrome, Chromium, Edge or Brave, or point CHROME_PATH at one that runs.";
+// What to do about a program that starts the browser and does not hand it
+// the pipe the kit drives it through, which another try would not change.
+const FIX_PIPE = "A program that starts the browser has to hand it the kit's pipe, its file descriptors 3 and 4: point CHROME_PATH at the browser's own program.";
 
 // A name with no folder in it, which the system looks up on PATH.
 const bare = (value) => !(value.includes("/") || (WINDOWS && value.includes("\\")));
@@ -261,12 +264,14 @@ const NOISE = /^\[[^\]]*:(?:(?:dbus|components\/dbus|third_party\/crashpad)\/[^\
 
 // Chrome's own words for what kept it from starting that another browser
 // would not help with, and what to do then: its sandbox could not start, in
-// each way it says so, or the system or this process had as many files
-// open as they may.
+// each way it says so, the system or this process had as many files open
+// as they may, or it was not handed the kit's pipe, as by a program that
+// starts it and closes the pipe's file descriptors first.
 const SAID = [
   [/No usable sandbox|SUID sandbox helper binary was found, but is not configured correctly|setuid sandbox: failed to move to new namespaces|^Failed to move to new namespace/, "Its sandbox could not start: on Linux a browser's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined."],
   [/Too many open files in system/, "The system had as many files open as it may: close some programs and run it again."],
   [/Too many open files/, "The browser had as many files open as it may: raise that limit, as ulimit -n does, and run it again."],
+  [/Remote debugging pipe file descriptors are not open/, FIX_PIPE],
 ];
 
 // The line of what a program printed that says the most of why it ended:
@@ -299,6 +304,16 @@ function endedEarly(place, { output = "", code = null, signal = null }) {
   return `${place.name} did not start: ${place.subject} ended before it answered: ${what}. ${fix}`;
 }
 
+// The message for a browser that closed the kit's pipe before it answered
+// on it and still ran a second later, as a program that starts the browser
+// does when it closes the pipe's file descriptors, 3 and 4, first: that, the
+// line it printed that says the most, and what to do. Another try or another
+// browser started the same way would not help.
+function closedEarly(place, { output = "" } = {}) {
+  const line = firstLine(output);
+  return `${place.name} did not start: ${place.subject} closed the kit's pipe before it answered and kept running${line ? `, having printed "${line}"` : ""}. ${FIX_PIPE}`;
+}
+
 // Whether the browser at `file` is one installed as a snap or a Flatpak,
 // which runs in a sandbox of its own: snap's own program, where the links in
 // /snap/bin lead, or one under /snap/, or one in a Flatpak's folders, as the
@@ -313,4 +328,4 @@ function ownSandbox(file) {
   return [file, real].some((at) => at === "/usr/bin/snap" || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at));
 }
 
-module.exports = { browserPlace, wrongWith, lookOnPath, noexecMount, couldNotStart, endedEarly, firstLine, systemWords, ownSandbox, NONE };
+module.exports = { browserPlace, wrongWith, lookOnPath, noexecMount, couldNotStart, endedEarly, closedEarly, firstLine, systemWords, ownSandbox, NONE };
