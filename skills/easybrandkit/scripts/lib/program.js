@@ -155,19 +155,26 @@ function wrongWith(at) {
   return mount ? `a file on ${mount}, a disk mounted noexec, from which no program may be run` : "a file this user may not run";
 }
 
+// The names a program called `name` can have in a folder of PATH. Windows,
+// and Node's spawn there, try a name with .com and then .exe after it, and a
+// name that has an extension as it is first; elsewhere a name is as it is.
+const namesOf = (name, windows = WINDOWS) => (!windows ? [name] : [...(path.win32.extname(name) ? [name] : []), `${name}.com`, `${name}.exe`]);
+
 // The program called `name` on PATH, the way the system looks it up: the
 // first one this user may run, past those it may not. { file } for that
 // one, and { seen }, each match before it that it may not run, with what is
-// wrong with it.
-function lookOnPath(name, folders = process.env.PATH) {
+// wrong with it. windows: whether to look as Windows does.
+function lookOnPath(name, folders = process.env.PATH, windows = WINDOWS) {
   const seen = [];
-  for (const dir of String(folders || "").split(path.delimiter)) {
+  for (const dir of String(folders || "").split(windows ? ";" : path.delimiter)) {
     if (!dir) continue;
-    const at = path.resolve(dir, name);
-    if (!fs.lstatSync(at, { throwIfNoEntry: false })) continue;
-    const what = wrongWith(at);
-    if (!what) return { file: at, seen };
-    seen.push({ file: at, what });
+    for (const one of namesOf(name, windows)) {
+      const at = path.resolve(dir, one);
+      if (!fs.lstatSync(at, { throwIfNoEntry: false })) continue;
+      const what = wrongWith(at);
+      if (!what) return { file: at, seen };
+      seen.push({ file: at, what });
+    }
   }
   return { file: "", seen };
 }

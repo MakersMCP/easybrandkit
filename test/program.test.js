@@ -324,3 +324,23 @@ test("a browser that ends before it answers is told by the line that says why, p
   assert.equal(firstLine(`${noise.join("\n")}\n  the cause  \nlater`), "the cause");
   assert.equal(firstLine(noise.slice(2).join("\n")), noise[2]);
 });
+
+test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it, as Windows looks for it", (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-names-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const bin = path.join(parent, "bin");
+  fs.mkdirSync(bin);
+  for (const name of ["chrome.exe", "msedge.com", "msedge.exe", "brave"]) fs.writeFileSync(path.join(bin, name), "", { mode: 0o755 });
+  const folders = `${path.join(parent, "none")};${bin}`;
+  assert.equal(lookOnPath("chrome", folders, true).file, path.join(bin, "chrome.exe"));
+  assert.equal(lookOnPath("chrome.exe", folders, true).file, path.join(bin, "chrome.exe"));
+  assert.equal(lookOnPath("msedge", folders, true).file, path.join(bin, "msedge.com"));
+  // A name with no extension is not taken as it is there, as Windows does
+  // not start such a file by that name.
+  assert.equal(lookOnPath("brave", folders, true).file, "");
+  // Elsewhere a name is looked for as it is.
+  if (linux) {
+    assert.equal(lookOnPath("chrome", bin, false).file, "");
+    assert.equal(lookOnPath("brave", bin, false).file, path.join(bin, "brave"));
+  }
+});
