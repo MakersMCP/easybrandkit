@@ -617,13 +617,16 @@ const WORDS_GRACE = 5_000;
 // The page's headings and button labels, read while the tab answers, also
 // once the run's time is up, for a few seconds more then. A call the tab
 // does not answer ends it, since every other call would wait as long: sixty
-// of them would be a minute past the run's limit. unread says why some were
-// not read, for the kit's notes: "time" when the time ran out, "tab" when the
+// of them would be a minute past the run's limit. Each call waits only what
+// is left of that time, a second at least, and none starts once it is up,
+// so the read ends a second past it at most. unread says why some were not
+// read, for the kit's notes: "time" when the time ran out, "tab" when the
 // tab stopped answering, "" when all were read.
 async function readWords(cdp, targets) {
   const headings = [];
   const ctas = [];
   const until = Date.now() + Math.max(WORDS_GRACE, timeLeft());
+  const waitLeft = () => Math.max(1_000, Math.min(30_000, until - Date.now()));
   let unread = "";
   for (const target of targets) {
     if (headings.length >= 12 && ctas.length >= 6) break;
@@ -631,12 +634,15 @@ async function readWords(cdp, targets) {
       unread = "time";
       break;
     }
-    const wait = Math.max(1_000, Math.min(30_000, until - Date.now()));
     let text = "";
     try {
-      const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: target.backendNodeId }, wait);
+      const { object } = await cdp.send("DOM.resolveNode", { backendNodeId: target.backendNodeId }, waitLeft());
       if (!object || !object.objectId) continue;
-      const { result } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: INNER_TEXT, returnByValue: true }, wait);
+      if (Date.now() >= until) {
+        unread = "time";
+        break;
+      }
+      const { result } = await cdp.send("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: INNER_TEXT, returnByValue: true }, waitLeft());
       text = sayOnce(plainText((result && result.value) || "", 2_000)).slice(0, 200);
     } catch (err) {
       if (err.timedOut || err.closed) {

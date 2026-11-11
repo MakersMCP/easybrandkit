@@ -616,7 +616,8 @@ test("a page's words are read while the tab answers, also once the run's time is
     assert.equal(asked, 1, String(limit));
   }
   // Once the time is up, a tab slow to answer is read for five seconds more,
-  // and what is left is not read for want of time.
+  // and what is left is not read for want of time: no call starts past
+  // them, the second of a heading's two neither.
   let clock = Date.now();
   t.mock.method(Date, "now", () => clock);
   setTimeLimit(1_000);
@@ -626,9 +627,30 @@ test("a page's words are read while the tab answers, also once the run's time is
     return words(method);
   };
   const slow = await readWords(cdp, targets);
-  assert.equal(slow.headings.length, 3);
+  assert.equal(slow.headings.length, 2);
   assert.equal(slow.unread, "time");
-  assert.equal(asked, 6);
+  assert.equal(asked, 5);
+  // A tab that answers a heading's first call just inside its wait and never
+  // its second: each call waits only what is left of the five seconds, a
+  // second at least, so the read ends a second past them at most, where a
+  // wait worked out once kept it going nearly five seconds more.
+  const waits = [];
+  const edge = {
+    send: async (method, params, timeoutMs) => {
+      waits.push([method, timeoutMs]);
+      if (method === "DOM.resolveNode") {
+        clock += timeoutMs - 100;
+        return { object: { objectId: "o" } };
+      }
+      clock += timeoutMs;
+      throw Object.assign(new Error(`${method} timed out`), { timedOut: true });
+    },
+  };
+  setTimeLimit(0);
+  const began = clock;
+  assert.deepEqual(await readWords(edge, targets), { headings: [], ctas: [], unread: "time" });
+  assert.deepEqual(waits, [["DOM.resolveNode", 5_000], ["Runtime.callFunctionOn", 1_000]]);
+  assert.ok(clock - began <= 6_000, `${clock - began} ms`);
 });
 
 test("stores and social networks: a listing leads to its website, a profile is refused before anything runs", async () => {
