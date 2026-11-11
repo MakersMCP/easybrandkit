@@ -243,23 +243,53 @@ function couldNotStart(place, err) {
   return `${place.name} did not start: ${place.subject} could not be started: ${systemWords(err)}. ${place.value ? FIX_SET : FIX_FOUND}`;
 }
 
-// The first line of what a program printed that is not empty, quoted as it
-// is: cut to about 200 characters, and its control characters written out.
+// Lines Chrome prints as it starts whatever ends it, which say nothing of
+// why it ended: those of its D-Bus code, as on every start with no session
+// bus to reach, the one the kit gives it on Linux (see launch in chrome.js)
+// or none at all, as on a server; those of its crash handler; and the one
+// that says which channel it read from CHROME_VERSION_EXTRA. Chrome names
+// the file a line comes from by its folders and line (dbus/bus.cc:405), and
+// older versions by its name alone (bus.cc(407)).
+const NOISE = /^\[[^\]]*:(?:(?:dbus|components\/dbus|third_party\/crashpad)\/[^\]]*|(?:bus|object_proxy|file_io_posix)\.cc\(\d+\))\]|^\[[^\]]*\] Read channel \S+ from \S*CHROME_VERSION_EXTRA$/;
+
+// Chrome's own words for what kept it from starting that another browser
+// would not help with, and what to do then: its sandbox could not start, in
+// each way it says so, or the system or this process had as many files
+// open as they may.
+const SAID = [
+  [/No usable sandbox|SUID sandbox helper binary was found, but is not configured correctly|setuid sandbox: failed to move to new namespaces|^Failed to move to new namespace/, "Its sandbox could not start: on Linux a browser's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined."],
+  [/Too many open files in system/, "The system had as many files open as it may: close some programs and run it again."],
+  [/Too many open files/, "The browser had as many files open as it may: raise that limit, as ulimit -n does, and run it again."],
+];
+
+// The line of what a program printed that says the most of why it ended:
+// the first that holds words of SAID, else the first that is not one of
+// Chrome's NOISE, else the first, each trimmed; "" when it printed nothing.
+function tellingLine(output) {
+  const lines = String(output || "").split("\n").map((one) => one.trim()).filter(Boolean);
+  const telling = lines.filter((one) => !NOISE.test(one));
+  return telling.find((one) => SAID.some(([words]) => words.test(one))) || telling[0] || lines[0] || "";
+}
+
+// That line of what a program printed, quoted as it is: cut to about 200
+// characters, and its control characters written out.
 function firstLine(output) {
-  const line = String(output || "").split("\n").map((one) => one.trim()).find(Boolean);
+  const line = tellingLine(output);
   if (!line) return "";
   const cut = line.length > 200 ? `${line.slice(0, 200)}...` : line;
   return cut.replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
 }
 
-// The message for a browser that ended before it answered on its pipe: what
-// it printed first, and its exit status or the signal that stopped it.
+// The message for a browser that ended before it answered on its pipe: the
+// line it printed that says the most, its exit status or the signal that
+// stopped it, and what to do, as that line says when it is one of SAID.
 function endedEarly(place, { output = "", code = null, signal = null }) {
   const line = firstLine(output);
   const exited = code !== null && code !== undefined;
   const end = exited ? `exited with ${code}` : signal ? `was stopped by ${signal}` : "ended";
   const what = line ? `it printed "${line}" and ${end}` : exited ? `it printed nothing and ${end}` : `it ${end}`;
-  return `${place.name} did not start: ${place.subject} ended before it answered: ${what}. ${place.value ? FIX_SET : FIX_FOUND}`;
+  const [, fix = place.value ? FIX_SET : FIX_FOUND] = SAID.find(([words]) => words.test(tellingLine(output))) || [];
+  return `${place.name} did not start: ${place.subject} ended before it answered: ${what}. ${fix}`;
 }
 
 // Whether the browser at `file` is one installed as a snap or a Flatpak,

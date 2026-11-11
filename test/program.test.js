@@ -278,3 +278,49 @@ test("a browser installed as a snap or a Flatpak is told from its path", () => {
   assert.equal(ownSandbox("/usr/bin/google-chrome-stable-not-there"), false);
   assert.equal(ownSandbox(process.execPath), false);
 });
+
+test("a browser that ends before it answers is told by the line that says why, past the lines Chrome prints on every start", { skip }, (t) => {
+  const parent = place(t);
+  const at = (...names) => path.join(parent, ...names);
+  const write = (name, body) => {
+    fs.writeFileSync(at(name), body, { mode: 0o755 });
+    return at(name);
+  };
+  const said = (file, what, fix = SET) => `${path.basename(file)} did not start: CHROME_PATH is ${file}, which ended before it answered: ${what}. ${fix}`;
+  // Where it finds no session bus, as the kit starts it on Linux, Chrome
+  // prints its D-Bus lines first, its crash handler and its version their
+  // own: none of them says why it ended.
+  const bus = `[1:2:1111/071329.445107:ERROR:dbus/bus.cc:405] Failed to connect to the bus: Could not parse server address: Unknown address type (examples of valid types are "tcp" and on UNIX "unix")`;
+  // Older versions name the file a line comes from by its name alone.
+  const noise = [
+    bus,
+    "[1:1:1111/071329.445200:ERROR:dbus/object_proxy.cc:572] Failed to call method: org.freedesktop.DBus.NameHasOwner: object_path= /org/freedesktop/DBus: unknown error type: ",
+    "[1111/071329.411681:ERROR:third_party/crashpad/crashpad/util/file/file_io_posix.cc:145] open /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq: No such file or directory (2)",
+    "[1:1:1111/071329.400000:WARNING:chrome/app/chrome_main_linux.cc:84] Read channel stable from /opt/google/chrome/CHROME_VERSION_EXTRA",
+    "[1:2:0101/000000.000000:ERROR:bus.cc(407)] Failed to connect to the bus: Failed to connect to socket /run/dbus/system_bus_socket: No such file or directory",
+    "[0101/000000.000000:ERROR:file_io_posix.cc(144)] open /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq: No such file or directory (2)",
+  ];
+  const printing = (lines, end) => `#!/bin/sh\ncat >&2 <<'LINES'\n${lines.join("\n")}\nLINES\n${end}\n`;
+  const cause = "[1:3:1111/071329.445300:ERROR:components/viz/service/main/viz_main_impl.cc:189] Exiting GPU process due to errors during initialization";
+  const plain = write("plain-cause", printing([...noise, cause], "exit 4"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: plain }), said(plain, `it printed "${cause}" and exited with 4`));
+  // A browser with as many files open as it may says so, and so does the
+  // run, with what to do instead of another browser.
+  const files = "[1:4:1111/071357.377137:ERROR:base/memory/platform_shared_memory_region_posix.cc:335] Creating shared memory in /dev/shm/.com.google.Chrome.gBBtMi failed: Too many open files (24)";
+  const short = write("short-of-files", printing([...noise, "[1:5:1111/071357.377777:ERROR:device/udev_linux/udev_watcher.cc:51] Failed to initialize a udev monitor.", files], "kill -ABRT $$"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: short }), said(short, `it printed "${files}" and was stopped by SIGABRT`, "The browser had as many files open as it may: raise that limit, as ulimit -n does, and run it again."));
+  const table = "[1:4:1111/071357.377137:ERROR:base/files/file_util_posix.cc:12] open /proc/self/status: Too many open files in system (23)";
+  const full = write("system-full", printing([bus, table], "exit 1"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: full }), said(full, `it printed "${table}" and exited with 1`, "The system had as many files open as it may: close some programs and run it again."));
+  // One whose sandbox could not start, as in a container that does not let
+  // it: another browser would not start either.
+  const sandbox = "Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed: errno = Operation not permitted";
+  const boxed = write("no-sandbox", printing([bus, sandbox, "[1:1:1111/044331.800000:FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:202] Check failed: . : Invalid argument (22)"], "kill -TRAP $$"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: boxed }), said(boxed, `it printed "${sandbox}" and was stopped by SIGTRAP`, "Its sandbox could not start: on Linux a browser's own package sets the sandbox up, and a container has to let it start, as Docker does with --security-opt seccomp=unconfined."));
+  // Nothing but those lines: the first is quoted.
+  const only = write("only-noise", printing([bus], "exit 5"));
+  stoppedBeforeAnyWork(run(parent, { CHROME_PATH: only }), said(only, `it printed "${bus}" and exited with 5`));
+  // As the lines come by themselves.
+  assert.equal(firstLine(`${noise.join("\n")}\n  the cause  \nlater`), "the cause");
+  assert.equal(firstLine(noise.slice(2).join("\n")), noise[2]);
+});
