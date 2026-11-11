@@ -1236,7 +1236,7 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   // A page the kit would choose that only the browser finds on such a
   // network is opened, and a site's mailto: is held where it can be.
   assert.match(help.stdout, /\nhost\. One a site leads to there is not read\. One the kit would choose there\nis not opened when the kit's own lookup finds it there; when only the\nbrowser finds it there, it is opened, and not read\.\n/);
-  assert.match(help.stdout, /\nA page's own move to an address that is not a web address, such as mailto:,\nis cancelled before the browser hands it to a program of this machine, and\non Linux the browser has stand-ins for the programs it hands one to\. The\nREADME says what holds on macOS and Windows\.\n/);
+  assert.match(help.stdout, /\nA page's own move to an address that is not a web address, such as mailto:,\nis cancelled before the browser hands it to a program of this machine, and\non Linux the browser starts with no display, a session bus where nothing\nlistens and stand-ins for the programs it hands one to\. The README says what\nholds on macOS and Windows\.\n/);
   assert.match(help.stdout, /\nto pick the browser, by its path or a name on PATH\. One that cannot be\nstarted stops the run before any work and says why\.\n/);
 });
 

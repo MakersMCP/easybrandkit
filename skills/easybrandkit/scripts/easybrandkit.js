@@ -48,8 +48,9 @@ browser finds it there, it is opened, and not read.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine, and
-on Linux the browser has stand-ins for the programs it hands one to. The
-README says what holds on macOS and Windows.
+on Linux the browser starts with no display, a session bus where nothing
+listens and stand-ins for the programs it hands one to. The README says what
+holds on macOS and Windows.
 
 The new kit takes the place of an earlier one in the folder only once the
 run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
