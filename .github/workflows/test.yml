@@ -6,12 +6,21 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Ubuntu 22.04, as the hosted service runs it, Ubuntu 24.04, and
+    # ubuntu-latest, the newest Ubuntu GitHub runs. Each comes with Google
+    # Chrome.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      # Ubuntu 24.04 blocks the user namespaces Chrome's sandbox needs.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Ubuntu 24.04 and later block the user namespaces Chrome's sandbox
+      # needs; 22.04 has no such setting.
+      - name: Let Chrome start
+        run: if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
       - run: npm test
