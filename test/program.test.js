@@ -11,7 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
-const { wrongWith, lookOnPath, noexecMount, firstLine, browserPlace } = require("../skills/easybrandkit/scripts/lib/program");
+const { wrongWith, lookOnPath, noexecMount, firstLine, browserPlace, ownSandbox } = require("../skills/easybrandkit/scripts/lib/program");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const linux = process.platform === "linux";
@@ -267,4 +267,14 @@ test("the certain checks, and the first line, by themselves", { skip: !linux && 
     if (saved === undefined) delete process.env.CHROME_PATH;
     else process.env.CHROME_PATH = saved;
   }
+});
+
+test("a browser installed as a snap or a Flatpak is told from its path", () => {
+  assert.equal(ownSandbox("/snap/bin/chromium"), true);
+  assert.equal(ownSandbox("/snap/chromium/3235/usr/lib/chromium-browser/chrome"), true);
+  assert.equal(ownSandbox("/usr/bin/snap"), true);
+  assert.equal(ownSandbox("/var/lib/flatpak/exports/bin/org.chromium.Chromium"), true);
+  assert.equal(ownSandbox("/home/someone/.local/share/flatpak/exports/bin/com.google.Chrome"), true);
+  assert.equal(ownSandbox("/usr/bin/google-chrome-stable-not-there"), false);
+  assert.equal(ownSandbox(process.execPath), false);
 });

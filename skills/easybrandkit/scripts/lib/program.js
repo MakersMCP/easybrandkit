@@ -262,4 +262,18 @@ function endedEarly(place, { output = "", code = null, signal = null }) {
   return `${place.name} did not start: ${place.subject} ended before it answered: ${what}. ${place.value ? FIX_SET : FIX_FOUND}`;
 }
 
-module.exports = { browserPlace, wrongWith, lookOnPath, noexecMount, couldNotStart, endedEarly, firstLine, systemWords, NONE };
+// Whether the browser at `file` is one installed as a snap or a Flatpak,
+// which runs in a sandbox of its own: snap's own program, where the links in
+// /snap/bin lead, or one under /snap/, or one in a Flatpak's folders, as the
+// links in its exports/bin and the app folder they lead to are.
+function ownSandbox(file) {
+  let real = file;
+  try {
+    real = fs.realpathSync(file);
+  } catch {
+    // Looked at as given.
+  }
+  return [file, real].some((at) => at === "/usr/bin/snap" || at.startsWith("/snap/") || /\/flatpak\/(exports|app)\//.test(at));
+}
+
+module.exports = { browserPlace, wrongWith, lookOnPath, noexecMount, couldNotStart, endedEarly, firstLine, systemWords, ownSandbox, NONE };

@@ -11,7 +11,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
-const { browserPlace, wrongWith, couldNotStart, endedEarly, systemWords } = require("./program");
+const { browserPlace, wrongWith, couldNotStart, endedEarly, systemWords, ownSandbox } = require("./program");
 
 // The browser this run would start, or "" when none is found or what is
 // found cannot be started (browserPlace in program.js says why).
@@ -594,7 +594,9 @@ async function launch({ width, height }) {
         throw noKit(noAnswer("The browser did not answer the kit's request to refuse downloads", refusal));
       }
     }
-    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms) };
+    // sandboxed: a browser installed as a snap or a Flatpak, in whose
+    // sandbox the stand-ins and the bus may not be the ones it finds.
+    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms), sandboxed: ownSandbox(place.file) };
   }
   const running = !exited;
   // Told before close, which removes the folder the browser made and the

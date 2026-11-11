@@ -321,9 +321,10 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
-    // The addresses that are not web addresses the pages tried to open.
+    // The addresses that are not web addresses the pages tried to open, and
+    // whether the browser runs in a sandbox of its own (see triedNotes).
     const tried = await triedSoFar(cdp);
-    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried };
+    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, sandboxed: Boolean(chrome.sandboxed) };
   } catch (err) {
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
@@ -458,8 +459,10 @@ function siteOfListing(raw) {
 // The notes on the addresses that are not web addresses the pages tried to
 // open, the first three of them. The page's guard cancels a page's own move
 // and the browser opens no window without a click, on every system; on
-// Linux the browser's stand-ins also take what it went on to.
-function triedNotes(tried = []) {
+// Linux the browser's cut session bus and its stand-ins also take what it
+// went on to, unless it runs in a sandbox of its own (sandboxed), as one
+// installed as a snap or a Flatpak, where it can find others.
+function triedNotes(tried = [], { sandboxed = false } = {}) {
   const byAddress = new Map();
   for (const one of tried) {
     const known = byAddress.get(one.url);
@@ -468,7 +471,8 @@ function triedNotes(tried = []) {
   const list = [...byAddress.values()];
   const notes = list.slice(0, 3).map(({ page, url, how }) => {
     const who = page || "The page";
-    return how !== "started" || STAND_INS ? `${who} tried to open ${url}, which is not a web address: it was not opened.` : `${who} tried to open ${url}, which is not a web address, in a way easybrandkit stops only on Linux.`;
+    if (how !== "started" || (STAND_INS && !sandboxed)) return `${who} tried to open ${url}, which is not a web address: it was not opened.`;
+    return `${who} tried to open ${url}, which is not a web address, in a way easybrandkit ${STAND_INS ? "may not stop in a browser installed as a snap or a Flatpak" : "stops only on Linux"}.`;
   });
   const more = list.length - 3;
   if (more > 0) notes.push(`${more} more ${more === 1 ? "address that is not a web address was" : "addresses that are not web addresses were"} tried as well.`);
@@ -563,7 +567,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       notes.push(`${some} not read: ${read.wordsUnread === "time" ? "the run's time ran out. Give it more time with --timeout." : "the browser tab stopped answering."}`);
     }
     if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
-    if (read) notes.push(...triedNotes(read.tried));
+    if (read) notes.push(...triedNotes(read.tried, read));
     if (facts && !read) notes.push(failed ? "No facts were read: the website it names could not be read." : "No facts were read: the listing names no website.");
     const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : []) : [];
     const sources = [...(given ? [given] : []), ...others];

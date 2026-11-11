@@ -4019,6 +4019,29 @@ test("on Linux a site's mailto: reaches no desktop portal, also when this proces
   }
 });
 
+test("a browser installed as a snap or a Flatpak is not said to have opened nothing that reached it", { skip: noBrowser || (process.platform !== "linux" && "snaps and Flatpaks are on Linux") }, async (t) => {
+  const startedSoFar = recordHandlers(t);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The browser through a link in a Flatpak's exports, as such an install
+  // gives it.
+  const exports = path.join(parent, "share", "flatpak", "exports", "bin");
+  fs.mkdirSync(exports, { recursive: true });
+  const browser = path.join(exports, "org.chromium.Chromium");
+  fs.writeFileSync(browser, `#!/bin/sh\nexec "${findChrome()}" "$@"\n`, { mode: 0o755 });
+  setEnv(t, { CHROME_PATH: browser });
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="mailto:frame@acme.example" style="width:1px;height:1px;border:0"></iframe><script>setTimeout(() => (location.href = "mailto:own@acme.example"), 300);</script></body>`)));
+  t.after(() => site.server.close());
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
+  // The page's own move is cancelled in the page, in any browser; the
+  // frame's address reached the browser.
+  assert.deepEqual(kit.notes.sort(), [
+    `${site.origin}/ tried to open mailto:frame@acme.example, which is not a web address, in a way easybrandkit may not stop in a browser installed as a snap or a Flatpak.`,
+    `${site.origin}/ tried to open mailto:own@acme.example, which is not a web address: it was not opened.`,
+  ]);
+  assert.deepEqual(startedSoFar(), []);
+});
+
 test("a page the kit chose that only the browser finds on this machine is opened but not read, and told as there itself", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   // Every name under .test is on the web for the kit's own lookup. The
   // browser reaches www.brand.test and blog.brand.test through a proxy,
