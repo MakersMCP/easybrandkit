@@ -296,8 +296,8 @@ const SAID = [
 // The line of what a program printed that says the most of why it ended:
 // the first that holds words of SAID, one of Chrome's NOISE only when no
 // other does, else the first that is not one of NOISE, each trimmed; ""
-// when it printed nothing, or nothing but NOISE, which says nothing of why
-// it ended.
+// when it printed nothing, or nothing but NOISE with no words of SAID,
+// which says nothing of why it ended.
 function tellingLine(output) {
   const lines = String(output || "").split("\n").map((one) => one.trim()).filter(Boolean);
   const telling = lines.filter((one) => !NOISE.test(one));
@@ -317,7 +317,8 @@ function firstLine(output) {
 // The message for a browser that ended before it answered on its pipe: the
 // line it printed that says the most, its exit status or the signal that
 // stopped it, and what to do, as that line says when it is one of SAID. One
-// that printed only Chrome's NOISE is not quoted.
+// that printed only Chrome's NOISE is not quoted, unless a line of it holds
+// words of SAID.
 function endedEarly(place, { output = "", code = null, signal = null }) {
   const line = firstLine(output);
   const exited = code !== null && code !== undefined;
