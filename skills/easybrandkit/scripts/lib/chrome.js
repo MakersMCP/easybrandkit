@@ -1010,6 +1010,34 @@ async function triedSoFar(cdp) {
   return cdp.tried;
 }
 
+// The notes on the addresses that are not web addresses the pages tried to
+// open (cdp.tried), the first three of them. The page's guard cancels a
+// page's own move and the browser opens no window without a click, on every
+// system; where the browser gets stand-ins (standIns), its cut session bus
+// and its stand-ins also take what it went on to, unless it runs in a
+// sandbox of its own (sandboxed), as one installed as a snap or a Flatpak,
+// where it can find others. An address tried in more than one way is told
+// by one of them: where what reached the browser may have reached the
+// system too, by the way that reached it.
+function triedNotes(tried = [], { sandboxed = false, standIns = STAND_INS } = {}) {
+  const stopped = standIns && !sandboxed;
+  const told = (one) => (stopped ? one.how !== "started" : one.how === "started");
+  const byAddress = new Map();
+  for (const one of tried) {
+    const known = byAddress.get(one.url);
+    if (!known || (told(one) && !told(known))) byAddress.set(one.url, one);
+  }
+  const list = [...byAddress.values()];
+  const notes = list.slice(0, 3).map(({ page, url, how }) => {
+    const who = page || "The page";
+    if (how !== "started" || stopped) return `${who} tried to open ${url}, which is not a web address: it was not opened.`;
+    return `${who} tried to open ${url}, which is not a web address, in a way easybrandkit ${standIns ? "may not stop in a browser installed as a snap or a Flatpak" : "stops only on Linux"}.`;
+  });
+  const more = list.length - 3;
+  if (more > 0) notes.push(`${more} more ${more === 1 ? "address that is not a web address was" : "addresses that are not web addresses were"} tried as well.`);
+  return notes;
+}
+
 // What the tab's own page came from, kept up to date as the page moves on:
 // the status the server last answered its document with and that address,
 // after any redirect, the address of a page the browser could not open and
@@ -1168,4 +1196,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };

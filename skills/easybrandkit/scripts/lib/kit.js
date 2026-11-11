@@ -28,7 +28,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { launch, openPage, navigate, triedSoFar, seenOf, pageFailed, noKit, STAND_INS } = require("./chrome");
+const { launch, openPage, navigate, triedSoFar, triedNotes, seenOf, pageFailed, noKit } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture } = require("./page");
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
@@ -460,29 +460,6 @@ function siteOfListing(raw) {
   } catch {
     return "";
   }
-}
-
-// The notes on the addresses that are not web addresses the pages tried to
-// open, the first three of them. The page's guard cancels a page's own move
-// and the browser opens no window without a click, on every system; on
-// Linux the browser's cut session bus and its stand-ins also take what it
-// went on to, unless it runs in a sandbox of its own (sandboxed), as one
-// installed as a snap or a Flatpak, where it can find others.
-function triedNotes(tried = [], { sandboxed = false } = {}) {
-  const byAddress = new Map();
-  for (const one of tried) {
-    const known = byAddress.get(one.url);
-    if (!known || (known.how === "started" && one.how !== "started")) byAddress.set(one.url, one);
-  }
-  const list = [...byAddress.values()];
-  const notes = list.slice(0, 3).map(({ page, url, how }) => {
-    const who = page || "The page";
-    if (how !== "started" || (STAND_INS && !sandboxed)) return `${who} tried to open ${url}, which is not a web address: it was not opened.`;
-    return `${who} tried to open ${url}, which is not a web address, in a way easybrandkit ${STAND_INS ? "may not stop in a browser installed as a snap or a Flatpak" : "stops only on Linux"}.`;
-  });
-  const more = list.length - 3;
-  if (more > 0) notes.push(`${more} more ${more === 1 ? "address that is not a web address was" : "addresses that are not web addresses were"} tried as well.`);
-  return notes;
 }
 
 async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 120_000, log = () => {} } = {}) {

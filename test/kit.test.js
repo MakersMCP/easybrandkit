@@ -3823,11 +3823,11 @@ test("a site cannot make the browser start a program of this machine with an add
   // macOS and Windows, a frame's is not said to be held; the page's own move
   // still is. (The browser here still has its stand-ins.)
   const chromeModule = require("../skills/easybrandkit/scripts/lib/chrome");
-  const standIns = chromeModule.STAND_INS;
-  chromeModule.STAND_INS = false;
-  t.after(() => (chromeModule.STAND_INS = standIns));
+  const { triedNotes } = chromeModule;
+  chromeModule.triedNotes = (tried, options) => triedNotes(tried, { ...options, standIns: false });
+  t.after(() => (chromeModule.triedNotes = triedNotes));
   const elsewhere = reloadedKit().makeKit;
-  chromeModule.STAND_INS = standIns;
+  chromeModule.triedNotes = triedNotes;
   way = "a frame";
   const framed = await elsewhere(`${site.origin}/`, { dir: path.join(parent, "frame-elsewhere"), stores: false });
   assert.deepEqual(framed.kit.notes, [`${site.origin}/ tried to open ${mail}, which is not a web address, in a way easybrandkit stops only on Linux.`]);
@@ -4079,12 +4079,15 @@ test("a browser installed as a snap or a Flatpak is not said to have opened noth
   const browser = path.join(exports, "org.chromium.Chromium");
   fs.writeFileSync(browser, `#!/bin/sh\nexec "${findChrome()}" "$@"\n`, { mode: 0o755 });
   setEnv(t, { CHROME_PATH: browser });
-  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="mailto:frame@acme.example" style="width:1px;height:1px;border:0"></iframe><script>setTimeout(() => (location.href = "mailto:own@acme.example"), 300);</script></body>`)));
+  const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `${frame("mailto:frame@acme.example")}${frame("mailto:both@acme.example")}<script>setTimeout(() => (location.href = "mailto:both@acme.example"), 300); setTimeout(() => (location.href = "mailto:own@acme.example"), 600);</script></body>`)));
   t.after(() => site.server.close());
   const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
-  // The page's own move is cancelled in the page, in any browser; the
-  // frame's address reached the browser.
+  // The page's own move is cancelled in the page, in any browser; a frame's
+  // address reached the browser, also when the page's own move to it was
+  // cancelled as well.
   assert.deepEqual(kit.notes.sort(), [
+    `${site.origin}/ tried to open mailto:both@acme.example, which is not a web address, in a way easybrandkit may not stop in a browser installed as a snap or a Flatpak.`,
     `${site.origin}/ tried to open mailto:frame@acme.example, which is not a web address, in a way easybrandkit may not stop in a browser installed as a snap or a Flatpak.`,
     `${site.origin}/ tried to open mailto:own@acme.example, which is not a web address: it was not opened.`,
   ]);
@@ -4166,4 +4169,28 @@ test("what the guard cancelled is asked of each frame for a few seconds at most,
     { page: "https://acme.test/", url: "mailto:a@acme.test", how: "cancelled" },
     { page: "https://acme.test/", url: "news:comp.lang.misc", how: "cancelled" },
   ]);
+});
+
+test("an address tried in more than one way is told by the way that may have reached the system, where one may have", () => {
+  const { triedNotes } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const page = "https://acme.test/";
+  const url = "mailto:a@acme.test";
+  // A frame's address that reached the browser, and the page's own move to
+  // the same address, which the guard cancelled, or a window it asked for,
+  // which was not opened: the guard's records come once the page is left,
+  // after what the browser told of as it went.
+  const not = [`${page} tried to open ${url}, which is not a web address: it was not opened.`];
+  for (const other of ["cancelled", "window"]) {
+    for (const tried of [[{ page, url, how: "started" }, { page, url, how: other }], [{ page, url, how: other }, { page, url, how: "started" }]]) {
+      // Where the browser gets the cut bus and the stand-ins, they took it.
+      assert.deepEqual(triedNotes(tried, { standIns: true }), not, other);
+      // In a browser with a sandbox of its own they may not have, and
+      // where the browser hands it to the system itself, it may have
+      // opened it.
+      assert.deepEqual(triedNotes(tried, { standIns: true, sandboxed: true }), [`${page} tried to open ${url}, which is not a web address, in a way easybrandkit may not stop in a browser installed as a snap or a Flatpak.`], other);
+      assert.deepEqual(triedNotes(tried, { standIns: false }), [`${page} tried to open ${url}, which is not a web address, in a way easybrandkit stops only on Linux.`], other);
+    }
+    // Only cancelled or not opened, it was not opened anywhere.
+    assert.deepEqual(triedNotes([{ page, url, how: other }, { page, url, how: other }], { standIns: false }), not, other);
+  }
 });
