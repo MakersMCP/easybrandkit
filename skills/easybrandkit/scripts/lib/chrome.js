@@ -24,13 +24,19 @@ function findChrome() {
 }
 
 // The programs Chrome on Linux hands an address that is not a web address
-// to, such as mailto:, news: and snews:, which it opens without asking:
+// to, such as mailto:, news: and snews:, which it opens without asking, when
+// it has no session bus to reach the desktop's portal over:
 // xdg-settings, asked first whether the browser is itself the one for such
 // addresses, xdg-email and xdg-open, and the browsers xdg-open goes on to.
 const HANDLERS = ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser"];
-// Where the browser gets those stand-ins: on Linux, and on the other systems
-// whose Chrome hands such addresses on through PATH, not macOS or Windows.
+// Where the browser gets those stand-ins, no session bus and no display: on
+// Linux, and on the other systems whose Chrome hands such addresses on
+// through PATH or the session bus, not macOS or Windows.
 const STAND_INS = process.platform !== "win32" && process.platform !== "darwin";
+
+// A path as a D-Bus address writes it: each byte but a letter, a digit and
+// -_/.\* as %xx.
+const busPath = (file) => Array.from(Buffer.from(file, "utf8"), (byte) => (/[-0-9A-Za-z_/.\\*]/.test(String.fromCharCode(byte)) ? String.fromCharCode(byte) : `%${byte.toString(16).padStart(2, "0")}`)).join("");
 
 // A folder in the profile of stand-ins for those programs, put first on the
 // browser's PATH, so that the system finds them instead: each a link to the
@@ -364,11 +370,17 @@ async function launch({ width, height }) {
   // its helpers. BREAKPAD_DUMP_LOCATION puts them in the throwaway profile.
   const env = { ...process.env, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
   // A site can send the browser to mailto:, news: or snews:, which Chrome
-  // on Linux hands to a program of the machine through PATH without asking:
-  // the mail program, started as the user who runs the kit, with the site's
-  // address. The stand-ins come first on its PATH, the rest as it was. On
-  // macOS and Windows the browser asks the system instead, and the guard in
-  // each page (openPage) is what holds there.
+  // on Linux hands on without asking: over the session bus to the desktop's
+  // portal, which starts the user's own mail program with the site's
+  // address, and with no session bus, to a program of the machine it finds
+  // through PATH, as the user who runs the kit. So the browser gets a
+  // session bus where nothing listens, a socket in its profile that is never
+  // made (left unset, libdbus can look for the desktop's own bus in
+  // XDG_RUNTIME_DIR), no display, which a headless browser does not use and
+  // a program it starts could open a window on, and the stand-ins first on
+  // its PATH, the rest as it was. On macOS and Windows the browser asks the
+  // system instead, and the guard in each page (openPage) is what holds
+  // there.
   if (STAND_INS) {
     try {
       env.PATH = [standIns(profile), process.env.PATH || "/usr/local/bin:/usr/bin:/bin"].join(path.delimiter);
@@ -377,6 +389,9 @@ async function launch({ width, height }) {
       if (full) throw full;
       throw new Error(`${place.name} was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: ${systemWords(err)}.`);
     }
+    env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath(path.join(profile, "no-bus"))}`;
+    delete env.DISPLAY;
+    delete env.WAYLAND_DISPLAY;
   }
   // What the browser prints, in one file in the profile, in the order it
   // printed it: its first line says why one that ends before it answers
@@ -896,9 +911,10 @@ const webAddress = (raw) => {
 // web address, by its script, a refresh, a form or a link, in the page or a
 // frame of the same site, is cancelled before the browser acts on it, on
 // every system, and the address is kept for the kit's notes. The page's own
-// scripts cannot reach this world. A frame's first address and a redirect
-// are not moves of a page and reach the browser: on Linux its stand-ins
-// take those (see launch).
+// scripts cannot reach this world. A frame's first address, a redirect, a
+// frame of another site, which runs apart, and a frame still on its first
+// about:blank, where the browser tells no move, reach the browser: on Linux
+// the cut session bus and the stand-ins take those (see launch).
 const GUARD_WORLD = "easybrandkit-guard";
 const GUARD = `(() => {
   if (typeof navigation === "undefined") return;
@@ -1126,4 +1142,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, seenOf, inOwnWorld, pageFailed, noKit, HANDLERS, STAND_INS };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };

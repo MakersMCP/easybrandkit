@@ -18,7 +18,7 @@ const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
-const { findChrome, launch, openPage, browserWait, killBrowsers, removeTemps, pipeOf } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, browserWait, killBrowsers, removeTemps, pipeOf, busPath } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf, saveVector, readWords } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
@@ -3847,6 +3847,153 @@ test("a page's own move to an address that is not a web address is cancelled in 
     assert.equal(result.value, `${site.origin}${where}`, `${where} stays where it was`);
   }
   assert.deepEqual(startedSoFar(), []);
+});
+
+// Environment variables of this process set for a test, and put back once
+// it ends.
+function setEnv(t, values) {
+  const saved = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  for (const [name, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
+
+test("on Linux the browser starts with a session bus where nothing listens, no display and the stand-ins first on its PATH, whatever this process has", { skip: process.platform !== "linux" && "the bus and the stand-ins are given on Linux" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // A bus of this process's that a connection would reach, as a desktop's
+  // session bus is, and a display's names, which nothing here serves.
+  const desktop = path.join(parent, "desktop-bus");
+  const listening = require("node:net").createServer().listen(desktop);
+  await once(listening, "listening");
+  t.after(() => listening.close());
+  // A stand-in browser that writes down what it was given, and whether the
+  // bus it was given leads anywhere, and ends.
+  const seen = path.join(parent, "seen.txt");
+  const browser = path.join(parent, "browser");
+  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "display \${DISPLAY-unset} \${WAYLAND_DISPLAY-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; } > "${seen}"\nexit 3\n`, { mode: 0o755 });
+  setEnv(t, { CHROME_PATH: browser, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-99", TMPDIR: parent });
+  await assert.rejects(launch({ width: 800, height: 600 }), /ended before it answered: it printed nothing and exited with 3\./);
+  const [address, there, display, first, ...links] = fs.readFileSync(seen, "utf8").trim().split("\n");
+  assert.equal(display, "display unset unset", "the browser has no display");
+  const profile = /^unix:path=(.+)\/no-bus$/.exec(address);
+  assert.ok(profile, address);
+  assert.match(path.basename(profile[1]), /^easybrandkit-chrome-/);
+  assert.equal(there, "nothing", "the bus the browser was given leads nowhere");
+  assert.equal(first, path.join(profile[1], "stand-ins"));
+  const nothing = ["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file));
+  assert.deepEqual(links, Array(6).fill(nothing));
+});
+
+test("the path of the bus the browser is given is written as a bus address writes it", () => {
+  // Each byte but a letter, a digit and -_/.\* goes as %xx, so a temp
+  // folder's comma, semicolon or equals sign is not read as part of the
+  // address's own syntax.
+  assert.equal(busPath("/tmp/a b,c;d=\u00e9%/x-y_z.1*"), "/tmp/a%20b%2cc%3bd%3d%c3%a9%25/x-y_z.1*");
+  assert.equal(busPath("/home/u/.kt/easybrandkit-chrome-AbC123/no-bus"), "/home/u/.kt/easybrandkit-chrome-AbC123/no-bus");
+});
+
+// The stand-in for a desktop's portal: it owns the portal's names on a bus,
+// prints each call it gets and answers it with an error, and opens nothing.
+const PORTAL = `import sys
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+conn = Gio.DBusConnection.new_for_address_sync(sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+def calls(connection, message, incoming):
+    if incoming and message.get_message_type() == Gio.DBusMessageType.METHOD_CALL and message.get_destination() != "org.freedesktop.DBus":
+        print("CALL", message.get_interface(), message.get_member(), message.get_body(), flush=True)
+        connection.send_message(message.new_method_error_literal("org.freedesktop.DBus.Error.NotSupported", "stand-in portal"), Gio.DBusSendMessageFlags.NONE)
+        return None
+    return message
+conn.add_filter(calls)
+for name in ("org.freedesktop.portal.Desktop", "org.freedesktop.FileManager1"):
+    conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", GLib.Variant("(su)", (name, 4)), None, Gio.DBusCallFlags.NONE, -1, None)
+print("owned", flush=True)
+GLib.MainLoop().run()
+`;
+
+// A session bus of the test's own with the stand-in portal on it, as a
+// desktop has: { address, calls }, calls giving each call the portal got so
+// far. null where there is no dbus-daemon or no Python with Gio.
+async function privateBus(t) {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const python = spawnSync("python3", ["-I", "-c", "import gi; gi.require_version('Gio', '2.0'); from gi.repository import Gio"], { stdio: "ignore" });
+  if (python.status !== 0 || spawnSync("dbus-daemon", ["--version"], { stdio: "ignore" }).status !== 0) return null;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-bus-"));
+  const socket = path.join(dir, "bus");
+  fs.writeFileSync(path.join(dir, "bus.conf"), `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">\n<busconfig><type>session</type><listen>unix:path=${socket}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>\n`);
+  fs.writeFileSync(path.join(dir, "portal.py"), PORTAL);
+  const daemon = spawn("dbus-daemon", [`--config-file=${path.join(dir, "bus.conf")}`, "--nofork", "--nopidfile"], { stdio: "ignore" });
+  let portal = null;
+  t.after(() => {
+    if (portal) portal.kill();
+    daemon.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  for (let waited = 0; waited < 10_000 && !fs.existsSync(socket); waited += 50) await wait(50);
+  const address = `unix:path=${socket}`;
+  portal = spawn("python3", ["-I", path.join(dir, "portal.py"), address], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: "/usr/bin:/bin" } });
+  let said = "";
+  portal.stdout.on("data", (chunk) => (said += chunk));
+  for (let waited = 0; waited < 20_000 && !said.includes("owned"); waited += 50) await wait(50);
+  assert.match(said, /owned/, "the stand-in portal took its names");
+  return { address, calls: () => said.split("\n").filter((line) => line.startsWith("CALL ")) };
+}
+
+test("on Linux a site's mailto: reaches no desktop portal, also when this process has a session bus with one on it", { skip: noBrowser || (process.platform !== "linux" && "the desktop's portal is on Linux") }, async (t) => {
+  const startedSoFar = recordHandlers(t);
+  const bus = await privateBus(t);
+  if (!bus) return t.skip("no dbus-daemon, or no Python with Gio, to make a bus with a portal on it");
+  // The bus works, and its portal writes down what it is asked to open.
+  spawnSync("python3", ["-I", "-c", "import sys, gi; gi.require_version('Gio', '2.0'); from gi.repository import Gio, GLib; c = Gio.DBusConnection.new_for_address_sync(sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None); c.call_sync('org.freedesktop.portal.Desktop', '/org/freedesktop/portal/desktop', 'org.freedesktop.portal.OpenURI', 'OpenURI', GLib.Variant('(ssa{sv})', ('', 'mailto:control@acme.example', {})), None, Gio.DBusCallFlags.NONE, 5000, None)", bus.address], { stdio: "ignore", timeout: 10_000 });
+  for (let waited = 0; waited < 5_000 && !bus.calls().length; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(bus.calls().length, 1);
+  assert.match(bus.calls()[0], /OpenURI OpenURI \('', 'mailto:control@acme\.example'/);
+  process.env.DBUS_SESSION_BUS_ADDRESS = bus.address;
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  let way = "";
+  const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
+  const far = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<p>far</p><script>setTimeout(() => (location.href = "mailto:far@acme.example"), 200);</script>`));
+  const site = await serve((req, res) => {
+    const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
+    if (req.url === "/robots.txt") return res.writeHead(404).end();
+    if (req.url === "/pricing") return res.writeHead(302, { location: "mailto:sales@acme.example" }).end();
+    if (req.url === "/to-mail") return res.writeHead(302, { location: "mailto:redirect@acme.example" }).end();
+    if (req.url !== "/") return res.writeHead(404).end();
+    if (way === "a redirect") return res.writeHead(302, { location: "mailto:given@acme.example" }).end();
+    const ways = {
+      "its script": `<script>location.href = "mailto:own@acme.example";</script>`,
+      "a frame": frame("mailto:frame@acme.example?subject=Hi"),
+      "a frame's redirect": frame("/to-mail"),
+      "another site's frame that moves there": frame(`${far.origin.replace("127.0.0.1", "localhost")}/`),
+      "a frame the page sends there": `<iframe id="sent" style="width:1px;height:1px;border:0"></iframe><script>document.getElementById("sent").contentWindow.location = "mailto:sent@acme.example";</script>`,
+    };
+    html(brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="/pricing">Pricing</a>`).replace("</body>", `${ways[way] || ""}</body>`));
+  });
+  t.after(() => {
+    site.server.close();
+    far.server.close();
+  });
+  // Each way in a browser of its own: one browser lets one such address
+  // through and holds back the next ones. A redirect of the address given
+  // ends the run, and reaches nothing either.
+  for (const name of ["its script", "a frame", "a frame's redirect", "another site's frame that moves there", "a frame the page sends there", "a menu page's redirect", "a redirect"]) {
+    way = name;
+    const made = makeKit(`${site.origin}/`, { dir: path.join(parent, name.replace(/\W+/g, "-")), stores: false, facts: name === "a menu page's redirect" });
+    if (name === "a redirect") await assert.rejects(made, (err) => err.message === `${site.origin}/ led to mailto:given@acme.example, which is not a web address, so no kit was made.`);
+    else await made;
+    assert.deepEqual(bus.calls().slice(1), [], `the browser did not reach the bus for ${name}`);
+    assert.deepEqual(startedSoFar(), [], `nothing started for ${name}`);
+  }
 });
 
 test("a page the kit chose that only the browser finds on this machine is opened but not read, and told as there itself", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
