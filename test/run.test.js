@@ -1236,8 +1236,8 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   // A page the kit would choose that only the browser finds on such a
   // network is opened, and a site's mailto: is held where it can be.
   assert.match(help.stdout, /\nhost\. One a site leads to there is not read\. One the kit would choose there\nis not opened when the kit's own lookup finds it there; when only the\nbrowser finds it there, it is opened, and not read\.\n/);
-  assert.match(help.stdout, /\nA page's own move to an address that is not a web address, such as mailto:,\nis cancelled before the browser hands it to a program of this machine, and\non Linux the browser starts with no display, a session bus where nothing\nlistens and stand-ins for the programs it hands one to\. The README says what\nholds on macOS and Windows\.\n/);
-  assert.match(help.stdout, /\nto pick the browser, by its path or a name on PATH\. One that cannot be\nstarted stops the run before any work and says why\.\n/);
+  assert.match(help.stdout, /\nA page's own move to an address that is not a web address, such as mailto:,\nis cancelled before the browser hands it to a program of this machine\. On\nLinux the browser also starts with no display and a session bus where\nnothing listens: DISPLAY is unset, and WAYLAND_DISPLAY and the bus's address\nname sockets in its throwaway profile that are never made\. Stand-ins come\nfirst on its PATH for the programs it hands such an address to\. The README\nsays what holds on macOS and Windows\.\n/);
+  assert.match(help.stdout, /\nto pick the browser, by its path or a name on PATH; a program it names that\nstarts the browser has to hand it file descriptors 3 and 4, its pipe to\neasybrandkit\. One that cannot be started stops the run before any work and\nsays why\.\n/);
 });
 
 test("output that cannot be written makes the CLI exit 1 and say so, while a reader that has gone does not", { skip: !fs.existsSync("/dev/full") && "no /dev/full" }, async (t) => {
