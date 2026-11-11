@@ -1233,6 +1233,11 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   assert.match(help.stdout, /\nThe new kit takes the place of an earlier one in the folder only once the\nrun has ended well\. A run that fails, is refused, or is stopped with Ctrl-C\nor a kill leaves the folder as it was, and a folder it would have made is\nnot made\. A run killed outright, as kill -9, taskkill \/F or a power cut do,\ncan leave a hidden \.easybrandkit-part- folder in the folder or next to it,\nand the browser's profile and its own folders in the temp folder; the\nREADME says what is left and what removes it\.\n/);
   // The browser ends once the kit's process is gone, as its pipe closes.
   assert.doesNotMatch(help.stdout, /browser running/);
+  // A page the kit would choose that only the browser finds on such a
+  // network is opened, and a site's mailto: is held where it can be.
+  assert.match(help.stdout, /\nhost\. One a site leads to there is not read\. One the kit would choose there\nis not opened when the kit's own lookup finds it there; when only the\nbrowser finds it there, it is opened, and not read\.\n/);
+  assert.match(help.stdout, /\nA page's own move to an address that is not a web address, such as mailto:,\nis cancelled before the browser hands it to a program of this machine, and\non Linux the browser has stand-ins for the programs it hands one to\. The\nREADME says what holds on macOS and Windows\.\n/);
+  assert.match(help.stdout, /\nto pick the browser, by its path or a name on PATH\. One that cannot be\nstarted stops the run before any work and says why\.\n/);
 });
 
 test("output that cannot be written makes the CLI exit 1 and say so, while a reader that has gone does not", { skip: !fs.existsSync("/dev/full") && "no /dev/full" }, async (t) => {

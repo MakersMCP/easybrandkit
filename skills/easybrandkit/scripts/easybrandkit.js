@@ -42,8 +42,14 @@ downloaded either.
 
 A page on this machine or a private network is read only when the address
 given is on that host and port, localhost and 127.0.0.1 counting as one
-host: one a site leads to there is not read, and one the kit would choose
-there is not opened.
+host. One a site leads to there is not read. One the kit would choose there
+is not opened when the kit's own lookup finds it there; when only the
+browser finds it there, it is opened, and not read.
+
+A page's own move to an address that is not a web address, such as mailto:,
+is cancelled before the browser hands it to a program of this machine, and
+on Linux the browser has stand-ins for the programs it hands one to. The
+README says what holds on macOS and Windows.
 
 The new kit takes the place of an earlier one in the folder only once the
 run has ended well. A run that fails, is refused, or is stopped with Ctrl-C
@@ -54,7 +60,8 @@ and the browser's profile and its own folders in the temp folder; the
 README says what is left and what removes it.
 
 Needs Node 22 or newer and Chrome, Chromium, Edge or Brave. Set CHROME_PATH
-to pick the browser.`;
+to pick the browser, by its path or a name on PATH. One that cannot be
+started stops the run before any work and says why.`;
 
 function parse(argv) {
   const options = { stores: true, facts: false, json: false };
