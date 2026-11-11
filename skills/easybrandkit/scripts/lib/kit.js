@@ -309,7 +309,13 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
       // would otherwise go into the kit.
       if (err.syscall) throw err;
       const said = String(err.message || err);
-      cardError = err.timedOut ? "the browser tab stopped answering" : err.closed ? "the kit's connection to its tab closed" : err.browserSaid ? said.charAt(0).toLowerCase() + said.slice(1) : said;
+      // A tab that did not answer once the run's time was up got a second at
+      // most, which a busy machine can miss: more time is what helps then.
+      const more = "Give it more time with --timeout";
+      if (err.timedOut) cardError = outOfTime() ? `the run's time ran out. ${more}` : "the browser tab stopped answering";
+      else if (err.closed) cardError = "the kit's connection to its tab closed";
+      else if (err.browserSaid) cardError = `${said.charAt(0).toLowerCase()}${said.slice(1)}${err.outOfTime ? `. ${more}` : ""}`;
+      else cardError = said;
       return null;
     });
     // The claims last, from the page as the kit leaves it and the pages it

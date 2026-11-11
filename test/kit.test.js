@@ -3497,8 +3497,12 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
 
   // While the browser runs, the kit is saved without its card, and says so.
   let drawn = new Error("the first screen could not be read.");
+  let atDraw = () => {};
   t.mock.method(fs, "readFileSync", function (file, ...rest) {
-    if (drawing(file)) throw drawn;
+    if (drawing(file)) {
+      atDraw();
+      throw drawn;
+    }
     return read.call(this, file, ...rest);
   });
   const { kit } = await makeKit(site.origin, { dir, stores: false });
@@ -3511,6 +3515,17 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   drawn = Object.assign(new Error("Page.captureScreenshot timed out"), { timedOut: true });
   const stalled = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(stalled.kit.notes, ["The card could not be drawn: the browser tab stopped answering."]);
+  // Once the run's time is up, a call the card's tab does not answer has had
+  // a second at most, and more time is what helps.
+  atDraw = () => setTimeLimit(0);
+  const spent = await makeKit(site.origin, { dir, stores: false });
+  atDraw = () => {};
+  setTimeLimit(120_000);
+  assert.deepEqual(spent.kit.notes, ["The card could not be drawn: the run's time ran out. Give it more time with --timeout."]);
+  // So does the browser's own word that it did not answer before then.
+  drawn = Object.assign(new Error("The browser did not open a tab before the run's time ran out"), { browserSaid: true, outOfTime: true });
+  const late = await makeKit(site.origin, { dir, stores: false });
+  assert.deepEqual(late.kit.notes, ["The card could not be drawn: the browser did not open a tab before the run's time ran out. Give it more time with --timeout."]);
   // And so is a connection to its tab that closed while the browser runs.
   drawn = Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge: false });
   const dropped = await makeKit(site.origin, { dir, stores: false });
