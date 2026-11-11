@@ -319,6 +319,12 @@ async function launch({ width, height }) {
   // A browser that cannot be started is told before anything is made.
   const place = browserPlace();
   const temp = os.tmpdir();
+  // The folders of PATH are parted by its delimiter, so a folder of stand-ins
+  // in a temp folder whose path has one in it could not come first on the
+  // browser's PATH (see below), and the browser would find the real programs.
+  if (STAND_INS && temp.includes(path.delimiter)) {
+    throw new Error(`${place.name} was not started: the path of the temp folder, ${temp}, has a ${path.delimiter} in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
+  }
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
   // What is made in the profile before the browser starts: on a disk with

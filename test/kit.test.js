@@ -3890,6 +3890,13 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   assert.equal(first, path.join(profile[1], "stand-ins"));
   const nothing = ["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file));
   assert.deepEqual(links, Array(6).fill(nothing));
+  // A temp folder whose path has a : in it, which parts the folders of
+  // PATH, is refused before anything is made in it.
+  const parted = path.join(parent, "te:mp");
+  fs.mkdirSync(parted);
+  process.env.TMPDIR = parted;
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === `browser was not started: the path of the temp folder, ${parted}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
+  assert.deepEqual(fs.readdirSync(parted), []);
 });
 
 test("the path of the bus the browser is given is written as a bus address writes it", () => {
