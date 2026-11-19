@@ -789,8 +789,17 @@ test("a temp folder with no room left for the browser's profile is told as the t
   assert.deepEqual(filesOf(dir), before);
 });
 
-test("the skill folder carries its own version, the same as the package's", () => {
-  assert.equal(require("../skills/easybrandkit/scripts/lib/version"), require("../package.json").version);
+test("the skill folder carries its own version, the same as the package's, and so does every other version field", () => {
+  const version = require("../package.json").version;
+  assert.equal(require("../skills/easybrandkit/scripts/lib/version"), version);
+  // The lockfile's own and its root package's, and the plugin manifests',
+  // which a version commit moves together (see publish.yml).
+  const read = (file) => JSON.parse(fs.readFileSync(path.join(__dirname, "..", file), "utf8"));
+  const lock = read("package-lock.json");
+  assert.deepEqual([lock.version, lock.packages[""].version], [version, version], "package-lock.json");
+  assert.equal(read("plugin.json").version, version, "plugin.json");
+  assert.equal(read(".codex-plugin/plugin.json").version, version, ".codex-plugin/plugin.json");
+  assert.deepEqual(read(".claude-plugin/marketplace.json").plugins.map((plugin) => plugin.version), [version], ".claude-plugin/marketplace.json");
 });
 
 test("code that requires the package gets the functions 0.4.0 gave it, and no others", () => {
