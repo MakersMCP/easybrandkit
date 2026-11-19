@@ -1236,6 +1236,9 @@ test("the CLI says what a failed run leaves, on the error's own line, and --help
   // Which addresses the kit opens, and a site's mailto: held where it can be.
   assert.match(help.stdout, /\nThe address given is opened whatever its host and port, and so are the\npages on its scheme, host and port, localhost and 127\.0\.0\.1 counting as one\nhost\. Any other address the kit opens, as a page it chose, each hop of a\nredirect, a page's own move, a frame or a window it opens and robots\.txt\nwith --facts, is opened only on port 80 or 443, and only when every address\nthe kit's own lookup finds for its name is on the public internet: a name\n/);
   assert.match(help.stdout, /MAKERSMCP_REFUSE_ADDRESSES, a comma list\s+of IP\s+addresses and ranges such as\s+10\.0\.0\.0\/8, refuses those for every\s+address\s+opened, the one given included\.\n/);
+  // A site another source named is not the address given.
+  assert.match(help.stdout, /\n  --named-by <url> the site was named by the page at this address, as a\n/);
+  assert.match(help.stdout, /With --named-by, the site given is such an\naddress too\./);
   assert.match(help.stdout, /\nA page's own move to an address that is not a web address, such as mailto:,\nis cancelled before the browser hands it to a program of this machine\. On\nLinux the browser also starts with no display and a session bus where\nnothing listens: DISPLAY is unset, and WAYLAND_DISPLAY and the bus's address\nname sockets in its throwaway profile that are never made\. Stand-ins come\nfirst on its PATH for the programs it hands such an address to\. The README\nsays what holds on macOS and Windows\.\n/);
   assert.match(help.stdout, /\nto pick the browser, by its path or a name on PATH; a program it names that\nstarts the browser has to hand it file descriptors 3 and 4, its pipe to\neasybrandkit\. One that cannot be started stops the run before any work and\nsays why\.\n/);
 });

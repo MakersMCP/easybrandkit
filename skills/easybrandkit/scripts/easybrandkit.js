@@ -3,7 +3,7 @@
 
 const fs = require("fs");
 const os = require("os");
-const { makeKit } = require("./lib/kit");
+const { makeKit, normalizeUrl } = require("./lib/kit");
 const { discardRuns, savedRuns } = require("./lib/run");
 const { killBrowsers } = require("./lib/chrome");
 const { refusedAddresses } = require("./lib/address");
@@ -29,6 +29,9 @@ Options:
   --json           print brand.json instead of a summary
   --timeout <s>    give up after this many seconds (default: 120, or 240
                    with --facts)
+  --named-by <url> the site was named by the page at this address, as a
+                   store listing names its maker's website, and not given
+                   by you: it is read as a page easybrandkit chose itself
   -h, --help       show this help
   -v, --version    show the version
 
@@ -47,10 +50,10 @@ host. Any other address the kit opens, as a page it chose, each hop of a
 redirect, a page's own move, a frame or a window it opens and robots.txt
 with --facts, is opened only on port 80 or 443, and only when every address
 the kit's own lookup finds for its name is on the public internet: a name
-it cannot look up is not opened. A page the browser says it got from
-elsewhere is not read. MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP
-addresses and ranges such as 10.0.0.0/8, refuses those for every address
-opened, the one given included.
+it cannot look up is not opened. With --named-by, the site given is such an
+address too. A page the browser says it got from elsewhere is not read.
+MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and ranges such as
+10.0.0.0/8, refuses those for every address opened, the one given included.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On
@@ -84,14 +87,18 @@ function parse(argv) {
     else if (arg === "--no-stores") options.stores = false;
     else if (arg === "--facts") options.facts = true;
     else if (arg === "--json") options.json = true;
-    else if (arg === "--out" || arg === "--timeout") {
+    else if (arg === "--out" || arg === "--timeout" || arg === "--named-by") {
       const value = argv[++i];
       if (!value || value.startsWith("-")) throw new Error(`${arg} needs a value`);
       if (arg === "--out") options.out = value;
+      else if (arg === "--named-by") options.namedBy = value;
       else options.timeout = Number(value);
     } else if (arg.startsWith("--out=")) {
       if (arg === "--out=") throw new Error("--out needs a value");
       options.out = arg.slice(6);
+    } else if (arg.startsWith("--named-by=")) {
+      if (arg === "--named-by=") throw new Error("--named-by needs a value");
+      options.namedBy = arg.slice(11);
     } else if (arg.startsWith("--timeout=")) options.timeout = Number(arg.slice(10));
     else if (arg.startsWith("-")) throw new Error(`Unknown option: ${arg}`);
     else rest.push(arg);
@@ -99,6 +106,13 @@ function parse(argv) {
   if (options.timeout === undefined) options.timeout = options.facts ? 240 : 120;
   if (!(options.timeout >= 30 && options.timeout <= 600)) throw new Error("--timeout takes 30 to 600 seconds");
   if (!options.help && !options.version && rest.length !== 1) throw new Error("Give one website address, for example: easybrandkit acme.com");
+  if (options.namedBy !== undefined) {
+    try {
+      normalizeUrl(options.namedBy);
+    } catch {
+      throw new Error(`--named-by takes the web address that named the site, as a store listing's: ${options.namedBy} is not one`);
+    }
+  }
   return { ...options, url: rest[0] };
 }
 
@@ -242,6 +256,7 @@ async function main() {
       dir: options.out,
       stores: options.stores,
       facts: options.facts,
+      namedBy: options.namedBy || "",
       timeLimit: options.timeout * 1000,
       log: options.json ? () => {} : (line) => process.stderr.write(`${line}...\n`),
     });

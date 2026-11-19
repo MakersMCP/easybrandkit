@@ -5,9 +5,9 @@
 // site on this machine, as http://localhost:3000, is the user's own choice.
 // Any other address a run opens is one it was not given: a page it chose
 // (the home page of a deeper address, the website a store listing names, a
-// menu page with --facts), each hop of a redirect, a page's own move, a
-// frame or a window a page opens, and robots.txt with each of its
-// redirects. Such an address is opened only on
+// site another source named, a menu page with --facts), each hop of a
+// redirect, a page's own move, a frame or a window a page opens, and
+// robots.txt with each of its redirects. Such an address is opened only on
 // port 80 or 443 and only on the public internet, so no site, listing or
 // redirect leads the kit to another program of this machine or of a private
 // network, to another port of a public host, or to a router's page or a
@@ -205,7 +205,8 @@ const atRefused = (address) => `is at ${address}, an address ${SETTING} refuses`
 const LOOKUP_WAIT = 5_000;
 
 // The rule for the addresses a run opens, for the address given (given, a
-// web address), with the addresses refused (refused, from
+// web address; for a site another source named, the address of that
+// source, see makeKit), with the addresses refused (refused, from
 // refusedAddresses). Each name is looked up once a run.
 //
 // judge(raw, seen) resolves to "" for an address the run may open, and else

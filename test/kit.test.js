@@ -2574,6 +2574,47 @@ test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any 
   }
 });
 
+test("a site another source named, given with namedBy or --named-by, is read as a page the kit chose: only on port 80 or 443 and on the public internet, refused before anything is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  const site = await counting(t);
+  const proxy = await proxyOf(t, site.port);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const listing = "https://apps.apple.com/us/app/acme/id1234567890";
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  for (const [named, why] of [
+    [`${site.origin}/`, `is on port ${site.port}, not 80 or 443`],
+    [`http://localhost:${site.port}/`, `is on port ${site.port}, not 80 or 443`],
+    ["http://127.0.0.1/", "is not on the public internet"],
+    ["http://intranet.test/", "is at 10.0.0.5, an address not on the public internet"],
+    ["https://acme.test:8443/app", "is on port 8443, not 80 or 443"],
+  ]) {
+    await assert.rejects(makeKit(named, { dir, stores: false, namedBy: listing }), (err) => err.message === `${named}, named by ${listing}, ${why}, so no kit was made.`, named);
+  }
+  assert.equal(site.connections, 0, "nothing was opened");
+  assert.deepEqual(proxy.hosts, []);
+  assert.deepEqual(filesOf(dir), before);
+  // Given by the user, the same site on this machine is read.
+  const mine = await makeKit(`${site.origin}/`, { dir: path.join(parent, "mine"), stores: false });
+  assert.equal(mine.kit.url, `${site.origin}/`);
+  // A site on the web is read as any page the kit chose.
+  const { kit } = await makeKit("http://acme.test/app", { dir: path.join(parent, "named"), stores: false, namedBy: listing });
+  assert.equal(kit.url, "http://acme.test/");
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  // The command line takes it as --named-by.
+  const cli = await runCli([`${site.origin}/`, "--named-by", listing, "--out", dir, "--no-stores"], process.env);
+  assert.equal(cli.code, 1);
+  assert.equal(cli.stderr, `easybrandkit: ${site.origin}/, named by ${listing}, is on port ${site.port}, not 80 or 443, so no kit was made.\n`);
+  for (const args of [["--named-by"], ["--named-by="], ["--named-by", "ftp://x"]]) {
+    const refused = await runCli(["acme.com", ...args, "--out", dir], process.env);
+    assert.equal(refused.code, 2, args.join(" "));
+  }
+  assert.deepEqual(filesOf(dir), before);
+});
+
 // kit.js loaded afresh, for what the test has mocked of the modules it takes
 // its functions from.
 function reloadedKit() {

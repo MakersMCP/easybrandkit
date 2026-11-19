@@ -475,24 +475,32 @@ function siteOfListing(raw) {
   }
 }
 
-async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 120_000, log = () => {} } = {}) {
+// namedBy: when another source named the site, as a store listing names its
+// maker's website, and not the user, the address of that source. The site
+// is then read as a page easybrandkit chose itself, as the website a
+// listing names is, held to the rule for one (see address.js), with namedBy
+// as the address given; refused there, it ends the run before anything is
+// opened.
+async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 120_000, namedBy = "", log = () => {} } = {}) {
   setTimeLimit(timeLimit);
   // MAKERSMCP_REFUSE_ADDRESSES, a value of which that does not parse ends
   // the run here, before any work.
   const refused = refusedAddresses();
   const asked = normalizeUrl(rawUrl);
+  const source = namedBy ? normalizeUrl(namedBy) : "";
   const host = new URL(asked).hostname.toLowerCase();
   const listing = PLATFORM_HOST.test(host) ? classify(asked) : null;
   if (PLATFORM_HOST.test(host) && !(listing && (listing.type === "appstore" || listing.type === "googleplay"))) {
     throw new Error(`${asked} is a page on ${host.replace(/^(www|m|mobile)\./, "")}, not the brand's own site. Give the brand's website, or its App Store or Google Play listing.`);
   }
   // The rule for every address the run opens. The address given is opened
-  // whatever its host and port, unless the setting refuses where it is. A
-  // store listing is read from its store's own hosts (see stores.js).
-  const guard = guardFor(asked, { refused });
+  // whatever its host and port, unless the setting refuses where it is; a
+  // site another source named is not the address given. A store listing is
+  // read from its store's own hosts (see stores.js).
+  const guard = guardFor(source || asked, { refused });
   if (!listing) {
     const why = await guard.judge(asked);
-    if (why) throw new Error(`${asked} ${why}, so no kit was made.`);
+    if (why) throw new Error(`${asked}${source ? `, named by ${source},` : ""} ${why}, so no kit was made.`);
   }
   const notes = [];
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
