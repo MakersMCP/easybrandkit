@@ -315,7 +315,10 @@ const LOW_WAIT = 3_000;
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
-async function launch({ width, height }) {
+// judge is the run's rule for the addresses its pages may open (see
+// address.js guardFor and holdDocuments below); a browser started without
+// one opens no web page.
+async function launch({ width, height }, { judge = null } = {}) {
   // A browser that cannot be started is told before anything is made.
   const place = browserPlace();
   const temp = os.tmpdir();
@@ -361,11 +364,15 @@ async function launch({ width, height }) {
   };
   // A download that starts while the browser takes no refusal (see below)
   // goes into the throwaway profile and is removed with it, not into the
-  // Downloads folder of the user the browser runs as.
+  // Downloads folder of the user the browser runs as. The browser also
+  // makes no connection ahead of a request (network_prediction_options 2,
+  // never): with its default, it connected to the address of a page's frame
+  // or of a page's move before the kit had judged that address, and the
+  // address refused there still got the connection, with no request in it.
   const preferences = path.join(profile, "Default", "Preferences");
   try {
     fs.mkdirSync(path.join(profile, "Default"));
-    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false } }));
+    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 } }));
   } catch (err) {
     // For anything but no room, the refusal still holds.
     if (NO_ROOM.has(err.code)) throw room(err, preferences);
@@ -436,6 +443,12 @@ async function launch({ width, height }) {
         "--disable-sync",
         "--use-mock-keychain",
         "--password-store=basic",
+        // No HTTP/3: with it, a site's Alt-Svc answer sends the browser's
+        // next requests for an address of the site to another port, or to
+        // another host, over UDP, past the address the run's rule judged
+        // (see holdDocuments); over TCP each goes to the host and port its
+        // address names.
+        "--disable-quic",
         // Chrome refuses to start as root without it (a container, a CI box).
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",
@@ -599,9 +612,24 @@ async function launch({ width, height }) {
         throw noKit(noAnswer("The browser did not answer the kit's request to refuse downloads", refusal));
       }
     }
+    // Every document the browser loads is judged by the run's rule before
+    // it is asked for, also for the whole browser and before any page is
+    // opened. A browser that does not take that, in the time the run has
+    // left or at all, ends the run: let go on, it would open any address a
+    // site leads it to.
+    const tabs = new Map();
+    const holding = browserWait();
+    try {
+      await holdDocuments(pipe, tabs, judge, holding);
+    } catch (err) {
+      await close({ hurry: Boolean(err.timedOut) });
+      if (err.timedOut) throw noKit(noAnswer("The browser did not answer the kit's request to judge the pages it opens", holding));
+      throw noKit(browserSaid(err.closed ? "The browser ended before it took the kit's request to judge the pages it opens" : "The browser refused the kit's request to judge the pages it opens"));
+    }
     // sandboxed: a browser installed as a snap or a Flatpak, in whose
-    // sandbox the stand-ins and the bus may not be the ones it finds.
-    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms), sandboxed: ownSandbox(place.file) };
+    // sandbox the stand-ins and the bus may not be the ones it finds. tabs:
+    // the tabs the kit reads pages in, by their ids (see openPage).
+    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms), sandboxed: ownSandbox(place.file), tabs };
   }
   // A browser's pipe closes as it ends, and can close a moment before the
   // system tells that it has ended: one whose pipe has closed is given a
@@ -896,7 +924,79 @@ function pipeOf(input, output, most = MESSAGE_MOST) {
       },
     };
   };
-  return { send, attach, closed, end, ended: () => over };
+  // What the browser itself tells, past every tab.
+  const on = (method, listener) => {
+    const key = ` ${method}`;
+    listeners.set(key, [...(listeners.get(key) || []), listener]);
+  };
+  return { send, attach, on, closed, end, ended: () => over };
+}
+
+// How long the kit waits for the browser to take its answer to a document
+// the browser holds for it.
+const HELD_ANSWER = 10_000;
+
+// The longest address kept for what is told of one.
+const LONG_ADDRESS = 300;
+
+// The rule for the run's pages held for the whole browser, on its own
+// connection, which sees the requests of every tab, frame and window: each
+// document the browser loads, the page, each hop of its redirects, a move
+// of the page, a frame in it, of another site too, and a window it opens,
+// is held before the browser asks for it (Fetch at its Request stage) and
+// judged by judge, the run's rule (see address.js guardFor). One the rule
+// takes goes on; one it refuses is not asked for. A frame or a window is
+// then given up as if the page had stopped it, and stays empty. The tab's
+// own page ends on the browser's error page: given up the same way, a move
+// the page made before its load event left the tab taking no more input
+// (Chrome 155), so the page could not be read anyway. The refusal is kept
+// with the tab it came from, in its refused list: the tab whose page it
+// was, by the page's id, marked main, else the tab opened last, whose frame
+// or window it was, as the kit reads in one tab at a time and the card's
+// tab asks for nothing (see navigate, takeMove and refusedNotes). With no
+// rule, no web page is opened. A page's pictures, styles, scripts and data
+// are no documents, and are left to the browser's own rules.
+async function holdDocuments(pipe, tabs, judge, ms) {
+  pipe.on("Fetch.requestPaused", async (paused) => {
+    const url = String((paused.request && paused.request.url) || "");
+    let why = "";
+    if (/^https?:/i.test(url)) {
+      try {
+        why = judge ? await judge(url) : "is not opened by a browser the kit gave no rule for the addresses it opens";
+      } catch {
+        why = "could not be judged";
+      }
+    }
+    if (!why) return void pipe.send("Fetch.continueRequest", { requestId: paused.requestId }, HELD_ANSWER).catch(() => {});
+    const page = tabs.get(paused.frameId);
+    const tab = page || [...tabs.values()].pop();
+    if (tab && tab.refused.length < 50) tab.refused.push({ page: tab.page || "", url: url.slice(0, LONG_ADDRESS), why, main: Boolean(page) });
+    pipe.send("Fetch.failRequest", { requestId: paused.requestId, errorReason: page ? "BlockedByClient" : "Aborted" }, HELD_ANSWER).catch(() => {});
+  });
+  await pipe.send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] }, ms);
+}
+
+// The move to an address the run's rule refused that the tab's page made
+// since navigate opened it, taken out of the tab's refused list to be told
+// as where the page led (see holdDocuments), or null.
+function takeMove(cdp) {
+  const refused = cdp.refused || [];
+  const at = refused.findIndex((one, i) => one.main && i >= (cdp.movedFrom || 0));
+  return at === -1 ? null : refused.splice(at, 1)[0];
+}
+
+// The notes on the addresses the run's rule did not let the pages open
+// (tab.refused, see holdDocuments): a frame, a window, or a page's own move
+// that was not told as where the page led, each named once, the first three
+// of them.
+function refusedNotes(refused = []) {
+  const byAddress = new Map();
+  for (const one of refused) if (!byAddress.has(one.url)) byAddress.set(one.url, one);
+  const list = [...byAddress.values()];
+  const notes = list.slice(0, 3).map(({ page, url, why }) => `${page || "The page"} tried to open ${url}, which ${why}: it was not opened.`);
+  const more = list.length - 3;
+  if (more > 0) notes.push(`${more} more ${more === 1 ? "address the pages tried to open was" : "addresses the pages tried to open were"} not opened either.`);
+  return notes;
 }
 
 // A new tab, set to a desktop screen of the given size. Headless Chrome says
@@ -904,7 +1004,12 @@ function pipeOf(input, output, most = MESSAGE_MOST) {
 // stripped page; the tab says "Chrome", as the same browser with a window
 // would. The tab and the kit's connection to it have what the run has left.
 async function openPage(chrome, { width, height }) {
-  const cdp = await chrome.attach(await chrome.newTab(browserWait()), browserWait());
+  const targetId = await chrome.newTab(browserWait());
+  const cdp = await chrome.attach(targetId, browserWait());
+  // The documents the run's rule did not let this tab's pages open (see
+  // holdDocuments), with the tab's page, by its id, the id of its page.
+  cdp.refused = [];
+  if (chrome.tabs) chrome.tabs.set(targetId, cdp);
   await cdp.send("Page.enable");
   await guard(cdp);
   cdp.answer = await watchAnswer(cdp);
@@ -1121,6 +1226,12 @@ async function navigate(cdp, url) {
   cdp.page = url;
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "" });
+  // The documents the run's rule refuses from here on (see holdDocuments):
+  // in the tab's page, a hop of this navigation, else a move of the page it
+  // opened (see takeMove).
+  const refused = cdp.refused || [];
+  const since = refused.length;
+  cdp.movedFrom = since;
   // A site gets 30 s to answer, or what the run has left: one the kit chose
   // to read that never answers leaves the run time to go on without it.
   const limit = Math.max(1_000, Math.min(30_000, timeLeft()));
@@ -1133,6 +1244,15 @@ async function navigate(cdp, url) {
     throw pageFailed(`${url} did not answer in ${Math.round(limit / 1_000)} s, so no kit was made. The site may be down or slow: try again later.`, "did not answer");
   }
   if (errorText) {
+    // The address, or a hop of its redirects, that the run's rule refused,
+    // which the browser then did not ask for: told by the address and why,
+    // where the browser says only that the navigation was aborted.
+    const barred = refused.slice(since).find((one) => one.main);
+    if (barred) {
+      refused.splice(refused.indexOf(barred), 1);
+      if (barred.url === url.split("#")[0].slice(0, LONG_ADDRESS)) throw pageFailed(`${url} ${barred.why}, so no kit was made.`, barred.why);
+      throw pageFailed(`${url} led to ${barred.url}, which ${barred.why}, so no kit was made.`, `led to ${barred.url}, which ${barred.why}`);
+    }
     if (cdp.answer.status >= 400) return url;
     // A redirect to an address that is not a web address ends the
     // navigation as aborted, and what the redirect said can come a moment
@@ -1196,4 +1316,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, refusedNotes, takeMove, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };

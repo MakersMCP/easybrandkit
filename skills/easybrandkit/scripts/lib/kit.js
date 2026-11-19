@@ -28,7 +28,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { launch, openPage, navigate, triedSoFar, triedNotes, seenOf, pageFailed, noKit } = require("./chrome");
+const { launch, openPage, navigate, triedSoFar, triedNotes, refusedNotes, takeMove, seenOf, pageFailed, noKit } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture } = require("./page");
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
@@ -38,7 +38,7 @@ const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
 const { SaveError, toldPlainly, removedFrom, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
-const { mayOpen, LOCAL } = require("./address");
+const { guardFor, refusedAddresses } = require("./address");
 const { plainText } = require("./text");
 const version = require("./version");
 
@@ -211,6 +211,7 @@ const errorPage = ({ status, unreachable, blank }) => status >= 400 || Boolean(u
 // a site's own 404 has a logo, colors and fonts of its own, and a kit made
 // from them would pass for the brand's.
 function refuseOtherPage(cdp, url, pageUrl, challenge) {
+  refuseMove(cdp, url);
   if (challenge) {
     throw pageFailed(`${pageUrl} answered with a bot check ("${challenge}") instead of its page, so no kit was made. Get the logo and colors from the site in a normal browser.`, `answered with a bot check ("${challenge}")`);
   }
@@ -220,27 +221,38 @@ function refuseOtherPage(cdp, url, pageUrl, challenge) {
   if (what) throw pageFailed(`${url} ${what}, so no kit was made.`, what);
 }
 
-// Throws when the tab has gone on to a page on a local or private network
-// that is not on the host and port of the address the user gave (given): a
-// site's redirect or its script can lead there, and what such a page shows
-// is not read. Where the browser says it got the page counts too, so a name
-// that the kit's own lookup does not find there, or finds elsewhere, is
-// still told by where the browser found it: then the page opened, url, can
-// be there itself, which it is told as.
-async function refuseLocal(cdp, url, pageUrl, given) {
+// Throws when the tab's page has tried to move on to an address the run's
+// rule refused, which the browser did not open (see chrome.js takeMove):
+// the tab shows the browser's error page in its place.
+function refuseMove(cdp, url) {
+  const moved = takeMove(cdp);
+  if (moved) throw pageFailed(`${url} led to ${moved.url}, which ${moved.why}, so no kit was made.`, `led to ${moved.url}, which ${moved.why}`);
+}
+
+// Throws when the tab shows a page the run's rule (guard, see address.js)
+// does not let it read. The browser asks for no document the rule refuses
+// (see chrome.js holdDocuments), so this is where the browser says it got
+// the page: a name that the kit's own lookup finds on the public internet,
+// and the browser's own lookup elsewhere, is told by where the browser
+// found it. Then the page opened, url, can be there itself, which it is
+// told as.
+async function refuseByRule(cdp, url, pageUrl, guard) {
+  refuseMove(cdp, url);
   for (const at of new Set([pageUrl, cdp.answer.url].filter(Boolean))) {
-    if (await mayOpen(at, given, seenOf(cdp, at))) continue;
-    if (at.split("#")[0] === url.split("#")[0]) throw pageFailed(`${url} ${LOCAL}, so no kit was made.`, LOCAL);
-    throw pageFailed(`${url} led to ${at}, which ${LOCAL}, so no kit was made.`, `led to ${at}, which ${LOCAL}`);
+    const why = await guard.judge(at, seenOf(cdp, at));
+    if (!why) continue;
+    if (at.split("#")[0] === url.split("#")[0]) throw pageFailed(`${url} ${why}, so no kit was made.`, why);
+    throw pageFailed(`${url} led to ${at}, which ${why}, so no kit was made.`, `led to ${at}, which ${why}`);
   }
 }
 
 // alsoNamed: more names the brand goes by. deeper: the page is one past the
-// home page, read as given when the home page could not be read. given: the
-// address the user gave. browser: one started for it, which it closes as it
-// would its own.
-async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, given = url, browser = null } = {}) {
-  const chrome = browser || (await launch(SCREEN));
+// home page, read as given when the home page could not be read. guard: the
+// run's rule for the addresses it opens (see address.js), which a page the
+// browser is to open is held to as well. browser: one started for it with
+// that rule, which it closes as it would its own.
+async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, guard = guardFor(url), browser = null } = {}) {
+  const chrome = browser || (await launch(SCREEN, { judge: guard.judge }));
   // A browser that has just not answered is not waited for again as it is
   // asked to quit.
   let unanswered = false;
@@ -249,7 +261,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     resetPictureWait();
     log(`Opening ${url}`);
     const pageUrl = await navigate(cdp, url);
-    await refuseLocal(cdp, url, pageUrl, given);
+    await refuseByRule(cdp, url, pageUrl, guard);
     // An error page is not waited for or walked. A bot check can come with
     // an error status too, and is read like any page: it may let the browser
     // through to the site.
@@ -282,7 +294,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     }
     // Also a page that has moved on to such a page since it loaded.
     refuseOtherPage(cdp, url, pageUrl, found.challenge);
-    await refuseLocal(cdp, url, pageUrl, given);
+    await refuseByRule(cdp, url, pageUrl, guard);
     // The words first, while the page is as the snapshot saw it.
     const { headings, ctas, unread } = await readWords(cdp, found.wordTargets);
     const text = { title: found.title, description: found.description, headings, ctas };
@@ -299,7 +311,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     log("Taking the first screen");
     const screenshots = await captureFirstScreen(cdp, dir);
     refuseOtherPage(cdp, url, pageUrl, "");
-    await refuseLocal(cdp, url, pageUrl, given);
+    await refuseByRule(cdp, url, pageUrl, guard);
     const name = brandName(found.siteName, found.title, pageUrl, { deeper, logo: (logos.find((logo) => logo.alt) || {}).alt });
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");
@@ -322,15 +334,16 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     // links to: the kit is made the same way with or without them. A page
     // read as given is not filed as the home page.
     const role = deeper ? "given" : "home";
-    const factPages = facts ? await readFactPages(cdp, pageUrl, log, { role, given }).catch((err) => ({ pages: [], skipped: [{ role, url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
+    const factPages = facts ? await readFactPages(cdp, pageUrl, log, { role, guard }).catch((err) => ({ pages: [], skipped: [{ role, url: pageUrl, reason: plainText(String(err.message || err)) }] })) : null;
     // A browser that was killed or crashed on the way has left the kit
     // without its card or its claims: the run fails, so that an earlier kit
     // in the folder stays as it was.
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
     // The addresses that are not web addresses the pages tried to open, and
-    // whether the browser runs in a sandbox of its own (see triedNotes).
+    // whether the browser runs in a sandbox of its own (see triedNotes),
+    // and those the run's rule did not let them open (see refusedNotes).
     const tried = await triedSoFar(cdp);
-    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, sandboxed: Boolean(chrome.sandboxed) };
+    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], sandboxed: Boolean(chrome.sandboxed) };
   } catch (err) {
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
@@ -355,7 +368,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
   }
 }
 
-async function readSources(links, dir, log, skip = []) {
+async function readSources(links, dir, log, skip = [], guard = null) {
   const picked = [];
   for (const type of SOURCE_ORDER.filter((kind) => !skip.includes(kind))) {
     const link = links.find((one) => one.type === type && classify(one.url));
@@ -363,7 +376,7 @@ async function readSources(links, dir, log, skip = []) {
   }
   if (!picked.length) return [];
   log(`Reading ${picked.length === 1 ? "1 store listing or profile" : `${Math.min(picked.length, MAX_SOURCES)} store listings and profiles`}`);
-  return Promise.all(picked.slice(0, MAX_SOURCES).map((source) => readSource(source, dir)));
+  return Promise.all(picked.slice(0, MAX_SOURCES).map((source) => readSource(source, dir, guard)));
 }
 
 function writeMarkdown(kit, dir) {
@@ -464,11 +477,22 @@ function siteOfListing(raw) {
 
 async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 120_000, log = () => {} } = {}) {
   setTimeLimit(timeLimit);
+  // MAKERSMCP_REFUSE_ADDRESSES, a value of which that does not parse ends
+  // the run here, before any work.
+  const refused = refusedAddresses();
   const asked = normalizeUrl(rawUrl);
   const host = new URL(asked).hostname.toLowerCase();
   const listing = PLATFORM_HOST.test(host) ? classify(asked) : null;
   if (PLATFORM_HOST.test(host) && !(listing && (listing.type === "appstore" || listing.type === "googleplay"))) {
     throw new Error(`${asked} is a page on ${host.replace(/^(www|m|mobile)\./, "")}, not the brand's own site. Give the brand's website, or its App Store or Google Play listing.`);
+  }
+  // The rule for every address the run opens. The address given is opened
+  // whatever its host and port, unless the setting refuses where it is. A
+  // store listing is read from its store's own hosts (see stores.js).
+  const guard = guardFor(asked, { refused });
+  if (!listing) {
+    const why = await guard.judge(asked);
+    if (why) throw new Error(`${asked} ${why}, so no kit was made.`);
   }
   const notes = [];
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
@@ -494,13 +518,13 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     return one;
   };
   try {
-    browser = await launch(SCREEN);
+    browser = await launch(SCREEN, { judge: guard.judge });
     let given = null;
     let read = null;
     let page = "";
     if (listing) {
       log(`Reading the ${listing.type === "appstore" ? "App Store" : "Google Play"} listing`);
-      given = await readSource(listing, work);
+      given = await readSource(listing, work, guard);
       if (!given.ok) throw new Error(`${asked} could not be read: ${given.error}.`);
       page = siteOfListing(given.site || "");
     } else {
@@ -518,17 +542,18 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (page) {
       const had = fs.readdirSync(work);
       try {
-        // A page the kit chose that its own lookup finds on a local or
-        // private network is not opened; one only the browser finds there
-        // is opened and then refused (refuseLocal).
-        if (page !== asked && !(await mayOpen(page, asked))) throw pageFailed(`${page} ${LOCAL}, so no kit was made.`, `${LOCAL}, which easybrandkit does not open on its own`);
-        read = await readPage(page, work, log, { alsoNamed: appName, facts, given: asked, browser: take() });
+        // A page the kit chose that the run's rule refuses is not opened.
+        // Where only the browser finds it elsewhere, it is refused once the
+        // browser says so (refuseByRule).
+        const why = page === asked ? "" : await guard.judge(page);
+        if (why) throw pageFailed(`${page} ${why}, so no kit was made.`, why);
+        read = await readPage(page, work, log, { alsoNamed: appName, facts, guard, browser: take() });
       } catch (err) {
         if (!err.pageFailed || page === asked || err.outOfTime) throw err;
         failed = err.pageFailed;
         for (const name of fs.readdirSync(work)) if (!had.includes(name)) fs.rmSync(path.join(work, name), { recursive: true, force: true });
       }
-      if (failed && !listing) read = await readPage(asked, work, log, { alsoNamed: appName, facts, deeper: true, given: asked, browser: take() });
+      if (failed && !listing) read = await readPage(asked, work, log, { alsoNamed: appName, facts, deeper: true, guard, browser: take() });
     }
     // A listing none of whose pictures came, and no website to read: a name
     // alone is no kit to put in the place of an earlier one.
@@ -550,9 +575,9 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       notes.push(`${some} not read: ${read.wordsUnread === "time" ? "the run's time ran out. Give it more time with --timeout." : "the browser tab stopped answering."}`);
     }
     if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
-    if (read) notes.push(...triedNotes(read.tried, read));
+    if (read) notes.push(...triedNotes(read.tried, read), ...refusedNotes(read.refused));
     if (facts && !read) notes.push(failed ? "No facts were read: the website it names could not be read." : "No facts were read: the listing names no website.");
-    const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : []) : [];
+    const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : [], guard) : [];
     const sources = [...(given ? [given] : []), ...others];
     for (const source of others) {
       if (!source.ok) notes.push(`${source.url} could not be read: ${source.error}.`);

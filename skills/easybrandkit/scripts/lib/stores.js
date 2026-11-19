@@ -5,17 +5,17 @@
 // listing's name, maker and description. The site links to them; these are
 // the pictures a mockup or a video of the app should use.
 //
-// It fetches only HTTPS URLs on the listed store, social and image hosts,
-// re-checks every redirect, refuses non-public addresses and caps each file
-// at 15 MB.
+// It fetches only HTTPS URLs on port 443 of the listed store, social and
+// image hosts, re-checks every redirect, refuses addresses that are not on
+// the public internet and those MAKERSMCP_REFUSE_ADDRESSES names (see
+// address.js), and caps each file at 15 MB.
 
 const fs = require("fs");
 const path = require("path");
-const net = require("net");
 const { promises: dns } = require("dns");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
-const { ipv4Within } = require("./address");
+const { isPublicAddress, atRefused } = require("./address");
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
@@ -79,53 +79,30 @@ function classify(raw) {
   return null;
 }
 
-// Whether an address is on the public internet. An IPv4 address in IPv6
-// form, mapped or reached through NAT64 as on a network with IPv6 only, is
-// as public as the IPv4 address it stands for.
-function isPublicAddress(address) {
-  const family = net.isIP(address);
-  const v4 = ipv4Within(address);
-  if (v4) return isPublicAddress(v4);
-  if (family === 4) {
-    const [a, b, c] = address.split(".").map(Number);
-    return !(
-      a === 0 || a === 10 || a === 127 || a >= 224 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 192 && b === 0 && (c === 0 || c === 2)) ||
-      (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
-      (a === 203 && b === 0 && c === 113)
-    );
-  }
-  if (family === 6) {
-    const normalized = address.toLowerCase();
-    const first = Number.parseInt(normalized.split(":")[0], 16);
-    return Number.isFinite(first) && first >= 0x2000 && first <= 0x3fff && !normalized.startsWith("2001:db8:");
-  }
-  return false;
-}
-
-async function checkFetchUrl(raw) {
+// The address of a store's page or picture, refused unless it is a plain
+// HTTPS address on a listed host, at addresses that are all on the public
+// internet, none of them one the run's rule refuses (guard, see address.js).
+async function checkFetchUrl(raw, guard = null) {
   const url = new URL(raw);
   const host = url.hostname.toLowerCase();
   if (url.protocol !== "https:") throw new Error(`not HTTPS: ${raw}`);
   if (url.username || url.password || (url.port && url.port !== "443")) throw new Error(`not a plain URL: ${raw}`);
   if (!FETCH_HOSTS.some((pattern) => pattern.test(host))) throw new Error(`host not allowed: ${host}`);
   const records = await dns.lookup(host, { all: true, verbatim: true });
+  const refused = guard && records.map((record) => guard.refused.match(record.address)).find(Boolean);
+  if (refused) throw new Error(`host ${host} ${atRefused(refused)}`);
   if (!records.length || !records.every((record) => isPublicAddress(record.address))) {
     throw new Error(`host does not resolve to a public address: ${host}`);
   }
   return url;
 }
 
-// GET with every redirect re-checked against the host list, a size cap and
-// a timeout inside the run's deadline.
-async function get(raw, { binary = false, accept = "*/*" } = {}) {
+// GET with every redirect re-checked against the host list and the run's
+// rule (guard), a size cap and a timeout inside the run's deadline.
+async function get(raw, { binary = false, accept = "*/*", guard = null } = {}) {
   let current = raw;
   for (let hop = 0; hop < 5; hop++) {
-    const url = await checkFetchUrl(current);
+    const url = await checkFetchUrl(current, guard);
     const left = timeLeft();
     if (left < 2_000) throw new Error("out of time");
     const wait = Math.min(25_000, left - 1_000);
@@ -310,21 +287,23 @@ function profilePlan(html) {
 // <type>-shot-01.png … <type>-profile.jpg. A source that cannot be read (a
 // login wall, a removed app) comes back with ok:false and the reason. A
 // picture that cannot be written, as on a full disk, fails the run instead:
-// what it has of the file would otherwise go into the kit.
-async function readSource(link, dir) {
+// what it has of the file would otherwise go into the kit. guard: the run's
+// rule for the addresses it opens, whose refused addresses are refused here
+// too.
+async function readSource(link, dir, guard = null) {
   const source = { type: link.type, url: link.url, ok: false, assets: [] };
   let notWritten = null;
   try {
     let plan = null;
     if (link.type === "appstore") {
-      const lookup = async (country, lang) => appStorePlan(JSON.parse((await get(appStoreLookupUrl(link.id, country, lang), { accept: "application/json" })).body));
+      const lookup = async (country, lang) => appStorePlan(JSON.parse((await get(appStoreLookupUrl(link.id, country, lang), { accept: "application/json", guard })).body));
       plan = await lookup(link.country, link.lang);
       if (!plan && link.lang) plan = await lookup(link.country, "");
       if (!plan && link.country !== "us") plan = await lookup("us", "");
     } else if (link.type === "googleplay") {
-      plan = playPlan((await get(link.url, { accept: "text/html" })).body);
+      plan = playPlan((await get(link.url, { accept: "text/html", guard })).body);
     } else {
-      plan = profilePlan((await get(link.url, { accept: "text/html" })).body);
+      plan = profilePlan((await get(link.url, { accept: "text/html", guard })).body);
     }
     if (!plan) throw new Error("the page has no listing or profile data (removed, private or behind a login)");
     const { images, ...facts } = plan;
@@ -334,7 +313,7 @@ async function readSource(link, dir) {
       let body;
       let info;
       try {
-        ({ body } = await get(image.url, { binary: true, accept: "image/png,image/jpeg,image/webp,*/*;q=0.5" }));
+        ({ body } = await get(image.url, { binary: true, accept: "image/png,image/jpeg,image/webp,*/*;q=0.5", guard }));
         info = imageInfo(body);
       } catch {
         // One image that will not come is skipped; the rest still count.

@@ -7,6 +7,7 @@
 const assert = require("node:assert/strict");
 const dns = require("node:dns");
 const fs = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -145,6 +146,28 @@ test("fetches only HTTPS on the listed hosts, and only public addresses", async 
   await assert.rejects(stores.checkFetchUrl("http://play.google.com/store"), /not HTTPS/);
   await assert.rejects(stores.checkFetchUrl("https://user:pw@play.google.com/"), /not a plain URL/);
   await assert.rejects(stores.checkFetchUrl("https://play.google.com:8443/"), /not a plain URL/);
+});
+
+test("a store's addresses are judged as every address the kit opens is: by the table shared with the other kits, and by MAKERSMCP_REFUSE_ADDRESSES", async (t) => {
+  const cases = require("./address-cases.json");
+  for (const address of cases.notPublic) assert.equal(stores.isPublicAddress(address), false, address);
+  for (const address of [...cases.public, ...cases.publicInKitsOnly]) assert.equal(stores.isPublicAddress(address), true, address);
+  const { guardFor, refusedAddresses } = require("../skills/easybrandkit/scripts/lib/address");
+  let at = "2001:0:7f00:1::1";
+  t.mock.method(dns.promises, "lookup", async () => [{ address: at, family: net.isIP(at) }]);
+  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890"), (err) => err.message === "host does not resolve to a public address: apps.apple.com");
+  at = "17.253.144.10";
+  const guard = guardFor("https://apps.apple.com/us/app/acme/id1234567890", { refused: refusedAddresses("17.253.144.0/24") });
+  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
+  assert.equal((await stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/"))).hostname, "apps.apple.com");
+  // A listing read under that rule is not asked for at all, and says why.
+  const fetched = t.mock.method(globalThis, "fetch", async () => new Response("{}"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir, guard);
+  assert.equal(source.ok, false);
+  assert.equal(source.error, "host itunes.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
+  assert.equal(fetched.mock.callCount(), 0);
 });
 
 test("a picture that does not come is skipped, a host that cannot be found is told, and a picture that cannot be written fails the run", async (t) => {

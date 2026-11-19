@@ -25,6 +25,7 @@ const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run
 const { noControls, plainText, noEndSlashes } = require("../skills/easybrandkit/scripts/lib/text");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
+const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -2004,7 +2005,7 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
     ["a script that moves on to a page that cannot be opened", answer(200, `<!doctype html><title>x</title><script>location.replace("/drop")</script>`), `${url} led to ${site.origin}/drop, which could not be opened, so no kit was made.`],
     // Another port of this machine is another program's, whether it answers
     // or not: it is not read.
-    ["a script that moves on to another port of this machine", answer(200, `<!doctype html><title>x</title><script>location.replace("${closed.origin}/")</script>`), `${url} led to ${closed.origin}/, which is on a local or private network, so no kit was made.`],
+    ["a script that moves on to another port of this machine", answer(200, `<!doctype html><title>x</title><script>location.replace("${closed.origin}/")</script>`), `${url} led to ${closed.origin}/, which is on port ${new URL(closed.origin).port}, not 80 or 443, so no kit was made.`],
     ["a script that moves on to a 410 while the page is read", moved(`setTimeout(() => location.replace("/gone"), 1000)`), `${url} led to ${site.origin}/gone, which answered 410, so no kit was made.`, "Reading the page"],
     ["a script that moves on to a blank page while the page is read", moved(`setTimeout(() => location.replace("about:blank"), 1000)`), `${url} moved on to a blank page, so no kit was made.`, "Reading the page"],
     ["a script that moves on to a blank page at once", answer(200, `<!doctype html><title>x</title><script>location.replace("about:blank")</script>`), `${url} moved on to a blank page, so no kit was made.`, opening],
@@ -2170,15 +2171,18 @@ test("a deeper address whose home page fails is read as given and says so, and i
 
 // An HTTP proxy on this machine, as a local one for a VPN or a firewall
 // is, that takes every page from this machine's port its address names,
-// whatever its name. Through it the browser says only that a page came
-// through a proxy, so the kit's own lookup says where the page is. hosts
-// lists the hosts it was asked for.
-async function proxyOf(t) {
+// whatever its name; a page on port 80, as a site on the web is, from the
+// port that web (a port of this machine) says. Through it the browser says
+// only that a page came through a proxy, so the kit's own lookup says where
+// the page is. hosts lists the hosts it was asked for. A host in drop gets
+// its connection closed with no answer, as one that cannot be opened.
+async function proxyOf(t, web = 80, drop = []) {
   const hosts = [];
   const proxy = await serve((req, res) => {
     const url = new URL(req.url);
     hosts.push(url.host);
-    const upstream = http.request({ host: "127.0.0.1", port: url.port || 80, path: url.pathname + url.search, method: req.method, headers: req.headers }, (answer) => {
+    if (drop.includes(url.hostname)) return req.socket.destroy();
+    const upstream = http.request({ host: "127.0.0.1", port: url.port || web, path: url.pathname + url.search, method: req.method, headers: req.headers }, (answer) => {
       res.writeHead(answer.statusCode, answer.headers);
       answer.pipe(res);
     });
@@ -2190,18 +2194,16 @@ async function proxyOf(t) {
 }
 
 test("a store listing whose website fails keeps what the listing gave and says so", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
-  const closed = await serve(() => {});
-  closed.server.close();
   // The website the listing names, and a listing from a store that is not
   // asked: what easybrandkit fetches from it itself is answered here.
   let answers = (req, res) => res.writeHead(403, { "content-type": "text/html" }).end("<!doctype html><title>Forbidden</title><h1>Forbidden</h1>");
   const site = await serve((req, res) => answers(req, res));
-  // The website by a name of its own, which the lookup below puts on a
-  // public address, as a listing's website is, reached through a proxy:
-  // one on this machine or a private network is not opened. closed.test is
-  // found on this machine by the browser itself, where nothing listens.
-  const named = site.origin.replace("127.0.0.1", "site.test");
-  const closedNamed = closed.origin.replace("127.0.0.1", "closed.test");
+  // The website by a name of its own on port 80, which the lookup below
+  // puts on a public address, as a listing's website is, reached through a
+  // proxy: one on another port, on this machine or on a private network is
+  // not opened. The proxy closes closed.test's connection unanswered.
+  const named = "http://site.test";
+  const closedNamed = "http://closed.test";
   const png = Buffer.alloc(33);
   png.writeUInt32BE(0x89504e47, 0);
   png.writeUInt32BE(1024, 16);
@@ -2226,8 +2228,8 @@ test("a store listing whose website fails keeps what the listing gave and says s
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  const proxy = await proxyOf(t);
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=closed.test"]);
+  const proxy = await proxyOf(t, new URL(site.origin).port, ["closed.test"]);
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
   const fromListing = ["BRAND.md", "_brand.yml", "appstore-icon.png", "appstore-shot-01.png", "brand.json"];
@@ -2235,11 +2237,12 @@ test("a store listing whose website fails keeps what the listing gave and says s
   const blank = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`${brandPage("rgb(255,0,0)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`);
   const cases = [
     ["a 403", answers, `${named}/app`, "answered 403"],
-    ["a closed port", answers, `${closedNamed}/`, "could not be opened (net::ERR_CONNECTION_REFUSED)"],
+    ["a site that cannot be opened", answers, `${closedNamed}/`, "could not be opened (net::ERR_EMPTY_RESPONSE)"],
     ["a bot check", bot, `${named}/`, `answered with a bot check ("Human Verification")`],
     ["a blank page", blank, `${named}/`, "moved on to a blank page"],
-    ["an address on this machine", bot, `${site.origin}/`, "is on a local or private network, which easybrandkit does not open on its own"],
-    ["a name on a private network", bot, `http://intranet.test:${new URL(site.origin).port}/`, "is on a local or private network, which easybrandkit does not open on its own"],
+    ["another port", bot, `${site.origin.replace("127.0.0.1", "site.test")}/`, `is on port ${new URL(site.origin).port}, not 80 or 443`],
+    ["an address on this machine", bot, "http://127.0.0.1/", "is not on the public internet"],
+    ["a name on a private network", bot, "http://intranet.test/", "is at 10.0.0.5, an address not on the public internet"],
   ];
   for (const [what, handler, website, told] of cases) {
     answers = handler;
@@ -2342,76 +2345,26 @@ test("a store listing whose website fails keeps what the listing gave and says s
   assert.equal(fs.existsSync(gone), false);
 });
 
-test("an address on this machine or a private network is told by its form, or by what its name is found at, and a page on the host given is always opened", async (t) => {
-  const { localByForm, localAddress, onLocalNetwork, mayOpen } = require("../skills/easybrandkit/scripts/lib/address");
-  for (const raw of ["http://127.0.0.1:9222/json/list", "http://127.1/", "http://2130706433/", "http://0.0.0.0/", "http://localhost/", "http://app.localhost:3000/", "http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://10.1.2.3/", "http://172.20.0.1/", "http://192.168.1.1/", "http://169.254.169.254/latest/meta-data/", "http://[fe80::1]/", "http://[fd00::1]/", "http://100.100.1.1/", "http://[64:ff9b::7f00:1]/"]) {
-    assert.equal(localByForm(new URL(raw)), true, raw);
-  }
-  for (const raw of ["https://acme.com/", "http://93.184.216.34/", "http://[2606:4700::1111]/", "https://localhost.acme.com/", "http://198.18.0.10/", "http://[64:ff9b::5db8:d822]/"]) assert.equal(localByForm(new URL(raw)), false, raw);
-  // On this machine or a private network are the ranges that are there, not
-  // every address that is not public: a proxy in fake-ip mode gives every
-  // name an address in 198.18.0.0/15, and a network with IPv6 only gives a
-  // name with IPv4 only a NAT64 address, judged by the IPv4 address in it.
-  for (const address of ["0.0.0.0", "10.0.0.5", "100.64.0.1", "127.0.0.1", "127.1.2.3", "169.254.169.254", "172.31.255.255", "192.168.1.1", "::", "::1", "fc00::5", "fd12::1", "fe80::1", "fec0::1", "::ffff:127.0.0.1", "::ffff:a00:5", "64:ff9b::7f00:1", "64:ff9b::10.0.0.5", "[::1]"]) {
-    assert.equal(localAddress(address), true, address);
-  }
-  for (const address of ["198.18.0.10", "198.19.255.254", "93.184.216.34", "100.128.0.1", "172.32.0.1", "192.0.2.1", "224.0.0.1", "64:ff9b::5db8:d822", "64:ff9b::8c52:7903", "::ffff:93.184.216.34", "2606:4700::1111", "2001:db8::1", "ff02::1", "", "intranet"]) {
-    assert.equal(localAddress(address), false, address);
-  }
-  t.mock.method(dns.promises, "lookup", async (host) => {
-    if (host === "intranet.acme.com") return [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.5", family: 4 }];
-    if (host === "gone.acme.com") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.acme.com"), { code: "ENOTFOUND" });
-    if (/brightmoss/.test(host)) return [{ address: host.startsWith("www.") ? "198.18.0.11" : "198.18.0.10", family: 4 }];
-    if (/github/.test(host)) return [{ address: "64:ff9b::8c52:7903", family: 6 }, { address: "140.82.121.3", family: 4 }];
-    if (/nat64-inside/.test(host)) return [{ address: "64:ff9b::a00:5", family: 6 }];
-    return [{ address: "93.184.216.34", family: 4 }];
+// A server that counts each connection to it, and each request, as an
+// address the run must not reach would.
+async function counting(t) {
+  const site = { connections: 0, asked: [] };
+  const served = await serve((req, res) => {
+    site.asked.push(req.url);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(0,128,0)"));
   });
-  // A name any of whose addresses is local is too; one that is not found is
-  // a page the browser cannot open, not a local one.
-  assert.equal(await onLocalNetwork(new URL("https://intranet.acme.com/")), true);
-  assert.equal(await onLocalNetwork(new URL("https://www.acme.com/")), false);
-  assert.equal(await onLocalNetwork(new URL("https://gone.acme.com/")), false);
-  assert.equal(await onLocalNetwork(new URL("https://nat64-inside.acme.com/")), true);
-  // The host given, with its port, is opened; another on this machine or a
-  // private network is not, whoever names it.
-  assert.equal(await mayOpen("http://127.0.0.1:8737/", "http://127.0.0.1:8737/features.html"), true);
-  assert.equal(await mayOpen("http://127.0.0.1:9222/json/list", "http://127.0.0.1:8737/"), false);
-  assert.equal(await mayOpen("http://127.0.0.1:8737/", "https://apps.apple.com/us/app/acme/id1234567890"), false);
-  assert.equal(await mayOpen("https://intranet.acme.com/", "https://acme.com/"), false);
-  assert.equal(await mayOpen("https://www.acme.com/", "https://acme.com/"), true);
-  assert.equal(await mayOpen("about:blank", "https://acme.com/"), true);
-  // A bare name sent on to www through a fake-ip proxy, or on a network with
-  // IPv6 only, is a public site.
-  assert.equal(await mayOpen("http://www.brightmoss.test/", "http://brightmoss.test/"), true);
-  assert.equal(await mayOpen("https://www.github.com/", "https://github.com/"), true);
-  // This machine by any of its names is one host on one port: a local site
-  // can send its visitors from 127.0.0.1 to localhost. Another port, or the
-  // other scheme's own port, is another program.
-  for (const [to, from] of [["http://localhost:8080/", "http://127.0.0.1:8080/"], ["http://[::1]:8080/", "http://localhost:8080/"], ["http://app.localhost:3000/", "http://127.0.0.1:3000/x"], ["http://localhost/", "http://127.0.0.1:80/"], ["https://localhost/", "https://[::1]:443/"]]) {
-    assert.equal(await mayOpen(to, from), true, `${from} to ${to}`);
-  }
-  for (const [to, from] of [["http://localhost:8081/", "http://127.0.0.1:8080/"], ["https://127.0.0.1/", "http://127.0.0.1/"], ["http://10.0.0.5:8080/", "http://localhost:8080/"], ["http://localhost:8080/", "http://10.0.0.5:8080/"]]) {
-    assert.equal(await mayOpen(to, from), false, `${from} to ${to}`);
-  }
-  // Where the browser says it got a page counts, also for a name the kit's
-  // own lookup does not find there: one that it reached itself at a local
-  // address is local. Through a proxy it says Unknown and gives the proxy's
-  // address, so the lookup decides.
-  assert.equal(await mayOpen("http://www.acme.com/", "http://acme.com/", { space: "Loopback", ip: "127.0.0.1" }), false);
-  assert.equal(await mayOpen("http://gone.acme.com/", "http://acme.com/", { space: "Local", ip: "10.0.0.5" }), false);
-  assert.equal(await mayOpen("http://www.acme.com/", "http://acme.com/", { space: "Unknown", ip: "127.0.0.1" }), true);
-  assert.equal(await mayOpen("http://intranet.acme.com/", "http://acme.com/", { space: "Unknown", ip: "93.184.216.34" }), false);
-  assert.equal(await mayOpen("http://www.acme.com/", "http://acme.com/", { space: "Public", ip: "93.184.216.34" }), true);
-  assert.equal(await mayOpen("http://www.brightmoss.test/", "http://brightmoss.test/", { space: "Local", ip: "198.18.0.11" }), true);
-  assert.equal(await mayOpen("http://www.github.com/", "http://github.com/", { space: "Public", ip: "[64:ff9b::8c52:7903]" }), true);
-});
+  served.server.on("connection", () => site.connections++);
+  t.after(() => served.server.close());
+  return Object.assign(site, { origin: served.origin, port: new URL(served.origin).port });
+}
 
-test("a page a site leads to on this machine or a private network is not read, unless the address given is on that host", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+test("an address a site leads to is opened only on port 80 or 443 and on the public internet, judged at each hop before the browser asks for it, and the pages on the host and port given are read", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   // The brand's site by a name of its own, which the browser finds on this
   // machine and the lookup below puts on a public address. What it leads to
-  // on this machine's own address is another program's page.
+  // on another port is another program, which counts what reaches it.
   let lead = "redirect";
   let port = "";
+  const other = await counting(t);
   const when = held();
   const site = await serve((req, res) => {
     const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
@@ -2420,22 +2373,26 @@ test("a page a site leads to on this machine or a private network is not read, u
     // A local site whose own address is localhost sends a visitor that
     // comes by 127.0.0.1 there.
     if (lead === "its own address" && host === `127.0.0.1:${port}`) return res.writeHead(301, { location: `http://localhost:${port}/` }).end();
-    if (!host.startsWith("brand.test")) {
-      if (req.url === "/missing") return res.writeHead(404, { "content-type": "text/html" }).end("<!doctype html><title>Not found</title><h1>Not found</h1>");
-      return html(brandPage("rgb(0,0,255)"));
-    }
+    if (!host.startsWith("brand.test")) return html(brandPage("rgb(0,0,255)"));
     if (req.url === "/project/") return html(brandPage("rgb(255,0,0)"));
+    if (req.url === "/hop") return res.writeHead(302, { location: `http://far.test:${other.port}/inside` }).end();
     if (req.url !== "/") return res.writeHead(404).end();
-    if (lead === "redirect") return res.writeHead(302, { location: `http://127.0.0.1:${port}/inside` }).end();
-    if (lead === "a private name") return res.writeHead(302, { location: `http://intranet.test:${port}/inside` }).end();
-    if (lead === "a missing page") return res.writeHead(302, { location: `http://127.0.0.1:${port}/missing` }).end();
-    // A name the kit's own lookup finds on the web, which the browser finds
-    // on this machine, as a site that rebinds its name does.
-    if (lead === "a name found elsewhere") return res.writeHead(302, { location: `http://rebind.test:${port}/inside` }).end();
-    // A page that moves on once the kit has cut its logos, so that only the
-    // look after the first screen sees where it went.
-    if (lead === "a script after the logos") return html(brandPage("rgb(255,0,0)").replace("</body>", `<script>fetch("/when").then(() => location.replace("http://127.0.0.1:${port}/inside"))</script></body>`));
-    html(brandPage("rgb(255,0,0)").replace("</body>", `<script>setTimeout(() => location.replace("http://127.0.0.1:${port}/inside"), 300)</script></body>`));
+    const to = {
+      redirect: `http://127.0.0.1:${other.port}/inside`,
+      "a public host on another port": `http://far.test:${other.port}/inside`,
+      "the second hop": "/hop",
+      "this machine's own port of the address given, by another name": `http://127.0.0.1:${port}/inside`,
+      "a name on a private network": "http://intranet.test/inside",
+      "this machine on port 80": "http://127.0.0.1/inside",
+      "a Teredo address": "http://[2001:0:7f00:1::1]/inside",
+      "IPv4 compatible": "http://[::7f00:1]/inside",
+    }[lead];
+    if (to) return res.writeHead(302, { location: to }).end();
+    // The page's own move, as it loads, or once the kit has cut its logos,
+    // so that only the look after the first screen sees it.
+    if (lead === "a script") return html(brandPage("rgb(255,0,0)").replace("</body>", `<script>location.replace("http://far.test:${other.port}/inside")</script></body>`));
+    if (lead === "a script after the logos") return html(brandPage("rgb(255,0,0)").replace("</body>", `<script>fetch("/when").then(() => location.replace("http://127.0.0.1:${other.port}/inside"))</script></body>`));
+    html(brandPage("rgb(255,0,0)"));
   });
   port = new URL(site.origin).port;
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
@@ -2449,13 +2406,22 @@ test("a page a site leads to on this machine or a private network is not read, u
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
   const given = `http://brand.test:${port}/`;
-  // The address given leads there by a redirect, by a script once it has
-  // loaded, or to a name found on a private network: no kit is made from
-  // what it shows, and the earlier kit stays. A page there is not looked at
-  // at all, also when it answers with an error.
-  for (const [how, to] of [["redirect", `http://127.0.0.1:${port}/inside`], ["a script", `http://127.0.0.1:${port}/inside`], ["a private name", `http://intranet.test:${port}/inside`], ["a missing page", `http://127.0.0.1:${port}/missing`], ["a name found elsewhere", `http://rebind.test:${port}/inside`]]) {
+  // Each is refused where the browser was about to ask for it: no kit is
+  // made, the earlier kit stays, and the other program gets nothing, not
+  // even a connection.
+  for (const [how, to, why] of [
+    ["redirect", `http://127.0.0.1:${other.port}/inside`, `is on port ${other.port}, not 80 or 443`],
+    ["a public host on another port", `http://far.test:${other.port}/inside`, `is on port ${other.port}, not 80 or 443`],
+    ["the second hop", `http://far.test:${other.port}/inside`, `is on port ${other.port}, not 80 or 443`],
+    ["this machine's own port of the address given, by another name", `http://127.0.0.1:${port}/inside`, `is on port ${port}, not 80 or 443`],
+    ["a name on a private network", "http://intranet.test/inside", "is at 10.0.0.5, an address not on the public internet"],
+    ["this machine on port 80", "http://127.0.0.1/inside", "is not on the public internet"],
+    ["a Teredo address", "http://[2001:0:7f00:1::1]/inside", "is not on the public internet"],
+    ["IPv4 compatible", "http://[::7f00:1]/inside", "is not on the public internet"],
+    ["a script", `http://far.test:${other.port}/inside`, `is on port ${other.port}, not 80 or 443`],
+  ]) {
     lead = how;
-    await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} led to ${to}, which is on a local or private network, so no kit was made.` && err.earlierKit === dir, how);
+    await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} led to ${to}, which ${why}, so no kit was made.` && err.earlierKit === dir, how);
     assert.deepEqual(filesOf(dir), before, how);
   }
   // A page that moves there as the first screen is taken is told then, and
@@ -2466,9 +2432,10 @@ test("a page a site leads to on this machine or a private network is not read, u
     steps.push(line);
     if (line === "Taking the first screen") when.release();
   };
-  await assert.rejects(makeKit(given, { dir, stores: false, log }), (err) => err.message === `${given} led to http://127.0.0.1:${port}/inside, which is on a local or private network, so no kit was made.` && err.earlierKit === dir);
+  await assert.rejects(makeKit(given, { dir, stores: false, log }), (err) => err.message === `${given} led to http://127.0.0.1:${other.port}/inside, which is on port ${other.port}, not 80 or 443, so no kit was made.` && err.earlierKit === dir);
   assert.equal(steps[steps.length - 1], "Taking the first screen");
   assert.deepEqual(filesOf(dir), before, "a script after the logos");
+  assert.equal(other.connections, 0, "nothing reached the other program");
   // A local site that sends its visitors from 127.0.0.1 to its own address,
   // localhost on the same port, is read there.
   lead = "its own address";
@@ -2480,10 +2447,131 @@ test("a page a site leads to on this machine or a private network is not read, u
   const asked = `${given}project/`;
   const { kit } = await makeKit(asked, { dir: path.join(parent, "deeper"), stores: false });
   assert.equal(kit.url, asked);
-  assert.deepEqual(kit.notes, [`The home page, ${given}, could not be read: it led to http://127.0.0.1:${port}/inside, which is on a local or private network. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
-  // Given that page's own address, it is read, as a site of the user's.
-  const own = await makeKit(`http://127.0.0.1:${port}/inside`, { dir: path.join(parent, "own"), stores: false });
+  assert.deepEqual(kit.notes, [`The home page, ${given}, could not be read: it led to http://127.0.0.1:${other.port}/inside, which is on port ${other.port}, not 80 or 443. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+  // Given that program's own address, it is read, as a site of the user's.
+  const own = await makeKit(`${other.origin}/inside`, { dir: path.join(parent, "own"), stores: false });
   assert.deepEqual(own.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(other.connections > 0);
+});
+
+test("a frame of a page at an address the run was not given is held to the same rule: not opened, with no connection made ahead of it, and the page read with a note", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  const other = await counting(t);
+  const site = await serve((req, res) => {
+    const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
+    if (req.url === "/fine") return html("<!doctype html><title>Fine</title><p>fine</p>");
+    if (req.url === "/moving") return html(`<!doctype html><title>Moving</title><script>setTimeout(() => location.replace("http://far.test:${other.port}/moved"), 300)</script>`);
+    html(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="http://far.test:${other.port}/frame" width="200" height="100"></iframe><iframe src="http://127.0.0.1:${other.port}/frame" width="200" height="100"></iframe><iframe src="/fine" width="200" height="100"></iframe><iframe src="/moving" width="200" height="100"></iframe></body>`));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const given = `http://brand.test:${new URL(site.origin).port}/`;
+  const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
+  assert.equal(kit.url, given);
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  const port = other.port;
+  for (const note of [`${given} tried to open http://far.test:${port}/frame, which is on port ${port}, not 80 or 443: it was not opened.`, `${given} tried to open http://127.0.0.1:${port}/frame, which is on port ${port}, not 80 or 443: it was not opened.`, `${given} tried to open http://far.test:${port}/moved, which is on port ${port}, not 80 or 443: it was not opened.`]) {
+    assert.ok(kit.notes.includes(note), `${note}\n${kit.notes.join("\n")}`);
+  }
+  assert.equal(other.connections, 0, "no connection was made to the program the page named");
+  assert.deepEqual(other.asked, []);
+});
+
+test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the browser starts, and for an address a site leads to, in words that name it", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let lead = "";
+  const site = await serve((req, res) => {
+    if (lead && req.url === "/") return res.writeHead(302, { location: lead }).end();
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const reached = [];
+  site.server.on("connection", () => reached.push(Date.now()));
+  const port = new URL(site.origin).port;
+  const proxy = await proxyOf(t, port);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = ownTemp(t);
+  const tmpdir = process.env.TMPDIR;
+  if (temp) process.env.TMPDIR = temp;
+  t.after(() => {
+    if (tmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = tmpdir;
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "127.0.0.0/8, 185.137.215.163" });
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("vm.") ? "185.137.215.163" : "93.184.216.34", family: 4 }]);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // The address given, on this machine: refused before anything is opened
+  // or started, the user's own site on this machine included.
+  await assert.rejects(makeKit(`${site.origin}/`, { dir, stores: false }), (err) => err.message === `${site.origin}/ is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.`);
+  await assert.rejects(makeKit(`http://localhost:${port}/`, { dir, stores: false }), (err) => err.message === `http://localhost:${port}/ is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.`);
+  await assert.rejects(makeKit("https://vm.test/", { dir, stores: false }), (err) => err.message === "https://vm.test/ is at 185.137.215.163, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.");
+  assert.equal(reached.length, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
+  if (temp) assert.deepEqual(fs.readdirSync(temp), [], "no browser was started");
+  // A site on the web, through a proxy: one it leads to at a refused
+  // address is refused at that hop, and never reaches the proxy.
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  lead = "http://vm.test/inside";
+  await assert.rejects(makeKit("http://brand.test/", { dir, stores: false }), (err) => err.message === "http://brand.test/ led to http://vm.test/inside, which is at 185.137.215.163, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made." && err.earlierKit === dir);
+  assert.ok(!proxy.hosts.includes("vm.test"), proxy.hosts.join(" "));
+  assert.deepEqual(filesOf(dir), before);
+  lead = "";
+  const { kit } = await makeKit("http://brand.test/", { dir: path.join(parent, "web"), stores: false });
+  assert.equal(kit.url, "http://brand.test/");
+});
+
+test("MAKERSMCP_REFUSE_ADDRESSES counts where the browser says it reached the address given, as a name found elsewhere by its own lookup", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // The kit's own lookup finds the name on the web; the browser's on this
+  // machine, which the setting refuses.
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "127.0.0.0/8" });
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const given = `http://brand.test:${new URL(site.origin).port}/`;
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+});
+
+test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any work, in words that name it; empty, it changes nothing", async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const said = 'MAKERSMCP_REFUSE_ADDRESSES holds "10.0.0.0/33", which is neither an IP address nor a range such as 10.0.0.0/8, so nothing was read. Give IP addresses and ranges parted by commas, or leave it empty.';
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "185.137.215.163, 10.0.0.0/33", CHROME_PATH: path.join(parent, "no-chrome") });
+  await assert.rejects(makeKit("https://acme.com/", { dir, stores: false }), (err) => err.message === said);
+  assert.deepEqual(filesOf(dir), before);
+  const env = { ...process.env };
+  // The command line refuses it as it refuses an option, with exit code 2.
+  const cli = await runCli(["https://acme.com/", "--out", dir], env);
+  assert.equal(cli.code, 2);
+  assert.equal(cli.stderr, `easybrandkit: ${said}\n`);
+  const json = await runCli(["https://acme.com/", "--out", dir, "--json"], env);
+  assert.equal(json.code, 2);
+  assert.deepEqual(JSON.parse(json.stdout), { ok: false, error: said });
+  // --help and --version need no setting.
+  assert.equal((await runCli(["--version"], env)).code, 0);
+  assert.deepEqual(filesOf(dir), before);
+  // Empty, the run goes on to the browser, which here is not there.
+  for (const value of ["", " , "]) {
+    process.env.MAKERSMCP_REFUSE_ADDRESSES = value;
+    await assert.rejects(makeKit("https://acme.com/", { dir, stores: false }), /^Error: No Chrome, Chromium, Edge or Brave found|CHROME_PATH/, JSON.stringify(value));
+  }
 });
 
 // kit.js loaded afresh, for what the test has mocked of the modules it takes
@@ -2630,8 +2718,9 @@ test("with --facts, the page the kit read is read for its claims only while it i
   const { kit, facts: left } = await makeKit(site.origin, { dir: moved, stores: false, facts: true, log: (line) => line === "Drawing the card" && when.release() });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.deepEqual(left.pages, []);
-  assert.deepEqual(left.skipped, [{ role: "home", url, reason: `it led to ${away}` }]);
-  assert.ok(fs.readFileSync(path.join(moved, "FACTS.md"), "utf8").includes(`Not read: the home page, <${url}>: it led to ${away}.`));
+  const why = `it led to ${away}, which is on port ${new URL(away).port}, not 80 or 443`;
+  assert.deepEqual(left.skipped, [{ role: "home", url, reason: why }]);
+  assert.ok(fs.readFileSync(path.join(moved, "FACTS.md"), "utf8").includes(`Not read: the home page, <${url}>: ${why}.`));
   // Nothing of the other program's page is in either kit.
   for (const dir of [hidden, moved]) {
     for (const entry of filesOf(dir).filter((one) => !one.endsWith("/"))) {
@@ -2685,7 +2774,7 @@ test("through a proxy, which the browser does not tell past, the kit's own looku
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
   const port = new URL(site.origin).port;
-  const proxy = await proxyOf(t);
+  const proxy = await proxyOf(t, port);
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
@@ -2696,15 +2785,16 @@ test("through a proxy, which the browser does not tell past, the kit's own looku
   const given = `http://brand.test:${port}/`;
   // Every page comes from the proxy's address, on this machine. A page on a
   // name found on the web is read through it,
-  lead = `http://www.brand.test:${port}/`;
+  lead = "http://www.brand.test/";
   const { kit } = await makeKit(given, { dir: path.join(parent, "www"), stores: false });
   assert.equal(kit.url, lead);
-  assert.ok(proxy.hosts.includes(`www.brand.test:${port}`), proxy.hosts.join(" "));
+  assert.ok(proxy.hosts.includes("www.brand.test"), proxy.hosts.join(" "));
   // and one on a name found on a private network, or at such an address, is
-  // not.
-  for (const to of [`http://intranet.test:${port}/inside`, `http://127.0.0.1:${port}/inside`]) {
+  // not, nor asked of the proxy.
+  for (const [to, why] of [["http://intranet.test/inside", "is at 10.0.0.5, an address not on the public internet"], ["http://127.0.0.1/inside", "is not on the public internet"]]) {
     lead = to;
-    await assert.rejects(makeKit(given, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `${given} led to ${to}, which is on a local or private network, so no kit was made.`, to);
+    await assert.rejects(makeKit(given, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `${given} led to ${to}, which ${why}, so no kit was made.`, to);
+    assert.ok(!proxy.hosts.includes(new URL(to).host), proxy.hosts.join(" "));
   }
 });
 
@@ -2819,8 +2909,9 @@ test("the refusal of downloads is said once, to the whole browser, before any ta
   const { kit } = await makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   const calls = fs.readFileSync(log, "utf8").trim().split("\n");
-  // Then the page's tab and the card's.
-  assert.deepEqual(calls.slice(0, 3), ["Browser.getVersion", "Browser.setDownloadBehavior", "Target.createTarget"]);
+  // Then the rule for the documents of the whole browser, and the page's
+  // tab and the card's.
+  assert.deepEqual(calls.slice(0, 4), ["Browser.getVersion", "Browser.setDownloadBehavior", "Fetch.enable", "Target.createTarget"]);
   assert.equal(calls.filter((call) => call.startsWith("Browser.setDownloadBehavior")).length, 1);
   assert.equal(calls.filter((call) => call === "Target.createTarget").length, 2);
   assert.equal(calls[calls.length - 1], "Browser.close");
@@ -2881,6 +2972,57 @@ test("a browser that does not take the refusal of downloads reads the site, and 
   assert.ok(inProfile.length >= 1, "the page's files went into the profile");
   assert.deepEqual(site.downloads(), []);
   assert.deepEqual(fs.readdirSync(temp), [], "and went with it");
+});
+
+test("a browser started with no rule for the addresses its pages open opens no web page", { skip: noBrowser }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const chrome = await launch({ width: 800, height: 600 });
+  t.after(async () => {
+    await chrome.close();
+    site.server.close();
+  });
+  const cdp = await openPage(chrome, { width: 800, height: 600 });
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  await assert.rejects(navigate(cdp, `${site.origin}/`), (err) => err.message === `${site.origin}/ is not opened by a browser the kit gave no rule for the addresses it opens, so no kit was made.`);
+  assert.equal(asked, 0);
+});
+
+test("a browser that does not take the rule for the pages it opens, in time or at all, ends the run before the site is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const temp = ownTemp(t);
+  const tmpdir = process.env.TMPDIR;
+  if (temp) process.env.TMPDIR = temp;
+  t.after(() => {
+    if (tmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = tmpdir;
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // Held back, as by a browser too busy to answer it: waited for as long as
+  // the run has left.
+  useRelay(t, parent, { "Fetch.enable": "drop" });
+  const started = Date.now();
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, timeLimit: 35_000 }), (err) => err.message === "The browser did not answer the kit's request to judge the pages it opens before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout." && err.earlierKit === dir);
+  assert.ok(Date.now() - started >= 34_000 && Date.now() - started < 35_000 + 4_000, `ended ${Date.now() - started - 35_000} ms past the run's limit`);
+  // Sent under a name the browser does not know, which it answers that it
+  // does not take.
+  process.env.STAND_IN_RELAY = JSON.stringify({ "Fetch.enable": "rename" });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser refused the kit's request to judge the pages it opens, so no kit was made. Try again." && err.earlierKit === dir);
+  assert.equal(asked, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
+  if (temp) assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
 test("what a page says reaches no terminal with its control characters, and a note stays on one line", { skip: noBrowser }, async (t) => {
@@ -3208,7 +3350,7 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
 });
 
-test("a browser the kit starts listens on no port: the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
+test("a browser the kit starts listens on no port, has HTTP/3 off, and the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
   const temp = ownTemp(t);
   if (!temp) return t.skip("the temp folder is too deep for a browser");
   const tmpdir = process.env.TMPDIR;
@@ -3255,6 +3397,19 @@ test("a browser the kit starts listens on no port: the kit drives it through a p
       }
     }
     assert.deepEqual(listens, [], "no process of the browser's listens on a port");
+    // HTTP/3 is off, so a site's Alt-Svc answer cannot send the browser's
+    // next requests to another port or host over UDP.
+    // Chrome writes its arguments as one line, apart by spaces, and its
+    // helpers name their type.
+    const has = (line, arg) => new RegExp(`(^|[\\0 ])${arg}([\\0 =]|$)`).test(line);
+    const started = pids.map((pid) => {
+      try {
+        return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      } catch {
+        return "";
+      }
+    }).find((line) => has(line, "--remote-debugging-pipe") && !has(line, "--type"));
+    assert.ok(started && has(started, "--disable-quic"), String(started));
     // It answers all the same.
     assert.equal(await browser.alive(), true);
     const cdp = await openPage(browser, { width: 800, height: 600 });
@@ -3771,14 +3926,13 @@ test("a site cannot make the browser start a program of this machine with an add
   const mail = "mailto:hello@acme.example?subject=Hi";
   let way = "";
   const page = brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="/pricing">Pricing</a>`);
-  // Another site, whose frame's address redirects to one.
-  const far = await serve((req, res) => res.writeHead(302, { location: "mailto:far@acme.example" }).end());
-  const farFrame = far.origin.replace("127.0.0.1", "localhost");
+  let farFrame = "";
   const site = await serve((req, res) => {
     const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
     if (req.url === "/robots.txt") return res.writeHead(404).end();
     if (req.url === "/pricing") return way === "a menu page's redirect" ? res.writeHead(302, { location: "mailto:sales@acme.example" }).end() : html(brandPage("rgb(255,0,0)"));
     if (req.url === "/to-mail") return res.writeHead(302, { location: "mailto:redirect@acme.example" }).end();
+    if (req.url === "/far-mail") return res.writeHead(302, { location: "mailto:far@acme.example" }).end();
     if (req.url !== "/") return res.writeHead(404).end();
     if (way === "a redirect") return res.writeHead(302, { location: mail }).end();
     const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
@@ -3789,16 +3943,16 @@ test("a site cannot make the browser start a program of this machine with an add
       "a window": `<script>window.open(${JSON.stringify(mail)});</script>`,
       "a later move": `<script>setTimeout(() => location.assign("news:comp.lang.misc"), 500);</script>`,
       "a frame's redirect": frame("/to-mail"),
-      "the redirect of another site's frame": frame(`${farFrame}/to-mail`),
+      "the redirect of another site's frame": frame(`${farFrame}/far-mail`),
       "a frame the page sends there": `<iframe id="sent" style="width:1px;height:1px;border:0"></iframe><script>document.getElementById("sent").contentWindow.location = "mailto:sent@acme.example";</script>`,
       "four frames": [1, 2, 3, 4].map((n) => frame(`mailto:${n}@acme.example`)).join(""),
     };
     html(page.replace("</body>", `${ways[way] || ""}</body>`));
   });
-  t.after(() => {
-    site.server.close();
-    far.server.close();
-  });
+  t.after(() => site.server.close());
+  // Another site, by this machine's other name on the same port, whose
+  // frame's address redirects to one: a frame of another site runs apart.
+  farFrame = site.origin.replace("127.0.0.1", "localhost");
   const not = (url) => `${site.origin}/ tried to open ${url}, which is not a web address: it was not opened.`;
   // A page's own move, by its script, a refresh or a later script, is
   // cancelled before the browser acts on it, and a window it asks for is not
@@ -3861,7 +4015,7 @@ test("a page's own move to an address that is not a web address is cancelled in 
     "/framed": `<iframe src="/inner"></iframe>`,
   };
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Acme</title><h1>Acme</h1>${ways[req.url] || ""}`));
-  const chrome = await launch({ width: 800, height: 600 });
+  const chrome = await launch({ width: 800, height: 600 }, { judge: guardFor(`${site.origin}/`).judge });
   t.after(async () => {
     await chrome.close();
     site.server.close();
@@ -4094,12 +4248,11 @@ test("a browser installed as a snap or a Flatpak is not said to have opened noth
   assert.deepEqual(startedSoFar(), []);
 });
 
-test("a page the kit chose that only the browser finds on this machine is opened but not read, and told as there itself", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+test("a page the kit chose on another port than 80 or 443 is not opened, a menu page and the home page of a deeper address alike, and the program there is not asked", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   // Every name under .test is on the web for the kit's own lookup. The
   // browser reaches www.brand.test and blog.brand.test through a proxy,
-  // which says nothing of where they are, and brand.test itself, at this
-  // machine's address: the kit opens a page there, and only the browser's
-  // answer says where it is.
+  // which says nothing of where they are, and brand.test itself at this
+  // machine's address.
   const asked = [];
   const other = await serve((req, res) => {
     asked.push(`${req.headers.host} ${req.url}`);
@@ -4107,7 +4260,7 @@ test("a page the kit chose that only the browser finds on this machine is opened
   });
   const otherPort = new URL(other.origin).port;
   const site = await serve((req, res) => {
-    if (req.url === "/robots.txt") return res.writeHead(404).end();
+    asked.push(`${req.headers.host} ${req.url}`);
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="http://brand.test:${otherPort}/pricing">Pricing</a>`));
   });
   const port = new URL(site.origin).port;
@@ -4120,19 +4273,27 @@ test("a page the kit chose that only the browser finds on this machine is opened
   const proxy = await proxyOf(t);
   useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=brand.test"]);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
-  // The kit's own robots.txt request, which goes by its own lookup: none.
-  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
-  // With --facts, a menu page on another port of such a name: its program is
-  // asked for it, and nothing of it is read.
+  // The kit's own robots.txt request: none, as the site has none.
+  t.mock.method(http, "get", (url, options, done) => {
+    const res = require("node:stream").Readable.from([]);
+    Object.assign(res, { statusCode: 404, headers: {} });
+    process.nextTick(done, res);
+    return new EventEmitter();
+  });
+  // With --facts, a menu page on another port of the site's own name: its
+  // program is not asked for it.
   const { facts } = await makeKit(`http://www.brand.test:${port}/`, { dir: path.join(parent, "menu"), stores: false, facts: true });
-  assert.deepEqual(facts.skipped.map(({ role, url, reason }) => [role, url, reason]), [["pricing", `http://brand.test:${otherPort}/pricing`, "it is on a local or private network"]]);
-  assert.ok(asked.includes(`brand.test:${otherPort} /pricing`), asked.join(", "));
+  assert.deepEqual(facts.skipped.map(({ role, url, reason }) => [role, url, reason]), [["pricing", `http://brand.test:${otherPort}/pricing`, `it is on port ${otherPort}, not 80 or 443`]]);
+  assert.ok(!asked.some((one) => one.endsWith(" /pricing")), asked.join(", "));
   assert.doesNotMatch(fs.readFileSync(path.join(parent, "menu", "FACTS.md"), "utf8"), /12 engineers|Admin console/);
-  // A blog's address, whose home page is on the site's bare name: that home
-  // page is there itself, and the blog's page is read as given.
+  // A blog's address, whose home page is on the site's bare name on the
+  // blog's port: that home page is not opened, and the blog's page is read
+  // as given.
+  asked.length = 0;
   const blog = `http://blog.brand.test:${port}/post`;
   const { kit } = await makeKit(blog, { dir: path.join(parent, "blog"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, http://brand.test:${port}/, could not be read: it is on a local or private network. ${blog} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.deepEqual(kit.notes, [`The home page, http://brand.test:${port}/, could not be read: it is on port ${port}, not 80 or 443. ${blog} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.ok(!asked.some((one) => one.startsWith(`brand.test:${port} `)), asked.join(", "));
 });
 
 test("what the guard cancelled is asked of each frame for a few seconds at most, and not past a frame that does not answer", async () => {

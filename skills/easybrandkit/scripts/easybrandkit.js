@@ -6,6 +6,7 @@ const os = require("os");
 const { makeKit } = require("./lib/kit");
 const { discardRuns, savedRuns } = require("./lib/run");
 const { killBrowsers } = require("./lib/chrome");
+const { refusedAddresses } = require("./lib/address");
 const { noControls } = require("./lib/text");
 const version = require("./lib/version");
 
@@ -40,11 +41,16 @@ has and says so in the kit's notes. It fails instead when it has used up its
 --timeout on that page, or when none of a listing's pictures could be
 downloaded either.
 
-A page on this machine or a private network is read only when the address
-given is on that host and port, localhost and 127.0.0.1 counting as one
-host. One a site leads to there is not read. One the kit would choose there
-is not opened when the kit's own lookup finds it there; when only the
-browser finds it there, it is opened, and not read.
+The address given is opened whatever its host and port, and so are the
+pages on its scheme, host and port, localhost and 127.0.0.1 counting as one
+host. Any other address the kit opens, as a page it chose, each hop of a
+redirect, a page's own move, a frame or a window it opens and robots.txt
+with --facts, is opened only on port 80 or 443, and only when every address
+the kit's own lookup finds for its name is on the public internet: a name
+it cannot look up is not opened. A page the browser says it got from
+elsewhere is not read. MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP
+addresses and ranges such as 10.0.0.0/8, refuses those for every address
+opened, the one given included.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On
@@ -221,6 +227,15 @@ async function main() {
   printing = options.help ? "the help" : options.version ? "the version" : options.json ? "brand.json" : "the summary";
   if (options.help) return void process.stdout.write(`${USAGE}\n`);
   if (options.version) return void process.stdout.write(`${version}\n`);
+  // A MAKERSMCP_REFUSE_ADDRESSES that does not parse is refused as an option
+  // that does not is, before any work: no address could be judged by it.
+  try {
+    refusedAddresses();
+  } catch (err) {
+    if (options.json) process.stdout.write(JSON.stringify({ ok: false, error: err.message }) + "\n");
+    process.stderr.write(`easybrandkit: ${noControls(err.message)}\n`);
+    process.exit(2);
+  }
   stopOnSignals(options.json);
   try {
     const result = await makeKit(options.url, {

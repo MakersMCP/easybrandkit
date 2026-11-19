@@ -8,19 +8,40 @@ const assert = require("node:assert/strict");
 const dns = require("node:dns");
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { findClaims, pageOf, regionOf } = require("../skills/easybrandkit/scripts/lib/claims");
 const { spawn, spawnSync } = require("node:child_process");
-const { once } = require("node:events");
+const { once, EventEmitter } = require("node:events");
+const { Readable } = require("node:stream");
 const { pickPages, robotsRules, robotsAllow, readRobots, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
 const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome, launch, openPage, navigate, inOwnWorld } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
+const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
+
+// robots.txt as a site answers it to the kit's own request for it, over
+// http or https, for the rest of the test: with status, headers and body,
+// which set() changes. asked lists the addresses asked for.
+function robotsAnswer(t, status = 404, body = "", headers = {}) {
+  const now = { status, body, headers };
+  const asked = [];
+  const answer = (url, options, done) => {
+    asked.push(String(url));
+    const res = Readable.from(now.body === null ? [] : [Buffer.isBuffer(now.body) ? now.body : Buffer.from(now.body)]);
+    Object.assign(res, { statusCode: now.status, headers: now.headers });
+    process.nextTick(done, res);
+    return new EventEmitter();
+  };
+  t.mock.method(http, "get", answer);
+  t.mock.method(https, "get", answer);
+  return { asked, set: (status_, body_ = "", headers_ = {}) => Object.assign(now, { status: status_, body: body_, headers: headers_ }) };
+}
 
 // What a fake tab answers when the kit asks for its own world.
 const WORLD = { "Page.getFrameTree": { frameTree: { frame: { id: "main" } } }, "Page.createIsolatedWorld": { executionContextId: 7 } };
@@ -427,18 +448,22 @@ test("robots.txt: a server that never stops sending costs what the kit reads of 
 
 test("robots.txt: what fits is read whole, one with no body is empty, and one cut off reads as far as it came", async (t) => {
   setTimeLimit(120_000);
-  const fake = t.mock.method(globalThis, "fetch", async () => new Response("User-agent: *\nDisallow: /a\n"));
+  const site = robotsAnswer(t, 200, "User-agent: *\nDisallow: /a\n");
   assert.deepEqual(await readRobots("https://acme.test"), { rules: [{ allow: false, path: "/a" }], delay: 0 });
-  fake.mock.mockImplementation(async () => new Response("\uFEFFUser-agent: *\nDisallow: /a\n"));
+  site.set(200, "\uFEFFUser-agent: *\nDisallow: /a\n");
   assert.deepEqual((await readRobots("https://acme.test")).rules, [{ allow: false, path: "/a" }], "a byte order mark is not part of the first line");
-  fake.mock.mockImplementation(async () => new Response(null));
+  site.set(200, null);
   assert.deepEqual(await readRobots("https://acme.test"), { rules: [], delay: 0 });
-  fake.mock.mockImplementation(async () => new Response(`User-agent: *\nDisallow: /a\n${"#".repeat(600_000)}\nDisallow: /b\n`));
+  site.set(200, `User-agent: *\nDisallow: /a\n${"#".repeat(600_000)}\nDisallow: /b\n`);
   assert.deepEqual((await readRobots("https://acme.test")).rules, [{ allow: false, path: "/a" }]);
-  fake.mock.mockImplementation(async () => new Response("no", { status: 503 }));
+  // Sent compressed, it is read as it was before.
+  site.set(200, require("node:zlib").gzipSync("User-agent: *\nDisallow: /z\n"), { "content-encoding": "gzip" });
+  assert.deepEqual((await readRobots("https://acme.test")).rules, [{ allow: false, path: "/z" }]);
+  site.set(503, "no");
   assert.deepEqual(await readRobots("https://acme.test"), { error: "its robots.txt answered with an error (HTTP 503)" });
-  fake.mock.mockImplementation(async () => new Response("no", { status: 404 }));
+  site.set(404, "no");
   assert.deepEqual(await readRobots("https://acme.test"), { rules: [], delay: 0 });
+  assert.deepEqual([...new Set(site.asked)], ["https://acme.test/robots.txt"]);
 });
 
 test("a menu link no one would write is not picked", () => {
@@ -624,7 +649,7 @@ test("a home page that has moved on since the kit read it is not read as the hom
     return cdp;
   };
   const skippedOf = async (cdp, url = "https://acme.test/") => {
-    const read = await readFactPages(cdp, url, () => {}, { given: url });
+    const read = await readFactPages(cdp, url, () => {}, { guard: guardFor(url) });
     assert.deepEqual(read.pages, []);
     return read.skipped.map((one) => [one.role, one.url, one.reason]);
   };
@@ -649,19 +674,19 @@ test("a home page that has moved on since the kit read it is not read as the hom
   // given is www's: what the kit's lookup finds, or where the browser says
   // it got the page, though its name is found on the web.
   const www = model("https://www.acme.test/", [el("h1", {}, "Acme")]);
-  assert.deepEqual(await skippedOf(tab(www, null, "https://acme.test/"), "https://www.acme.test/"), [["home", "https://www.acme.test/", "it led to https://acme.test/, which is on a local or private network"]]);
+  assert.deepEqual(await skippedOf(tab(www, null, "https://acme.test/"), "https://www.acme.test/"), [["home", "https://www.acme.test/", "it led to https://acme.test/, which is at 10.0.0.5, an address not on the public internet"]]);
   const bare = model("https://acme.test/", [el("h1", {}, "Acme")]);
   const rebound = tab(bare, (answer) => Object.assign(answer, { url: "https://www.acme.test/x", space: "Loopback", ip: "127.0.0.1" }));
-  assert.deepEqual(await skippedOf(rebound), [["home", url, "it led to https://www.acme.test/x, which is on a local or private network"]]);
+  assert.deepEqual(await skippedOf(rebound), [["home", url, "it led to https://www.acme.test/x, which is at 127.0.0.1, an address not on the public internet"]]);
   // A page that stays on the site is read, wherever on it.
   const shop = model("https://www.acme.test/shop", [el("h1", {}, "Acme")]);
-  const stays = await readFactPages(tab(shop, null, "https://www.acme.test/shop"), "https://www.acme.test/", () => {}, { given: "https://www.acme.test/" });
+  const stays = await readFactPages(tab(shop, null, "https://www.acme.test/shop"), "https://www.acme.test/", () => {}, { guard: guardFor("https://www.acme.test/") });
   assert.deepEqual(stays.pages.map((one) => one.role), ["home"]);
 });
 
 test("a browser that ends during --facts is not waited for through the site's crawl delay", async (t) => {
   setTimeLimit(120_000);
-  t.mock.method(globalThis, "fetch", async () => new Response("User-agent: *\nCrawl-delay: 10\n"));
+  robotsAnswer(t, 200, "User-agent: *\nCrawl-delay: 10\n");
   const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/about", "About"))]);
   let end;
   const cdp = {
@@ -694,7 +719,7 @@ test("page text: headings, list items and quotes marked, the menu bar and the fo
 
 test("a menu page that fails is told once, in words, and one that answers an error is not read any further", async (t) => {
   setTimeLimit(120_000);
-  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  robotsAnswer(t, 404);
   const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/security", "Security"), link("https://acme.test/about", "About"))]);
   const timedOut = (method) => Object.assign(new Error(`${method} timed out`), { timedOut: true });
   // The browser's tab: each page says what it does.
@@ -737,7 +762,7 @@ test("a menu page that fails is told once, in words, and one that answers an err
 
 test("a menu page that leads off the site, or moves itself there once it has loaded, is not read, and on this machine another port is off the site", async (t) => {
   setTimeLimit(120_000);
-  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  robotsAnswer(t, 404);
   for (const base of ["https://acme.test", "http://127.0.0.1:8737"]) {
     const home = model(`${base}/`, [el("nav", { region: "nav" }, link(`${base}/pricing`, "Pricing"), link(`${base}/customers`, "Customers"), link(`${base}/about`, "About"))]);
     const away = base.startsWith("https") ? "https://other.test/inside" : "http://127.0.0.1:9222/inside";
@@ -780,7 +805,7 @@ test("a menu page that leads off the site, or moves itself there once it has loa
 
 test("a menu page whose name is found on this machine or a private network is opened only on the host and port given, and one that leads there is not read", async (t) => {
   setTimeLimit(120_000);
-  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  robotsAnswer(t, 404);
   // dev.test is this machine's own name; acme.test is the site's bare name,
   // found on a private network, and www.acme.test is the site on the web.
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "dev.test" ? "127.0.1.1" : host === "acme.test" ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
@@ -827,14 +852,14 @@ test("a menu page whose name is found on this machine or a private network is op
   // Given by this machine's own name: another port of it is another program,
   // also the http port when the home page is on another.
   const dev = tabOn(nav("http://dev.test:8737/", ["http://dev.test:9222/pricing", "Pricing"], ["http://dev.test/about", "About"], ["http://dev.test:8737/customers", "Customers"]));
-  const local = await readFactPages(dev, "http://dev.test:8737/", () => {}, { given: "http://dev.test:8737/" });
+  const local = await readFactPages(dev, "http://dev.test:8737/", () => {}, { guard: guardFor("http://dev.test:8737/") });
   assert.deepEqual(local.pages.map((one) => one.role), ["home", "customers"]);
   assert.deepEqual(local.skipped, []);
   assert.deepEqual(dev.opened, ["http://dev.test:8737/customers"]);
   // Given by 127.0.0.1, a page by another name of this machine on the same
   // port is the site's own, also once it is opened.
   const loop = tabOn(nav("http://127.0.0.1:8737/", ["http://localhost:8737/pricing", "Pricing"]));
-  const own = await readFactPages(loop, "http://127.0.0.1:8737/", () => {}, { given: "http://127.0.0.1:8737/" });
+  const own = await readFactPages(loop, "http://127.0.0.1:8737/", () => {}, { guard: guardFor("http://127.0.0.1:8737/") });
   assert.deepEqual(own.pages.map((one) => [one.role, one.url]), [["home", "http://127.0.0.1:8737/"], ["pricing", "http://localhost:8737/pricing"]]);
   assert.deepEqual(own.skipped, []);
   // Given by the site's name on the web: a link to its bare name, found on a
@@ -842,12 +867,12 @@ test("a menu page whose name is found on this machine or a private network is op
   // one that moves there as its text is read is not kept.
   const links = [["https://acme.test/pricing", "Pricing"], ["https://www.acme.test/customers", "Customers"], ["https://www.acme.test/security", "Security"], ["https://www.acme.test/about", "About"]];
   const www = tabOn(nav("https://www.acme.test/", ...links), { "https://www.acme.test/customers": "https://acme.test/customers" }, { "https://www.acme.test/security": "https://acme.test/security" });
-  const site = await readFactPages(www, "https://www.acme.test/", () => {}, { given: "https://www.acme.test/" });
+  const site = await readFactPages(www, "https://www.acme.test/", () => {}, { guard: guardFor("https://www.acme.test/") });
   assert.deepEqual(site.pages.map((one) => one.role), ["home", "about"]);
   assert.deepEqual(site.skipped, [
-    { role: "pricing", url: "https://acme.test/pricing", reason: "it is on a local or private network, which easybrandkit does not open on its own" },
-    { role: "customers", url: "https://www.acme.test/customers", reason: "it led to https://acme.test/customers, which is on a local or private network" },
-    { role: "security", url: "https://www.acme.test/security", reason: "it led to https://acme.test/security, which is on a local or private network" },
+    { role: "pricing", url: "https://acme.test/pricing", reason: "it is at 10.0.0.5, an address not on the public internet" },
+    { role: "customers", url: "https://www.acme.test/customers", reason: "it led to https://acme.test/customers, which is at 10.0.0.5, an address not on the public internet" },
+    { role: "security", url: "https://www.acme.test/security", reason: "it led to https://acme.test/security, which is at 10.0.0.5, an address not on the public internet" },
   ]);
   assert.deepEqual(www.opened, ["https://www.acme.test/customers", "https://www.acme.test/security", "https://www.acme.test/about"]);
   // The page that led there was not read at all.
@@ -885,26 +910,57 @@ test("robots.txt: its redirects are followed five at most, each only to a page t
   // A redirect on the site is followed, and so are five in a row; six are
   // not.
   const rules = { rules: [{ allow: false, path: "/private" }], delay: 0 };
+  const guard = guardFor(`${origin}/`);
   lead = "here";
-  assert.deepEqual(await readRobots(origin, `${origin}/`), rules);
+  assert.deepEqual(await readRobots(origin, guard), rules);
   lead = "far";
   last = 4;
-  assert.deepEqual(await readRobots(origin, `${origin}/`), rules);
+  assert.deepEqual(await readRobots(origin, guard), rules);
   last = 5;
-  assert.deepEqual(await readRobots(origin, `${origin}/`), { error: "its robots.txt could not be read" });
+  assert.deepEqual(await readRobots(origin, guard), { error: "its robots.txt could not be read" });
   // Another port of this machine, or a file, is not asked for at all.
   lead = "away";
-  assert.deepEqual(await readRobots(origin, `${origin}/`), { error: `its robots.txt led to http://127.0.0.1:${other.address().port}/robots.txt, which is on a local or private network` });
-  for (lead of ["file", "data"]) assert.deepEqual(await readRobots(origin, `${origin}/`), { error: "its robots.txt could not be read" }, lead);
+  assert.deepEqual(await readRobots(origin, guard), { error: `its robots.txt led to http://127.0.0.1:${other.address().port}/robots.txt, which is on port ${other.address().port}, not 80 or 443` });
+  for (lead of ["file", "data"]) assert.deepEqual(await readRobots(origin, guard), { error: "its robots.txt could not be read" }, lead);
   assert.deepEqual(asked, []);
   // Given that program's own address, it is asked.
-  assert.deepEqual(await readRobots(`http://127.0.0.1:${other.address().port}`, `http://127.0.0.1:${other.address().port}/`), { rules: [{ allow: true, path: "/" }], delay: 0 });
+  assert.deepEqual(await readRobots(`http://127.0.0.1:${other.address().port}`, guardFor(`http://127.0.0.1:${other.address().port}/`)), { rules: [{ allow: true, path: "/" }], delay: 0 });
   assert.deepEqual(asked, ["/robots.txt"]);
+});
+
+test("robots.txt on a host the run was not given is asked for only through the rule's own lookup, which takes no address the rule refuses", async (t) => {
+  setTimeLimit(120_000);
+  // This machine's own name, which the system finds on this machine or its
+  // network, taken for a public one by the lookup the rule judged by.
+  const host = os.hostname();
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const lookups = [];
+  const answer = (url, options) => {
+    lookups.push([String(url), options.lookup]);
+    const req = new EventEmitter();
+    process.nextTick(() => req.emit("error", new Error("not sent here")));
+    return req;
+  };
+  t.mock.method(http, "get", answer);
+  t.mock.method(https, "get", answer);
+  const guard = guardFor("https://acme.test/");
+  // The home page's own robots.txt connects as any program does.
+  assert.deepEqual(await readRobots("https://acme.test", guard), { error: "its robots.txt could not be read" });
+  assert.deepEqual(lookups.map(([url, lookup]) => [url, typeof lookup]), [["https://acme.test/robots.txt", "undefined"]]);
+  // One on another host goes through the rule's lookup.
+  assert.deepEqual(await readRobots(`http://${host}`, guard), { error: "its robots.txt could not be read" });
+  const [url, lookup] = lookups[1];
+  assert.equal(url, `http://${host}/robots.txt`);
+  assert.equal(typeof lookup, "function");
+  const system = await new Promise((resolve) => dns.lookup(host, { all: true }, (err, list) => resolve(err ? [] : list)));
+  if (!system.length || system.every(({ address }) => require("../skills/easybrandkit/scripts/lib/address").isPublicAddress(address))) return t.skip(`${host} is not found here on this machine or its network`);
+  const said = await new Promise((resolve) => lookup(host, {}, (err) => resolve(err)));
+  assert.ok(said && said.code === "ENOTPUBLIC", String(said));
 });
 
 test("a menu page whose read fails is told on one line, and an exception in it not by what it says", async (t) => {
   setTimeLimit(120_000);
-  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  robotsAnswer(t, 404);
   const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/about", "About"))]);
   const forged = "boom\n  Note    A forged line from the site\n  Read    https://evil.example/\u001b[2J";
   let at = "";
@@ -944,7 +1000,7 @@ test("a menu page whose read fails is told on one line, and an exception in it n
 test("a menu page too large to take is told in words and the pages after it are read, a tab that closes is told and so are the pages after it, and so is one the run has too little time left for", async (t) => {
   setTimeLimit(120_000);
   t.after(() => setTimeLimit(120_000));
-  t.mock.method(globalThis, "fetch", async () => new Response("", { status: 404 }));
+  robotsAnswer(t, 404);
   const home = model("https://acme.test/", [el("nav", { region: "nav" }, link("https://acme.test/pricing", "Pricing"), link("https://acme.test/customers", "Customers"), link("https://acme.test/about", "About"))]);
   // As calls come back on a tab that has closed, and with an answer too
   // large to take, which costs only that call.
@@ -1101,7 +1157,7 @@ test("--facts: when no page could be read, the summary sends no one to claims, a
   assert.equal(fs.existsSync(path.join(dir, "pages")), false);
 });
 
-test("--facts: a menu page that cannot be opened, moves on, goes blank or leads to another port of this machine is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {
+test("--facts: a menu page that cannot be opened, moves on, goes blank or moves to another port of this machine is named with what happened, also right after one that answered an error", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} main{min-height:1200px}</style></head><body>`;
   const closed = http.createServer();
   await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
@@ -1132,14 +1188,16 @@ test("--facts: a menu page that cannot be opened, moves on, goes blank or leads 
     server.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  const { facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true, timeLimit: 150_000 });
+  const { kit, facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true, timeLimit: 150_000 });
   assert.deepEqual(facts.pages.map((p) => p.role), ["home"]);
+  assert.deepEqual(kit.notes, []);
   assert.deepEqual(facts.skipped, [
     { role: "pricing", url: `${origin}/pricing`, reason: "it answered 404" },
     // Not told as the page before it was: each address starts afresh.
     { role: "customers", url: `${origin}/customers`, reason: "it could not be opened (net::ERR_EMPTY_RESPONSE)" },
-    // It moves on to another port of this machine, which is not read.
-    { role: "security", url: `${origin}/security`, reason: `it led to ${shut}/` },
+    // Its move to another port of this machine is not opened, and the page
+    // is not read.
+    { role: "security", url: `${origin}/security`, reason: `it led to ${shut}/, which is on port ${new URL(shut).port}, not 80 or 443` },
     { role: "integrations", url: `${origin}/integrations`, reason: "it moved on to a blank page" },
     { role: "about", url: `${origin}/about`, reason: "it answered 503" },
   ]);
@@ -1189,7 +1247,7 @@ test("the page's text is read in a new world after a navigation, also a page's o
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
   setTimeLimit(100_000);
-  const chrome = await launch({ width: 1000, height: 700 });
+  const chrome = await launch({ width: 1000, height: 700 }, { judge: guardFor(`http://127.0.0.1:${port}/`).judge });
   let cdp;
   t.after(async () => {
     setTimeLimit(120_000);

@@ -1,0 +1,28 @@
+{
+  "about": "Which IP addresses are on the public internet, as easybrandkit, easyscreenshotkit and launch-film judge them and as MakersMCP-Api's helpers/kits/fetch-input.js judges them since 416c403. Every IPv6 form that holds an IPv4 address (mapped, compatible, translated, 6to4 and NAT64's well known prefix) is judged by the IPv4 address it holds, and Teredo, NAT64's local use prefix and the other special ranges are not public. publicInKitsOnly lists NAT64 addresses of public sites: the kits judge them by the IPv4 address they hold, so a site with IPv4 only stays public on a network with IPv6 only, where MakersMCP-Api refuses NAT64's well known prefix whole, as the kits firewall does.",
+  "notPublic": [
+    "0.0.0.0", "0.1.2.3", "10.0.0.1", "10.10.0.2", "10.255.255.255", "100.64.0.1", "100.127.255.255", "127.0.0.1", "127.1.2.3", "127.8.9.10",
+    "169.254.169.254", "172.16.0.1", "172.16.5.4", "172.31.255.255", "192.0.0.1", "192.0.2.1", "192.88.99.1", "192.168.1.1",
+    "198.18.0.1", "198.18.0.10", "198.19.255.254", "198.19.255.255", "198.51.100.1", "198.51.100.7", "203.0.113.1", "203.0.113.9",
+    "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+    "::", "::1", "fc00::1", "fc00::5", "fd00::1", "fd12::1", "fd12:3456::1", "fe80::1", "fe80::1%eth0", "febf::1", "fec0::1", "feff::1", "ff02::1",
+    "100::1", "2001:db8::1", "2001:db8:ffff::1",
+    "2001::", "2001::1", "2001:0:7f00:1::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:0:ffff:ffff:ffff:ffff:ffff:ffff", "2001:0000:0a0a:0002::",
+    "64:ff9b:1::1", "64:ff9b:1::7f00:1", "64:ff9b:1::808:808", "64:ff9b:1:ffff::8.8.8.8",
+    "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:10.0.0.1", "::ffff:a00:1", "::ffff:169.254.169.254", "::ffff:0.0.0.0",
+    "::7f00:1", "::127.0.0.1", "::a00:1", "::c0a8:101", "::2",
+    "::ffff:0:7f00:1", "::ffff:0:127.0.0.1", "::ffff:0:c0a8:101",
+    "2002:7f00:1::", "2002:7f00:0001::1", "2002:a00:1:1::5", "2002:c0a8:101::", "2002:a9fe:a9fe::", "2002:a9fe:a9fe::1",
+    "64:ff9b::7f00:1", "64:ff9b::127.0.0.1", "64:ff9b::a00:1", "64:ff9b::10.0.0.5", "64:ff9b::a9fe:a9fe", "64:ff9b::c0a8:101",
+    "", "not-an-ip", "intranet", "1.2.3", "::ffff:1.2.3.4.5"
+  ],
+  "public": [
+    "1.1.1.1", "8.8.8.8", "93.184.215.14", "93.184.216.34", "17.253.144.10", "100.128.0.1", "172.32.0.1", "185.137.215.164",
+    "192.169.0.1", "198.20.0.1", "223.255.255.255",
+    "2606:4700::1111", "2606:4700:4700::1111", "2001:4860:4860::8888", "2001:1:0:1::1", "2001:4860::1", "2a00:1450:4001::1", "2000:ffff::1",
+    "::ffff:8.8.8.8", "::ffff:808:808", "::8.8.8.8", "::808:808", "::ffff:0:8.8.8.8", "::ffff:0:808:808", "2002:808:808::", "2002:808:808::1"
+  ],
+  "publicInKitsOnly": [
+    "64:ff9b::808:808", "64:ff9b::8.8.8.8", "64:ff9b::5db8:d822", "64:ff9b::17.253.144.10"
+  ]
+}

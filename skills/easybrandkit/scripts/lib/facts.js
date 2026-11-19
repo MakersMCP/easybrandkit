@@ -16,10 +16,13 @@
 // quotes it, pages/ fences it, and both say not to follow it.
 
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const path = require("path");
+const zlib = require("zlib");
 const { Worker } = require("worker_threads");
-const { navigate, seenOf, inOwnWorld } = require("./chrome");
-const { localByForm, onLocalNetwork, mayOpen, sameHost, portOf, LOCAL } = require("./address");
+const { navigate, seenOf, inOwnWorld, takeMove } = require("./chrome");
+const { guardFor, sameHost, portOf, notPublicByForm } = require("./address");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
@@ -220,14 +223,14 @@ const LONG_WORDS = 400;
 
 // One page for each subject from the links the home page shows, on the
 // same site: web pages only, on the home page's host, and on its port too
-// when that host is on this machine or on a private network (local, which
-// readFactPages works out by what the host's name is found at too), where
-// another port is another program. A port is compared as a browser uses it,
+// when that host is not on the public internet (local, which readFactPages
+// works out by what the host's name is found at too), where another port is
+// another program. A port is compared as a browser uses it,
 // so http://127.0.0.1/ is on port 80 and https://127.0.0.1/ on 443, and this
 // machine's own names on one port are one host (see address.js). A link
 // whose words and address both fit wins, then one in the menu or the footer,
 // then the shorter address.
-function pickPages(model, home, { local = localByForm(new URL(home)) } = {}) {
+function pickPages(model, home, { local = notPublicByForm(new URL(home)) } = {}) {
   const page = pageOf({ model });
   const homeUrl = new URL(home);
   const homePath = noEndSlashes(homeUrl.pathname);
@@ -343,23 +346,37 @@ function robotsAllow(rules, raw) {
   return !best || best.allow;
 }
 
-// The start of a response, this many bytes at most: the rest of it is not
-// asked for, so a server that never stops sending costs no more than that.
+// The start of a response, decompressed, this many bytes at most: the rest
+// of it is not asked for, so a server that never stops sending, or sends
+// little that grows large, costs no more than that.
 async function firstBytes(res, limit) {
+  const coding = String(res.headers["content-encoding"] || "").trim().toLowerCase();
+  const decoder = coding === "gzip" || coding === "x-gzip" ? zlib.createGunzip() : coding === "deflate" ? zlib.createInflate() : coding === "br" ? zlib.createBrotliDecompress() : null;
+  const stream = decoder ? res.pipe(decoder) : res;
+  if (decoder) res.on("error", (err) => decoder.destroy(err));
   const chunks = [];
   let size = 0;
-  const reader = res.body.getReader();
   try {
-    while (size < limit) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      size += value.length;
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size >= limit) break;
     }
   } finally {
-    reader.cancel().catch(() => {});
+    res.destroy();
+    if (decoder) decoder.destroy();
   }
   return Buffer.concat(chunks).subarray(0, limit).toString("utf8");
+}
+
+// A GET of url that connects through lookup, the run's own (see address.js
+// lookupFor), when there is one.
+function getOf(url, { headers, lookup, signal }) {
+  return new Promise((resolve, reject) => {
+    const client = url.protocol === "https:" ? https : http;
+    const req = client.get(url, { headers, signal, ...(lookup ? { lookup } : {}) }, resolve);
+    req.on("error", reject);
+  });
 }
 
 // How many redirects of robots.txt are followed, as RFC 9309 asks.
@@ -367,28 +384,30 @@ const ROBOTS_HOPS = 5;
 
 // A robots.txt the site does not have (4xx) lets every page be read; one
 // that cannot be read (5xx, no answer) lets none. The kit asks for it
-// itself, so its redirects are followed one at a time, five at most, and
-// each only to a page the kit may open for the address the user gave
-// (given): one that leads to a page on this machine or a private network is
-// not asked for, and counts as a robots.txt that could not be read.
-async function readRobots(origin, given = origin) {
-  const headers = { "user-agent": `${AGENT}/${version} (+https://github.com/MakersMCP/easybrandkit)` };
+// itself, so it and each of its redirects, five at most, is asked for only
+// where the run's rule lets it (guard, see address.js), connected to an
+// address that rule took: one the rule refuses is not asked for, and counts
+// as a robots.txt that could not be read.
+async function readRobots(origin, guard = guardFor(`${origin}/`)) {
+  const headers = { "user-agent": `${AGENT}/${version} (+https://github.com/MakersMCP/easybrandkit)`, "accept-encoding": "gzip, deflate, br" };
   const signal = AbortSignal.timeout(Math.max(2_000, Math.min(10_000, timeLeft() - 30_000)));
-  let url = `${origin}/robots.txt`;
+  let url = new URL(`${origin}/robots.txt`);
   try {
     for (let hop = 0; hop <= ROBOTS_HOPS; hop++) {
-      const res = await fetch(url, { headers, signal, redirect: "manual" });
-      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      const why = await guard.judge(url.href);
+      if (why) return { error: hop ? `its robots.txt led to ${url.href}, which ${why}` : `its robots.txt ${why}` };
+      const res = await getOf(url, { headers, lookup: guard.lookupFor(url.href), signal });
+      const location = res.statusCode >= 300 && res.statusCode < 400 ? res.headers.location : null;
       if (!location) {
-        if (res.status >= 500) return { error: `its robots.txt answered with an error (HTTP ${res.status})` };
-        if (!res.ok) return { rules: [], delay: 0 };
-        return robotsRules(res.body ? await firstBytes(res, 500_000) : "");
+        if (res.statusCode >= 200 && res.statusCode < 300) return robotsRules(await firstBytes(res, 500_000));
+        res.destroy();
+        if (res.statusCode >= 500) return { error: `its robots.txt answered with an error (HTTP ${res.statusCode})` };
+        return { rules: [], delay: 0 };
       }
-      if (res.body) res.body.cancel().catch(() => {});
+      res.destroy();
       const next = new URL(location, url);
       if (!/^https?:$/.test(next.protocol)) break;
-      if (!(await mayOpen(next.href, given))) return { error: `its robots.txt led to ${next.href}, which ${LOCAL}` };
-      url = next.href;
+      url = next;
     }
   } catch {
     // Told below.
@@ -407,19 +426,25 @@ const PAGE_TIME = 45_000;
 // 10 s), while the run has time for it. The page the kit read is read in any
 // case; the pages easybrandkit picks follow robots.txt. That page is filed as
 // the home page, or under role, "given" for an address deeper in the site
-// that was read as given because its home page could not be read. given is
-// the address the user gave: a page on this machine or a private network is
-// opened or read only on its host and port (see address.js).
-async function readFactPages(cdp, home, log, { role = "home", given = home } = {}) {
+// that was read as given because its home page could not be read. guard is
+// the run's rule for the addresses it opens (see address.js): a page is
+// opened or read only where it lets it.
+async function readFactPages(cdp, home, log, { role = "home", guard = guardFor(home) } = {}) {
   const pages = [];
   const skipped = [];
-  // A page the server answered with an error, or that the browser could not
-  // open, also after it has moved on: its text is not the site's page.
-  const notThePage = () => (cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "");
+  // A page that tried to move on to an address the run's rule refused, and
+  // so shows the browser's error page (see chrome.js takeMove), or one the
+  // server answered with an error, or that the browser could not open, also
+  // after it has moved on: its text is not the site's page.
+  const notThePage = () => {
+    const moved = takeMove(cdp);
+    if (moved) return `it led to ${moved.url}, which ${moved.why}`;
+    return cdp.answer.status >= 400 ? `it answered ${cdp.answer.status}` : cdp.answer.unreachable ? "it could not be opened" : cdp.answer.blank ? "it moved on to a blank page" : "";
+  };
   const homeUrl = new URL(home);
-  // Whether the home page's host is on this machine or a private network,
-  // by what its name is found at too: another port of it is another program.
-  const local = await onLocalNetwork(homeUrl, seenOf(cdp, home));
+  // Whether the home page's host is not on the public internet, by what its
+  // name is found at too: another port of it is another program.
+  const local = await guard.inside(homeUrl, seenOf(cdp, home));
   // An address off the site that pickPages keeps to.
   const elsewhere = (raw) => {
     try {
@@ -441,14 +466,17 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
     }
   };
   // Why the tab's page, at the addresses it gives, is not to be read: it is
-  // off the site, or on this machine or a private network where the kit
-  // reads nothing for the address given. "" when it is neither. The page
-  // the kit opened (opened) is there itself, as when only the browser finds
-  // its name there; one the page went on to is where it led.
+  // off the site, or where the run's rule does not let the kit read it, as
+  // the browser said where it got it. "" when it is neither. The page the
+  // kit opened (opened) is there itself, as when only the browser finds its
+  // name there; one the page went on to is where it led.
   const away = async (addresses, opened = "") => {
+    const moved = takeMove(cdp);
+    if (moved) return `it led to ${moved.url}, which ${moved.why}`;
     for (const at of new Set(addresses.filter(Boolean))) {
       if (elsewhere(at)) return `it led to ${at}`;
-      if (!(await mayOpen(at, given, seenOf(cdp, at)))) return at.split("#")[0] === opened.split("#")[0] ? `it ${LOCAL}` : `it led to ${at}, which ${LOCAL}`;
+      const why = await guard.judge(at, seenOf(cdp, at));
+      if (why) return at.split("#")[0] === opened.split("#")[0] ? `it ${why}` : `it led to ${at}, which ${why}`;
     }
     return "";
   };
@@ -465,7 +493,7 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
   pages.push({ role, url: home, readAt: new Date().toISOString(), model });
   const picks = pickPages(model, home, { local });
   if (!picks.length) return { pages, skipped };
-  const robots = await readRobots(homeUrl.origin, given);
+  const robots = await readRobots(homeUrl.origin, guard);
   const pause = Math.min(10, Math.max(1, robots.delay || 1)) * 1000;
   // Once the tab's connection has closed, no page can be read in it: each
   // page not tried yet is named with the reason, and no pause is waited for.
@@ -493,10 +521,12 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
       skipped.push({ ...pick, reason: `too little of the run's time was left to read it, as a page past the home page is read only while ${PAGE_TIME / 1_000} s are left; give --timeout more seconds` });
       continue;
     }
-    // On a host its name is found on this machine or a private network for,
-    // a menu page is opened only when it is the host and port given.
-    if (!(await mayOpen(pick.url, given))) {
-      skipped.push({ ...pick, reason: `it ${LOCAL}, which easybrandkit does not open on its own` });
+    // A menu page is opened only where the run's rule lets it: on the
+    // scheme, host and port given, or on port 80 or 443 of the public
+    // internet.
+    const why = await guard.judge(pick.url);
+    if (why) {
+      skipped.push({ ...pick, reason: `it ${why}` });
       continue;
     }
     let timer;
@@ -514,8 +544,9 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
         skipped.push({ ...pick, reason: led });
         continue;
       }
-      if (notThePage()) {
-        skipped.push({ ...pick, reason: notThePage() });
+      const failed = notThePage();
+      if (failed) {
+        skipped.push({ ...pick, reason: failed });
         continue;
       }
       await waitForContent(cdp);
@@ -523,12 +554,14 @@ async function readFactPages(cdp, home, log, { role = "home", given = home } = {
       const m = await metrics(cdp);
       await hideOverlays(cdp, m.width, m.viewportHeight);
       const read = await readModel(cdp);
-      if (notThePage()) {
-        skipped.push({ ...pick, reason: notThePage() });
+      const gone = notThePage();
+      if (gone) {
+        skipped.push({ ...pick, reason: gone });
         continue;
       }
-      // A page that has moved itself off the site, or to this machine or a
-      // private network, since it loaded, also as its text was read.
+      // A page that has moved itself off the site, or tried to move to an
+      // address the run's rule refuses, since it loaded, also as its text
+      // was read.
       const moved = await away([read && read.url, await tabAt(), cdp.answer.url], pick.url);
       if (moved) {
         skipped.push({ ...pick, reason: moved });
