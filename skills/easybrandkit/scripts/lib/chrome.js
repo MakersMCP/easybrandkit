@@ -449,6 +449,16 @@ async function launch({ width, height }, { judge = null } = {}) {
         // (see holdDocuments); over TCP each goes to the host and port its
         // address names.
         "--disable-quic",
+        // An http address is asked for over http, as it is written: Chrome
+        // tries one over https first by itself (HTTPS-Upgrades, and on
+        // Chrome 157 HTTPS-First, which then refuses a site that answers on
+        // no https), at an address on port 443 that the run was not given,
+        // so a site of this machine or of a private network by a name under
+        // a public suffix was refused before the browser tried http. A site
+        // that wants https sends its visitors there itself, and a name the
+        // browser takes only over https (HSTS), as every .dev and .app name,
+        // is still asked for over https (see address.js guardFor).
+        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable",
         // Chrome refuses to start as root without it (a container, a CI box).
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",

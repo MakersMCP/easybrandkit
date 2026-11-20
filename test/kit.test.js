@@ -2568,6 +2568,35 @@ test("an address the browser reads and the URL parser here cannot, as one with a
   assert.deepEqual(other.asked, []);
 });
 
+test("an http address given is asked for over http as it is written, a name under a public suffix too: a site of this machine or a private network by such a name is read, and so is one of the public internet with no https", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  // The site answers on http only, as a local site under development or a
+  // staging site on a private network does, and nothing answers https for
+  // its name. Chrome tries an http address of such a name over https first
+  // unless it is told not to (HTTPS-Upgrades, and HTTPS-First on Chrome
+  // 157), which is an address on port 443 the run was not given.
+  const asked = [];
+  const site = await serve((req, res) => {
+    asked.push(`${req.headers.host}${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const port = new URL(site.origin).port;
+  useRelay(t, parent, {}, [`--host-resolver-rules=MAP app.example.com:80 127.0.0.1:${port}, MAP app.example.com:443 127.0.0.1:9`]);
+  let at = "";
+  t.mock.method(dns.promises, "lookup", async () => [{ address: at, family: 4 }]);
+  for (const where of ["10.0.0.5", "198.18.0.5", "93.184.216.34"]) {
+    at = where;
+    const { kit } = await makeKit("http://app.example.com/", { dir: path.join(parent, where), stores: false });
+    assert.equal(kit.url, "http://app.example.com/", where);
+    assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], where);
+  }
+  assert.ok(asked.includes("app.example.com/"), asked.join(" "));
+});
+
 test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the browser starts, and for an address a site leads to, in words that name it", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {
