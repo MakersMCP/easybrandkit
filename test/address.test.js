@@ -49,6 +49,18 @@ test("MAKERSMCP_REFUSE_ADDRESSES: IP addresses and ranges, an IPv6 form of a ref
   assert.equal(refusedAddresses("::ffff:185.137.215.0/120").match("185.137.215.9"), "185.137.215.9");
   // :: and ::1 hold no IPv4 address.
   for (const entry of ["::", "::1", "::/127"]) assert.equal(refusedAddresses(entry).match("0.0.0.1"), "", entry);
+  // An IPv6 entry is no IPv4 entry: ::/0, all of IPv6, refuses every IPv6
+  // address and no IPv4 one, and nor does an IPv6 range that holds the
+  // mapped and compatible forms of every IPv4 address but is no such form
+  // itself, at /96 or longer. Kept in one list, an IPv4 address was checked
+  // against them as ::ffff:a.b.c.d, and every site was refused.
+  for (const entry of ["::/0", "::/8", "::/64", "::/80", "::ffff:0:0/80", "::ffff:0:0/95", "::/95"]) {
+    const one = refusedAddresses(entry);
+    for (const address of ["8.8.8.8", "93.184.216.34", "185.137.215.163"]) assert.equal(one.match(address), "", `${entry} ${address}`);
+  }
+  assert.equal(refusedAddresses("::/0").match("2606:4700::1111"), "2606:4700::1111");
+  assert.equal(refusedAddresses("::/80").match("2606:4700::1111"), "");
+  assert.equal(refusedAddresses("::/80").match("::808:808"), "::808:808");
   for (const value of [undefined, "", " ", ",", " , ,"]) {
     const none = refusedAddresses(value);
     assert.equal(none.size, 0, String(value));
@@ -65,6 +77,72 @@ test("MAKERSMCP_REFUSE_ADDRESSES: IP addresses and ranges, an IPv6 form of a ref
     if (before === undefined) delete process.env.MAKERSMCP_REFUSE_ADDRESSES;
     else process.env.MAKERSMCP_REFUSE_ADDRESSES = before;
   }
+});
+
+// A Teredo address holds two IPv4 addresses, its server's and, each bit
+// turned over, its client's, and NAT64's local use prefix can stand for any
+// IPv4 address in a way of its network's choosing, in its last 32 bits as
+// RFC 6052 puts it for a /96, in another place for a /48, or by a table of
+// its own: an IPv4 entry refuses a Teredo address whose server or client it
+// is, and while the setting names an IPv4 address, every address of the
+// local use prefix, as easyscreenshotkit reads the setting. Both were
+// opened as a site given, http://[64:ff9b:1::7f00:1]:3000/ with 127.0.0.1
+// refused among them.
+test("MAKERSMCP_REFUSE_ADDRESSES refuses a Teredo address whose server or client it names, and while it names an IPv4 address every address of NAT64's local use prefix", async (t) => {
+  const refused = refusedAddresses("185.137.215.163,10.20.0.0/16");
+  for (const [address, said] of [
+    ["64:ff9b:1::b989:d7a3", "64:ff9b:1::b989:d7a3"],
+    ["64:ff9b:1::185.137.215.163", "64:ff9b:1::185.137.215.163"],
+    // RFC 6052's layout for a /48: 185.137 before the u octet, 215.163 after it.
+    ["64:ff9b:1:b989:d7:a300::", "64:ff9b:1:b989:d7:a300::"],
+    ["64:ff9b:1::a14:5", "64:ff9b:1::a14:5"],
+    ["64:ff9b:1::5db8:d70e", "64:ff9b:1::5db8:d70e"],
+    // A Teredo server, then a client, at 185.137.215.163 and in 10.20.0.0/16.
+    ["2001:0:b989:d7a3::", "185.137.215.163"],
+    ["2001:0:4136:e378:8000:63bf:4676:285c", "185.137.215.163"],
+    ["2001:0:a14:5::1", "10.20.0.5"],
+    ["2001:0:4136:e378:8000:63bf:f5eb:fffa", "10.20.0.5"],
+    // Both on the public internet, neither of them named.
+    ["2001:0:5db8:d70e::", ""],
+    ["2001:0:4136:e378:8000:63bf:a247:28f1", ""],
+    ["2606:4700::1111", ""],
+  ]) {
+    assert.equal(refused.match(address), said, address);
+  }
+  // With no IPv4 address named, an address of the local use prefix is
+  // refused only as an entry names it, and a Teredo entry, an IPv6 range of
+  // an IPv4 form shorter than /96, or than /16 for 6to4, names IPv6
+  // addresses alone.
+  for (const entry of ["::1", "2606:4700::/32", "2001:0:b989:d7a3::", "2001::/32", "2002::/15", "64:ff9b::/95", "64:ff9b:1::/48"]) {
+    for (const address of ["185.137.215.163", "93.184.215.14", "0.0.0.1"]) assert.equal(refusedAddresses(entry).match(address), "", `${entry} ${address}`);
+    assert.equal(refusedAddresses(entry).match("64:ff9b:1:abcd::7f00:1"), entry === "64:ff9b:1::/48" ? "64:ff9b:1:abcd::7f00:1" : "", entry);
+  }
+  // An entry in the local use prefix with the IPv4 address last refuses
+  // that IPv4 address and its forms, as the other forms do.
+  for (const entry of ["64:ff9b:1::185.137.215.163", "64:ff9b:1::b989:d7a3", "64:ff9b:1:fffe::b989:d7a3"]) {
+    for (const address of ["185.137.215.163", "::ffff:185.137.215.163", "2002:b989:d7a3::1", "64:ff9b::b989:d7a3"]) assert.equal(refusedAddresses(entry).match(address), "185.137.215.163", `${entry} ${address}`);
+  }
+  // In a run, the address given at such an address is refused too.
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const local = refusedAddresses("127.0.0.1");
+  for (const [given, said] of [["http://[64:ff9b:1::7f00:1]:3000/", "64:ff9b:1::7f00:1"], ["http://[2001:0:7f00:1::]:3000/", "127.0.0.1"], ["http://[2001:0:4136:e378:8000:63bf:80ff:fffe]:3000/", "127.0.0.1"], ["http://[64:ff9b::7f00:1]:3000/", "127.0.0.1"]]) {
+    assert.equal(await guardFor(given, { refused: local }).judge(given), `is at ${said}, an address MAKERSMCP_REFUSE_ADDRESSES refuses`, given);
+  }
+});
+
+// An entry that holds every IPv4 address in an IPv6 form, as a host copies
+// a firewall's list of the IPv6 ranges it refuses whole, would refuse every
+// site, with words that blamed each site's address: it stops the run as a
+// value that does not parse does, saying so.
+test("an entry of MAKERSMCP_REFUSE_ADDRESSES that holds every IPv4 address in an IPv6 form is refused, saying so", () => {
+  const said = (entry) => `MAKERSMCP_REFUSE_ADDRESSES holds ${JSON.stringify(entry)}, a range of every IPv4 address in an IPv6 form, which would refuse every site, so nothing was read. An IPv6 form of an IPv4 address is judged by that address: give the IPv4 addresses and ranges to refuse, or leave it empty.`;
+  for (const entry of ["64:ff9b::/96", "::ffff:0:0/96", "::ffff:0:0:0/96", "::/96", "2002::/16", "64:ff9b:1::/96", "64:ff9b:1:fffe::/96"]) {
+    assert.throws(() => refusedAddresses(entry), { message: said(entry) }, entry);
+    assert.throws(() => refusedAddresses(`185.137.215.163, ${entry}`), { message: said(entry) }, entry);
+  }
+  // One bit longer, it holds half of them, as written.
+  assert.equal(refusedAddresses("2002::/17").match("93.184.215.14"), "93.184.215.14");
+  assert.equal(refusedAddresses("2002::/17").match("185.137.215.163"), "");
 });
 
 test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse is refused in words that name the setting and what in it does not parse", () => {
