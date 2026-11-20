@@ -321,7 +321,12 @@ const LOW_WAIT = 3_000;
 async function launch({ width, height }, { judge = null } = {}) {
   // A browser that cannot be started is told before anything is made.
   const place = browserPlace();
-  const temp = os.tmpdir();
+  // The temp folder by its full path, which the browser is given as its
+  // TMPDIR too: from a relative one, the profile, the download folder its
+  // Preferences name, its stand-ins, its bus and its display would all be
+  // relative, and the browser takes no relative download folder, so it
+  // saved into the Downloads folder of the user it runs as.
+  const temp = path.resolve(os.tmpdir());
   // The folders of PATH are parted by its delimiter, so a folder of stand-ins
   // in a temp folder whose path has one in it could not come first on the
   // browser's PATH (see below), and the browser would find the real programs.
@@ -391,7 +396,7 @@ async function launch({ width, height }, { judge = null } = {}) {
   // into the user's own browser's folder (~/.config/google-chrome/Crash
   // Reports), where nothing removes them; Ctrl-\ asks for one from each of
   // its helpers. BREAKPAD_DUMP_LOCATION puts them in the throwaway profile.
-  const env = { ...process.env, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
+  const env = { ...process.env, TMPDIR: temp, BREAKPAD_DUMP_LOCATION: path.join(profile, "Crash Reports") };
   // A site can send the browser to mailto:, news: or snews:, which Chrome
   // on Linux hands on without asking: over the session bus to the desktop's
   // portal, which starts the user's own mail program with the site's

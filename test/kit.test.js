@@ -1581,6 +1581,15 @@ test("a browser that cannot start because the temp folder's path is too long for
     process.env.TMPDIR = near;
     await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message.endsWith("whose path would be 108 bytes where Linux allows 107. Set TMPDIR to a folder whose path is at least 1 byte shorter."));
   }
+  // A relative TMPDIR is judged by its full path, from the folder the run
+  // is in.
+  const cwd = process.cwd();
+  t.after(() => process.chdir(cwd));
+  process.chdir(parent);
+  process.env.TMPDIR = path.basename(deep);
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === said);
+  process.chdir(cwd);
+  assert.deepEqual(fs.readdirSync(deep), [], "nothing is left in the temp folder");
   // In a temp folder short enough for the socket, the browser ended for
   // another reason.
   if (env.TMPDIR === undefined) delete process.env.TMPDIR;
@@ -3569,12 +3578,11 @@ test("a browser too busy to answer the kit's refusal of downloads ends the run b
   if (temp) assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
-test("a browser that does not take the refusal of downloads reads the site, and a download goes into its throwaway profile, not the user's Downloads folder", { skip: LINUX_HOME }, async (t) => {
+test("a browser that does not take the refusal of downloads reads the site, and a download goes into its throwaway profile, not the user's Downloads folder, also from a relative TMPDIR", { skip: LINUX_HOME }, async (t) => {
   const site = await savingSite(t);
   const temp = ownTemp(t);
   if (!temp) return t.skip("the temp folder is too deep for a browser");
   const tmpdir = process.env.TMPDIR;
-  process.env.TMPDIR = temp;
   t.after(() => {
     if (tmpdir === undefined) delete process.env.TMPDIR;
     else process.env.TMPDIR = tmpdir;
@@ -3582,17 +3590,23 @@ test("a browser that does not take the refusal of downloads reads the site, and 
   // The refusal sent under a name the browser does not know: it answers
   // that it does not take it.
   useRelay(t, site.parent, { "Browser.setDownloadBehavior": "rename" });
-  let inProfile = [];
-  const look = () => {
-    const profile = fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"));
-    inProfile = fs.readdirSync(path.join(temp, profile, "Downloads"));
-  };
-  const { kit } = await makeKit(site.origin, { dir: path.join(site.parent, "kit"), stores: false, log: (line) => line === "Drawing the card" && look() });
-  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
-  assert.ok(site.asked >= 1, "the site was read");
-  assert.ok(inProfile.length >= 1, "the page's files went into the profile");
-  assert.deepEqual(site.downloads(), []);
-  assert.deepEqual(fs.readdirSync(temp), [], "and went with it");
+  // The temp folder as its path, and as a path from the folder the run is
+  // in: a browser given a relative download folder, as one in a profile
+  // under a relative TMPDIR was, saves into the user's own Downloads.
+  for (const given of [temp, path.relative(process.cwd(), temp)]) {
+    process.env.TMPDIR = given;
+    let inProfile = [];
+    const look = () => {
+      const profile = fs.readdirSync(temp).find((name) => name.startsWith("easybrandkit-chrome-"));
+      inProfile = fs.readdirSync(path.join(temp, profile, "Downloads"));
+    };
+    const { kit } = await makeKit(site.origin, { dir: path.join(site.parent, given === temp ? "kit" : "kit-relative"), stores: false, log: (line) => line === "Drawing the card" && look() });
+    assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], given);
+    assert.ok(site.asked >= 1, "the site was read");
+    assert.ok(inProfile.length >= 1, `the page's files went into the profile, with TMPDIR ${given}`);
+    assert.deepEqual(site.downloads(), [], given);
+    assert.deepEqual(fs.readdirSync(temp), [], `and went with it, with TMPDIR ${given}`);
+  }
 });
 
 test("the notes name the first three addresses the rule did not let a page open, each once, and count the rest", () => {
@@ -4802,8 +4816,20 @@ test("on Linux a temp folder whose path has a : in it, which parts the folders o
   const parted = path.join(parent, "te:mp");
   fs.mkdirSync(parted);
   setEnv(t, { CHROME_PATH: browser, TMPDIR: parted });
-  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === `browser was not started: the path of the temp folder, ${parted}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
+  const refused = (at) => `browser was not started: the path of the temp folder, ${at}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`;
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === refused(parted));
   assert.deepEqual(fs.readdirSync(parted), []);
+  // A relative TMPDIR is judged by its full path, from the folder the run
+  // is in, whose path holds the :.
+  const inside = path.join(parted, "temp");
+  fs.mkdirSync(inside);
+  const cwd = process.cwd();
+  t.after(() => process.chdir(cwd));
+  process.chdir(parted);
+  process.env.TMPDIR = "temp";
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === refused(inside));
+  process.chdir(cwd);
+  assert.deepEqual(fs.readdirSync(inside), []);
 });
 
 test("the path of the bus the browser is given is written as a bus address writes it", () => {
