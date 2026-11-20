@@ -42,6 +42,12 @@ const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed
 // each quote in it closed, escaped and opened again.
 const sh = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 
+// A value written into NODE_OPTIONS as one option's value, whatever it
+// holds: in double quotes, each quote and backslash in it escaped, as Node
+// reads that variable. Written as it is, a path with a space in it was cut
+// there.
+const nodeOption = (value) => `"${String(value).replace(/["\\]/g, "\\$&")}"`;
+
 // Minimal PNG reader for 8-bit RGB/RGBA, non-interlaced (what Chrome writes).
 function readPng(file) {
   const buf = fs.readFileSync(file);
@@ -3444,7 +3450,7 @@ test("with --facts, an error while the pages are read is one line in the summary
   });
   const preload = path.join(parent, "preload.js");
   fs.writeFileSync(preload, `const facts = require(${JSON.stringify(path.join(LIB, "facts.js"))});\nfacts.readFactPages = async () => { throw new Error("boom\\n  Note    A forged line\\u001b[2J"); };\n`);
-  const done = await runCli([site.origin, "--out", path.join(parent, "kit"), "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${preload}` });
+  const done = await runCli([site.origin, "--out", path.join(parent, "kit"), "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${nodeOption(preload)}` });
   assert.equal(done.code, 0, done.stderr);
   assert.ok(done.stdout.includes(`  Note    Did not read ${site.origin}/: boom Note A forged line [2J.\n`), done.stdout);
   assert.doesNotMatch(done.stdout, /^ {2}Note {4}A forged/m);
@@ -3460,7 +3466,7 @@ test("with --facts, rules that do not finish are told as that: the page was read
   const preload = path.join(parent, "preload.js");
   fs.writeFileSync(preload, `const wt = require("worker_threads");\nconst { EventEmitter } = require("events");\nconst { Worker } = wt;\nwt.Worker = function (file, options) {\n  if (!String(file).endsWith("claims-thread.js")) return new Worker(file, options);\n  const fake = new EventEmitter();\n  fake.terminate = () => {};\n  setTimeout(() => fake.emit("error", new Error("the rules took\\n  Note    too long")), 0);\n  return fake;\n};\n`);
   const dir = path.join(parent, "kit");
-  const done = await runCli([site.origin, "--out", dir, "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${preload}` });
+  const done = await runCli([site.origin, "--out", dir, "--no-stores", "--facts"], { ...process.env, NODE_OPTIONS: `--require ${nodeOption(preload)}` });
   assert.equal(done.code, 0, done.stderr);
   const lines = done.stdout.split("\n");
   const at = lines.findIndex((line) => line.startsWith("  Facts "));
@@ -3538,7 +3544,7 @@ test("a page built to keep the read of its snapshot busy cannot keep a run from 
   // Says when the read of a snapshot has been handed to its thread.
   const preload = path.join(parent, "preload.js");
   fs.writeFileSync(preload, `const wt = require("worker_threads");\nconst { Worker } = wt;\nwt.Worker = class extends Worker {\n  constructor(file, options) {\n    super(file, options);\n    if (String(file).endsWith("logos-thread.js")) require("fs").writeSync(2, "the read has started\\n");\n  }\n};\n`);
-  child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", "--timeout", "120"], { detached: true, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, ...(temp ? { TMPDIR: temp } : {}), NODE_OPTIONS: `--require ${preload}` } });
+  child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores", "--timeout", "120"], { detached: true, stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, ...(temp ? { TMPDIR: temp } : {}), NODE_OPTIONS: `--require ${nodeOption(preload)}` } });
   const closed = once(child, "close");
   let said = "";
   child.stderr.on("data", (chunk) => (said += chunk));
@@ -4449,8 +4455,10 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   setEnv(t, { CHROME_PATH: browser, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-0", WAYLAND_SOCKET: "9", XDG_RUNTIME_DIR: runtime, TMPDIR: parent });
   await assert.rejects(launch({ width: 800, height: 600 }), /ended before it answered: it printed nothing and exited with 3\./);
   const [address, there, wayland, waylandThere, x, first, ...rest] = fs.readFileSync(seen, "utf8").trim().split("\n");
+  // The bus address writes the profile's path with %xx escapes (busPath).
   const profile = /^unix:path=(.+)\/no-bus$/.exec(address);
   assert.ok(profile, address);
+  profile[1] = decodeURIComponent(profile[1]);
   assert.match(path.basename(profile[1]), /^easybrandkit-chrome-/);
   assert.equal(there, "nothing", "the bus the browser was given leads nowhere");
   // No display: a Wayland display at a path in the profile, which
@@ -4510,7 +4518,7 @@ async function privateBus(t) {
   if (python.status !== 0 || spawnSync("dbus-daemon", ["--version"], { stdio: "ignore" }).status !== 0) return null;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-bus-"));
   const socket = path.join(dir, "bus");
-  fs.writeFileSync(path.join(dir, "bus.conf"), `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">\n<busconfig><type>session</type><listen>unix:path=${socket}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>\n`);
+  fs.writeFileSync(path.join(dir, "bus.conf"), `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">\n<busconfig><type>session</type><listen>unix:path=${busPath(socket)}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>\n`);
   fs.writeFileSync(path.join(dir, "portal.py"), PORTAL);
   const daemon = spawn("dbus-daemon", [`--config-file=${path.join(dir, "bus.conf")}`, "--nofork", "--nopidfile"], { stdio: "ignore" });
   let portal = null;
@@ -4520,7 +4528,10 @@ async function privateBus(t) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   for (let waited = 0; waited < 10_000 && !fs.existsSync(socket); waited += 50) await wait(50);
-  const address = `unix:path=${socket}`;
+  // Written as a bus address writes a path, with %xx escapes: a space, a
+  // quote or a % of the temp folder's in it as it is is no address
+  // dbus-daemon or the portal reads.
+  const address = `unix:path=${busPath(socket)}`;
   portal = spawn("python3", ["-I", path.join(dir, "portal.py"), address], { stdio: ["ignore", "pipe", "ignore"], env: { PATH: "/usr/bin:/bin" } });
   let said = "";
   portal.stdout.on("data", (chunk) => (said += chunk));
