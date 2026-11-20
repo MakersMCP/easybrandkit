@@ -634,7 +634,9 @@ async function launch({ width, height }, { judge = null } = {}) {
     } catch (err) {
       await close({ hurry: Boolean(err.timedOut) });
       if (err.timedOut) throw noKit(noAnswer("The browser did not answer the kit's request to judge the pages it opens", holding));
-      throw noKit(browserSaid(err.closed ? "The browser ended before it took the kit's request to judge the pages it opens" : "The browser refused the kit's request to judge the pages it opens"));
+      if (err.closed) throw noKit(browserSaid("The browser ended before it took the kit's request to judge the pages it opens"));
+      // The same browser refuses it again: another one is what helps.
+      throw new Error("The browser refused the kit's request to judge the pages it opens, so no kit was made. It cannot hold its pages to the kit's rule for the addresses they open: point CHROME_PATH at another browser, such as Google Chrome.");
     }
     // sandboxed: a browser installed as a snap or a Flatpak, in whose
     // sandbox the stand-ins and the bus may not be the ones it finds. tabs:

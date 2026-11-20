@@ -3293,7 +3293,7 @@ test("a browser that does not take the rule for the pages it opens, in time or a
   // Sent under a name the browser does not know, which it answers that it
   // does not take.
   process.env.STAND_IN_RELAY = JSON.stringify({ "Fetch.enable": "rename" });
-  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser refused the kit's request to judge the pages it opens, so no kit was made. Try again." && err.earlierKit === dir);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser refused the kit's request to judge the pages it opens, so no kit was made. It cannot hold its pages to the kit's rule for the addresses they open: point CHROME_PATH at another browser, such as Google Chrome." && err.earlierKit === dir);
   // One that ends as it is sent it.
   process.env.STAND_IN_RELAY = JSON.stringify({ "Fetch.enable": "end" });
   await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser ended before it took the kit's request to judge the pages it opens, so no kit was made. Try again." && err.earlierKit === dir);
