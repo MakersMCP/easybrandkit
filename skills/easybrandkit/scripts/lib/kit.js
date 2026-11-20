@@ -246,21 +246,52 @@ async function refuseByRule(cdp, url, pageUrl, guard) {
   }
 }
 
+// The https address read in the place of an http address on port 80 that
+// gave no answer (see readPage): the same host and path on port 443. "" for
+// any other address.
+function httpsInPlace(raw) {
+  const url = new URL(raw);
+  if (url.protocol !== "http:" || url.port) return "";
+  url.protocol = "https:";
+  return url.href;
+}
+
 // alsoNamed: more names the brand goes by. deeper: the page is one past the
 // home page, read as given when the home page could not be read. guard: the
 // run's rule for the addresses it opens (see address.js), which a page the
 // browser is to open is held to as well. browser: one started for it with
 // that rule, which it closes as it would its own.
+//
+// An http address on port 80 that gives no answer in its time, or to which
+// the browser makes no connection, is read over https on port 443 in its
+// place, as Chrome's own move to https did before the kit turned it off
+// (see chrome.js launch): a site that serves only https, with nothing on
+// port 80, was told as down. That address is not the one asked for, so the
+// run's rule holds it to port 443 and the public internet, and one the rule
+// refuses is not tried. What it gives is told by both addresses (inPlace).
 async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, guard = guardFor(url), browser = null } = {}) {
   const chrome = browser || (await launch(SCREEN, { judge: guard.judge }));
   // A browser that has just not answered is not waited for again as it is
   // asked to quit.
   let unanswered = false;
+  // The address asked for and what it did, once another is read in its
+  // place.
+  let inPlace = null;
   try {
     const cdp = await openPage(chrome, SCREEN);
     resetPictureWait();
     log(`Opening ${url}`);
-    const pageUrl = await navigate(cdp, url);
+    let pageUrl;
+    try {
+      pageUrl = await navigate(cdp, url);
+    } catch (err) {
+      const other = err.silent ? httpsInPlace(url) : "";
+      if (!other || (await guard.judge(other))) throw err;
+      inPlace = { url, said: err.silent };
+      url = other;
+      log(`Opening ${url}`);
+      pageUrl = await navigate(cdp, url);
+    }
     await refuseByRule(cdp, url, pageUrl, guard);
     // An error page is not waited for or walked. A bot check can come with
     // an error status too, and is read like any page: it may let the browser
@@ -343,8 +374,15 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     // whether the browser runs in a sandbox of its own (see triedNotes),
     // and those the run's rule did not let them open (see refusedNotes).
     const tried = await triedSoFar(cdp);
-    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], refusedMore: Boolean(cdp.refusedMore), sandboxed: Boolean(chrome.sandboxed) };
+    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], refusedMore: Boolean(cdp.refusedMore), sandboxed: Boolean(chrome.sandboxed), inPlace: inPlace && { ...inPlace, read: url } };
   } catch (err) {
+    // A page read in the place of the address asked for that fails is told
+    // with what that address did.
+    const bothTold = (failed) => {
+      if (!inPlace || !failed.pageFailed) return failed;
+      const what = `${inPlace.said}, and ${url}, tried in its place, ${failed.pageFailed}`;
+      return pageFailed(`${inPlace.url} ${what}, so no kit was made.${failed.outOfTime ? " Try again, or give it more time with --timeout." : ""}`, what, failed.outOfTime);
+    };
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
     // the DevTools protocol. One that did not answer a wait for its tab has
@@ -356,13 +394,13 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     if (err.browserSaid) throw noKit(err);
     if (err.timedOut) {
       const spent = outOfTime();
-      throw pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent);
+      throw bothTold(pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent));
     }
     // An answer larger than the kit takes, as a very large page's snapshot.
-    if (err.tooLarge) throw pageFailed(`${url} is too large to read, so no kit was made.`, "is too large to read");
+    if (err.tooLarge) throw bothTold(pageFailed(`${url} is too large to read, so no kit was made.`, "is too large to read"));
     // The tab closed while the browser runs.
     if (err.closed) throw new Error(`The kit's connection to the browser tab closed while it read ${url}, so no kit was made. Try again.`);
-    throw err;
+    throw bothTold(err);
   } finally {
     await chrome.close({ hurry: unanswered });
   }
@@ -577,6 +615,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     else if (listing) notes.push(`${asked} is a store listing that names no website, ${onlyListing} Give the product's website for those.`);
     else if (failed) notes.push(`The home page, ${page}, could not be read: it ${failed}. ${asked} was read as given, and its name, header and colors can differ from the home page's.`);
     else if (page !== asked) notes.push(`${asked} is not the home page, so ${page} was read instead: the home page carries the brand's own header and colors.`);
+    if (read && read.inPlace) notes.push(`${read.inPlace.url} ${read.inPlace.said}, so ${read.inPlace.read} was read in its place.`);
     const found = read ? read.found : { brand: { fonts: {} }, icons: [], images: [], manifest: "", links: [] };
     if (read && !read.logos.length) notes.push("No logo was found on the page itself.");
     if (read && read.wordsUnread) {

@@ -2206,9 +2206,13 @@ test("a deeper address whose home page fails is read as given and says so, and i
 // whatever its name; a page on port 80, as a site on the web is, from the
 // port that web (a port of this machine) says. Through it the browser says
 // only that a page came through a proxy, so the kit's own lookup says where
-// the page is. hosts lists the hosts it was asked for. A host in drop gets
-// its connection closed with no answer, as one that cannot be opened.
-async function proxyOf(t, web = 80, drop = []) {
+// the page is. hosts lists the hosts it was asked for, and the host and
+// port of each tunnel it was asked for, as an https address asks one. A host
+// in drop gets its connection closed with no answer, as one that cannot be
+// opened, and a host and port in it, as closed.test:443, its tunnel. A
+// tunnel to port 443 leads to this machine's port tls, a server over TLS,
+// when one is given, and else is refused.
+async function proxyOf(t, web = 80, drop = [], tls = 0) {
   const hosts = [];
   const proxy = await serve((req, res) => {
     const url = new URL(req.url);
@@ -2220,6 +2224,22 @@ async function proxyOf(t, web = 80, drop = []) {
     });
     upstream.on("error", () => res.writeHead(502).end());
     req.pipe(upstream);
+  });
+  // A tunnel's socket is the test's own once it is asked for, its errors
+  // too: the browser can reset one it has given up, as a refused tunnel.
+  proxy.server.on("connect", (req, socket, head) => {
+    socket.on("error", () => {});
+    hosts.push(req.url);
+    if (drop.includes(req.url)) return socket.destroy();
+    if (!tls || !String(req.url).endsWith(":443")) return socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+    const upstream = require("node:net").connect(tls, "127.0.0.1", () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", () => socket.destroy());
+    socket.on("close", () => upstream.destroy());
   });
   t.after(() => proxy.server.close());
   return Object.assign(proxy, { hosts });
@@ -2233,7 +2253,9 @@ test("a store listing whose website fails keeps what the listing gave and says s
   // The website by a name of its own on port 80, which the lookup below
   // puts on a public address, as a listing's website is, reached through a
   // proxy: one on another port, on this machine or on a private network is
-  // not opened. The proxy closes closed.test's connection unanswered.
+  // not opened. The proxy closes closed.test's connection unanswered, and
+  // refuses a tunnel to it, so its https address, tried in its place, is
+  // not opened either.
   const named = "http://site.test";
   const closedNamed = "http://closed.test";
   const png = Buffer.alloc(33);
@@ -2267,7 +2289,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   const blank = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`${brandPage("rgb(255,0,0)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`);
   const cases = [
     ["a 403", answers, `${named}/app`, "answered 403"],
-    ["a site that cannot be opened", answers, `${closedNamed}/`, "could not be opened (net::ERR_EMPTY_RESPONSE)"],
+    ["a site that cannot be opened", answers, `${closedNamed}/`, "could not be opened (net::ERR_EMPTY_RESPONSE), and https://closed.test/, tried in its place, could not be opened (net::ERR_TUNNEL_CONNECTION_FAILED)"],
     ["a bot check", bot, `${named}/`, `answered with a bot check ("Human Verification")`],
     ["a blank page", blank, `${named}/`, "moved on to a blank page"],
     ["another port", bot, `${site.origin.replace("127.0.0.1", "site.test")}/`, `is on port ${new URL(site.origin).port}, not 80 or 443`],
@@ -2637,6 +2659,77 @@ test("an http address given on a name the browser takes only over https, as ever
   assert.equal(kit.url, `https://myapp.dev:${port}/`);
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.ok(asked.includes(`myapp.dev:${port}/`), asked.join(" "));
+});
+
+test("an http address on port 80 that gives no answer or no connection, as a site that serves only https, is read over https on port 443 in its place, held to the rule for an address the run was not given, and the kit's notes say so", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
+  const https = require("node:https");
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The site over TLS, as a site that serves only https, reached through
+  // the proxy, which closes every http connection to these names with no
+  // answer, as nothing answers on their port 80, and the tunnel to
+  // closed.test too. The browser takes the certificate as a machine that
+  // trusts it would, and through the proxy says nothing of where a page
+  // came from, so the kit's own lookup says where each name is.
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=brand.test", "-addext", "subjectAltName=DNS:brand.test,DNS:www.brand.test,DNS:closed.test,DNS:intranet.test"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const asked = [];
+  const server = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => {
+    asked.push(`${req.headers.host}${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const proxy = await proxyOf(t, 9, ["brand.test", "www.brand.test", "closed.test", "closed.test:443", "intranet.test"], server.address().port);
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors"]);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
+  const { kit } = await makeKit("http://brand.test/", { dir: path.join(parent, "kit"), stores: false });
+  assert.equal(kit.url, "https://brand.test/");
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.deepEqual(kit.notes, ["http://brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), so https://brand.test/ was read in its place."]);
+  assert.ok(asked.includes("brand.test/"), asked.join(" "));
+  // So is a page the kit chose, as the home page of a deeper address.
+  const deeper = await makeKit("http://www.brand.test/blog/post", { dir: path.join(parent, "deeper"), stores: false });
+  assert.equal(deeper.kit.url, "https://www.brand.test/");
+  assert.deepEqual(deeper.kit.notes, ["http://www.brand.test/blog/post is not the home page, so http://www.brand.test/ was read instead: the home page carries the brand's own header and colors.", "http://www.brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), so https://www.brand.test/ was read in its place."]);
+  // Where https fails as well, the last line names both.
+  const dir = path.join(parent, "earlier");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit("http://closed.test/", { dir, stores: false }), (err) => err.message === "http://closed.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and https://closed.test/, tried in its place, could not be opened (net::ERR_EMPTY_RESPONSE), so no kit was made." && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  // A name on a private network is read only as given: its https address,
+  // which the run was not given, is not tried, nor asked of the proxy.
+  await assert.rejects(makeKit("http://intranet.test/", { dir, stores: false }), (err) => err.message === "Could not open http://intranet.test/: net::ERR_EMPTY_RESPONSE" && err.earlierKit === dir);
+  assert.ok(!proxy.hosts.includes("intranet.test:443"), proxy.hosts.join(" "));
+  // Nor is an address on another port than 80, as Chrome's own move to
+  // https never was.
+  await assert.rejects(makeKit("http://brand.test:8080/", { dir, stores: false }), (err) => err.message === "Could not open http://brand.test:8080/: net::ERR_EMPTY_RESPONSE" && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+});
+
+// A page that gives no answer in its time, or to which the browser makes no
+// connection, is told as one that gave none (silent), which the kit reads
+// over https in its place (see the test above); one whose server answered,
+// or that failed in another way, is not.
+test("a page that gives no answer in its time, or to which the browser makes no connection, is told as one that gave none", async () => {
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const tab = (answered, status = 0) => ({ answer: {}, refused: [], on() {}, send: async (method) => (method === "Page.navigate" ? answered(status) : {}) });
+  const late = () => {
+    throw Object.assign(new Error("Page.navigate timed out"), { timedOut: true });
+  };
+  await assert.rejects(navigate(tab(late), "http://acme.test/"), (err) => err.silent === "did not answer in 30 s" && err.message === "http://acme.test/ did not answer in 30 s, so no kit was made. The site may be down or slow: try again later.");
+  for (const errorText of ["net::ERR_CONNECTION_REFUSED", "net::ERR_CONNECTION_RESET", "net::ERR_CONNECTION_CLOSED", "net::ERR_CONNECTION_ABORTED", "net::ERR_CONNECTION_FAILED", "net::ERR_CONNECTION_TIMED_OUT", "net::ERR_TIMED_OUT", "net::ERR_EMPTY_RESPONSE"]) {
+    await assert.rejects(navigate(tab(() => ({ errorText })), "http://acme.test/"), (err) => err.silent === `could not be opened (${errorText})` && err.message === `Could not open http://acme.test/: ${errorText}`, errorText);
+  }
+  for (const errorText of ["net::ERR_NAME_NOT_RESOLVED", "net::ERR_CERT_AUTHORITY_INVALID", "net::ERR_ADDRESS_UNREACHABLE"]) {
+    await assert.rejects(navigate(tab(() => ({ errorText })), "http://acme.test/"), (err) => !err.silent && err.message === `Could not open http://acme.test/: ${errorText}`, errorText);
+  }
+  // Out of the run's time, it is told as that, which more time helps.
+  setTimeLimit(1);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await assert.rejects(navigate(tab(late), "http://acme.test/"), (err) => !err.silent && err.outOfTime && err.message.startsWith("http://acme.test/ did not answer before the run's time ran out"));
 });
 
 test("a page's speculation rules, a prefetch and a prerender of another program's address and a move there, take the browser nowhere the run does not open, and that program is asked nothing", { skip: noBrowser }, async (t) => {

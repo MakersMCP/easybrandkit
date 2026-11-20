@@ -1307,13 +1307,20 @@ function seenOf(cdp, at) {
   }
 }
 
+// What the browser says of a page to which it made no connection, or whose
+// server closed the connection without an answer.
+const NO_CONNECTION = new Set(["net::ERR_CONNECTION_REFUSED", "net::ERR_CONNECTION_RESET", "net::ERR_CONNECTION_CLOSED", "net::ERR_CONNECTION_ABORTED", "net::ERR_CONNECTION_FAILED", "net::ERR_CONNECTION_TIMED_OUT", "net::ERR_TIMED_OUT", "net::ERR_EMPTY_RESPONSE"]);
+
 // Opens the address and waits for its load event, at most 30 s: a page that
 // never finishes loading (a stuck tracking script) is read as it stands.
 // Returns the address the tab ended on, after any redirects; cdp.answer says
 // what the server answered. An error status with no page of its own makes
 // Chrome give a net:: code, which says less than the status, so that is left
 // to cdp.answer too. Only a web page is opened: a link a site gives can name a
-// file on this machine (file://localhost/...), which Chrome would show.
+// file on this machine (file://localhost/...), which Chrome would show. A
+// page that gave no answer in its time, while the run has time left, or to
+// which the browser made no connection, fails with silent, what it did in
+// words that can follow its address (see kit.js readPage).
 async function navigate(cdp, url) {
   let web = false;
   try {
@@ -1342,7 +1349,8 @@ async function navigate(cdp, url) {
   } catch (err) {
     if (!err.timedOut) throw err;
     if (outOfTime()) throw pageFailed(`${url} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`, "did not answer", true);
-    throw pageFailed(`${url} did not answer in ${Math.round(limit / 1_000)} s, so no kit was made. The site may be down or slow: try again later.`, "did not answer");
+    const said = `did not answer in ${Math.round(limit / 1_000)} s`;
+    throw Object.assign(pageFailed(`${url} ${said}, so no kit was made. The site may be down or slow: try again later.`, "did not answer"), { silent: said });
   }
   // A browser that takes signed exchanges, told by the page's own document,
   // which it was not let ask for (see holdDocuments).
@@ -1363,7 +1371,8 @@ async function navigate(cdp, url) {
     // after the browser's answer.
     for (let waited = 0; errorText === "net::ERR_ABORTED" && !cdp.answer.leftTo && waited < 1_000; waited += 50) await sleep(50);
     if (cdp.answer.leftTo) throw pageFailed(`${url} led to ${cdp.answer.leftTo}, which is not a web address, so no kit was made.`, `led to ${cdp.answer.leftTo}, which is not a web address`);
-    throw pageFailed(`Could not open ${url}: ${errorText}`, `could not be opened (${errorText})`);
+    const failed = pageFailed(`Could not open ${url}: ${errorText}`, `could not be opened (${errorText})`);
+    throw NO_CONNECTION.has(errorText) && !cdp.answer.status ? Object.assign(failed, { silent: failed.pageFailed }) : failed;
   }
   // The timer goes once the page has loaded, so it does not keep the
   // process up after the kit is done.
