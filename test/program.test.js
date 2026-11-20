@@ -13,7 +13,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { wrongWith, lookOnPath, noexecMount, firstLine, browserPlace, ownSandbox } = require("../skills/easybrandkit/scripts/lib/program");
 const { storeAnswers } = require("./store-answers");
-const { partedTemp } = require("./parted-temp");
+const { partedTemp } = require("./temp-skip");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const linux = process.platform === "linux";
@@ -189,6 +189,9 @@ test("a program for another machine, or one whose loader or library is missing, 
     return at(name);
   };
   const said = (file, what) => `${path.basename(file)} did not start: CHROME_PATH is ${file}, which ended before it answered: ${what}. ${SET}`;
+  // A printed line is quoted cut to 200 characters, as the kit cuts it,
+  // which a long temp folder's path in it can pass.
+  const cut = (line) => (line.length > 200 ? `${line.slice(0, 200)}...` : line);
   // An ARM program on this machine, which the system hands to /bin/sh.
   const arm = Buffer.from(real);
   arm.writeUInt16LE(arm.readUInt16LE(0x12) === 0xb7 ? 0x3e : 0xb7, 0x12);
@@ -202,7 +205,7 @@ test("a program for another machine, or one whose loader or library is missing, 
   const library = swap("libc.so.6", "libq.so.6");
   if (library) {
     const file = put("nolibrary", library);
-    stoppedBeforeAnyWork(run(parent, { CHROME_PATH: file }), said(file, `it printed "${file}: error while loading shared libraries: libq.so.6: cannot open shared object file: No such file or directory" and exited with 127`));
+    stoppedBeforeAnyWork(run(parent, { CHROME_PATH: file }), said(file, `it printed "${cut(`${file}: error while loading shared libraries: libq.so.6: cannot open shared object file: No such file or directory`)}" and exited with 127`));
   }
 });
 

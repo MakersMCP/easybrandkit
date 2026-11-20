@@ -15,7 +15,7 @@ const { once } = require("node:events");
 const test = require("node:test");
 const { startRun, discardRun, discardRuns, saveRun, toldPlainly, SaveError, STALE, LOCK, LOCK_STALE } = require("../skills/easybrandkit/scripts/lib/run");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
-const { partedTemp } = require("./parted-temp");
+const { partedTemp } = require("./temp-skip");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 

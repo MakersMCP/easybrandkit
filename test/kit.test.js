@@ -27,7 +27,7 @@ const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 const { storeAnswers } = require("./store-answers");
-const { partedTemp } = require("./parted-temp");
+const { partedTemp, roomlessTemp } = require("./temp-skip");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -36,7 +36,7 @@ const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit
 // up.
 test.beforeEach(() => setTimeLimit(120_000));
 const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
-const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp;
+const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp || roomlessTemp;
 
 // A value written into a shell script as one word, whatever it holds, as a
 // temp folder's path with a space, a quote or a $ in it: in single quotes,
@@ -4652,6 +4652,9 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   const net = require("node:net");
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The test's own sockets, a bus and a display, are made in its folder,
+  // whose path has to leave them the 107 bytes a socket's path takes.
+  if (Buffer.byteLength(path.join(parent, "runtime", "wayland-0")) > 107) return t.skip(`the path of the test's folder, ${parent}, is too long for the sockets it makes there`);
   // A bus of this process's that a connection would reach, as a desktop's
   // session bus is, a Wayland display in a runtime folder of the test's own,
   // as a desktop has one in XDG_RUNTIME_DIR, and an X display's name, which
