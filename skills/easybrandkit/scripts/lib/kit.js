@@ -377,11 +377,13 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], refusedMore: Boolean(cdp.refusedMore), sandboxed: Boolean(chrome.sandboxed), inPlace: inPlace && { ...inPlace, read: url } };
   } catch (err) {
     // A page read in the place of the address asked for that fails is told
-    // with what that address did.
-    const bothTold = (failed) => {
+    // with what that address did. A tab that stopped answering is told as
+    // the tab's, in its own line's words and with its advice.
+    const bothTold = (failed, { tab = false } = {}) => {
       if (!inPlace || !failed.pageFailed) return failed;
-      const what = `${inPlace.said}, and ${url}, tried in its place, ${failed.pageFailed}`;
-      return pageFailed(`${inPlace.url} ${what}, so no kit was made.${failed.outOfTime ? " Try again, or give it more time with --timeout." : ""}`, what, failed.outOfTime);
+      const what = tab ? `${inPlace.said}, and the browser tab stopped answering while it read ${url}, tried in its place` : `${inPlace.said}, and ${url}, tried in its place, ${failed.pageFailed}`;
+      const advice = failed.outOfTime ? " Try again, or give it more time with --timeout." : tab ? " Try again." : "";
+      return pageFailed(`${inPlace.url} ${what}, so no kit was made.${advice}`, what, failed.outOfTime);
     };
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
@@ -394,7 +396,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     if (err.browserSaid) throw noKit(err);
     if (err.timedOut) {
       const spent = outOfTime();
-      throw bothTold(pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent));
+      throw bothTold(pageFailed(`The browser tab stopped answering while it read ${url}, so no kit was made. ${spent ? "Try again, or give it more time with --timeout." : "Try again."}`, "stopped answering", spent), { tab: true });
     }
     // An answer larger than the kit takes, as a very large page's snapshot.
     if (err.tooLarge) throw bothTold(pageFailed(`${url} is too large to read, so no kit was made.`, "is too large to read"));

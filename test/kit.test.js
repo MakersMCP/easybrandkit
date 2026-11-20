@@ -2744,6 +2744,41 @@ test("an http address on port 80 that answers with a redirect to an address that
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("an https address read in the place of an http one that fails is told with both: one that runs out of the run's time with the advice to give it more, and a tab that stops answering as the tab's, with its own advice", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
+  const https = require("node:https");
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // Both sites serve only https, through the proxy, which closes their http
+  // connections with no answer; slow.test never answers over https either.
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=brand.test", "-addext", "subjectAltName=DNS:brand.test,DNS:slow.test"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const held = [];
+  const server = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => {
+    if (req.headers.host === "slow.test") return held.push(res);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => {
+    for (const res of held) res.destroy();
+    server.close();
+  });
+  const proxy = await proxyOf(t, 9, ["brand.test", "slow.test"], server.address().port);
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors"]);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // The https address takes what the run has left, and that runs out.
+  await assert.rejects(makeKit("http://slow.test/", { dir, stores: false, timeLimit: 15_000 }), (err) => err.message === "http://slow.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and https://slow.test/, tried in its place, did not answer, so no kit was made. Try again, or give it more time with --timeout." && err.earlierKit === dir);
+  assert.ok(held.length >= 1, "the https address was asked for");
+  assert.deepEqual(filesOf(dir), before);
+  // The tab stops answering once the https address is read.
+  const stalledTab = withStalledTab(t, "Page.getLayoutMetrics");
+  await assert.rejects(stalledTab("http://brand.test/", { dir, stores: false }), (err) => err.message === "http://brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and the browser tab stopped answering while it read https://brand.test/, tried in its place, so no kit was made. Try again." && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+});
+
 // A page that gives no answer in its time, or to which the browser makes no
 // connection, is told as one that gave none (silent), which the kit reads
 // over https in its place (see the tests above); one that answered with a
