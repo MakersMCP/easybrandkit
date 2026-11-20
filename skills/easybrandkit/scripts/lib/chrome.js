@@ -365,10 +365,13 @@ async function launch({ width, height }, { judge = null } = {}) {
   // A download that starts while the browser takes no refusal (see below)
   // goes into the throwaway profile and is removed with it, not into the
   // Downloads folder of the user the browser runs as. The browser also
-  // makes no connection ahead of a request (network_prediction_options 2,
-  // never): with its default, it connected to the address of a page's frame
-  // or of a page's move before the kit had judged that address, and the
-  // address refused there still got the connection, with no request in it.
+  // makes no connection ahead of a request and preloads no page
+  // (network_prediction_options 2, never): with its default, it connected to
+  // the address of a page's frame or of a page's move before the kit had
+  // judged that address, and the address refused there still got the
+  // connection, with no request in it, and a page's speculation rules had it
+  // fetch an address ahead of the page's move there. Each tab the kit reads
+  // pages in asks it whether it took that (see noPreloading).
   const preferences = path.join(profile, "Default", "Preferences");
   try {
     fs.mkdirSync(path.join(profile, "Default"));
@@ -989,6 +992,40 @@ async function holdDocuments(pipe, tabs, judge, ms) {
   await pipe.send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] }, ms);
 }
 
+// The browser preloads nothing, as its profile asks (see launch): asked in
+// each tab the kit reads pages in, before it opens one there.
+// Preload.enable has it tell the state of its preloading
+// (Preload.preloadEnabledStateUpdated), whose disabledByPreference is the
+// profile's setting as the browser holds it: a Chrome policy
+// (NetworkPredictionOptions) holds it in the profile's place, and a program
+// that starts the browser with a profile of its own gives it that one's. A
+// browser that says it preloads, or cannot say, as one that refuses to be
+// asked or tells no state, is not used: a page's speculation rules would
+// have it prefetch or prerender an address and serve the page's move there
+// from that copy, which is no document it holds for the rule (see
+// holdDocuments).
+async function noPreloading(cdp) {
+  let state = null;
+  cdp.on("Preload.preloadEnabledStateUpdated", (said) => (state = state || said));
+  const wait = browserWait();
+  const notUsed = (what, helps = "Point CHROME_PATH at another browser, such as Google Chrome.") => new Error(`The browser ${what}, so no kit was made: a page could have it open an address easybrandkit does not open before easybrandkit had judged that address. ${helps}`);
+  try {
+    await cdp.send("Preload.enable", {}, wait);
+  } catch (err) {
+    if (err.timedOut) throw noAnswer("The browser did not say whether it preloads pages", wait);
+    if (err.closed) throw err;
+    throw notUsed(`cannot say whether it preloads pages (${String(err.message || err).replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, 200)})`);
+  }
+  // Told before the answer; a moment more for a browser that tells it
+  // after.
+  for (let waited = 0; !state && waited < 1_000; waited += 50) await sleep(50);
+  await cdp.send("Preload.disable", {}, 5_000).catch(() => {});
+  if (!state) throw notUsed("does not say whether it preloads pages");
+  if (state.disabledByPreference !== true) {
+    throw notUsed("preloads pages though its profile asks it not to, as a Chrome policy (NetworkPredictionOptions) or a program that starts it with a profile of its own makes it do", "Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.");
+  }
+}
+
 // A document the run's rule refused, kept in the tab's refused list (see
 // holdDocuments): a move of the tab's own page always, to be told as where
 // the page led, the list holding 100 at most; a frame's or a window's once
@@ -1041,6 +1078,7 @@ async function openPage(chrome, { width, height }) {
   // holdDocuments), with the tab's page, by its id, the id of its page.
   cdp.refused = [];
   if (chrome.tabs) chrome.tabs.set(targetId, cdp);
+  await noPreloading(cdp);
   await cdp.send("Page.enable");
   await guard(cdp);
   cdp.answer = await watchAnswer(cdp);

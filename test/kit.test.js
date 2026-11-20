@@ -868,6 +868,8 @@ fs.createReadStream(null, { fd: 3 }).on("data", (chunk) => {
     asked[method] = (asked[method] || 0) + 1;
     const now = rule[Math.min(asked[method], rule.length) - 1];
     if (now === "never") continue;
+    // It preloads no page, as a browser started with the kit's profile does.
+    if (method === "Preload.enable" && now !== "error") out.write(JSON.stringify({ method: "Preload.preloadEnabledStateUpdated", sessionId, params: { disabledByPreference: true } }) + "\\0");
     const answer = () => out.write(JSON.stringify(now === "error" ? { id, error: { code: -32000, message: "Not allowed" } } : { id, result: results[method] || {} }) + "\\0", () => now === "exit" && process.exit(0));
     if (typeof now === "number" && now > 0) setTimeout(answer, now);
     else answer();
@@ -2631,6 +2633,49 @@ test("an http address given on a name the browser takes only over https, as ever
   assert.ok(asked.includes(`myapp.dev:${port}/`), asked.join(" "));
 });
 
+test("a page's speculation rules, a prefetch and a prerender of another program's address and a move there, take the browser nowhere the run does not open, and that program is asked nothing", { skip: noBrowser }, async (t) => {
+  const other = await counting(t);
+  const away = `http://127.0.0.1:${other.port}/x`;
+  const rules = JSON.stringify({ prefetch: [{ source: "list", urls: [away] }], prerender: [{ source: "list", urls: [away] }] });
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script type="speculationrules">${rules}</script><script>setTimeout(() => (location.href = ${JSON.stringify(away)}), 2000)</script></body>`)));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const given = `${site.origin}/`;
+  await assert.rejects(makeKit(given, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `${given} led to ${away}, which is on port ${other.port}, not 80 or 443, so no kit was made.`);
+  assert.deepEqual(other.asked, []);
+  assert.equal(other.connections, 0, "no connection reached the other program");
+});
+
+test("a browser that preloads pages though the kit's profile asks it not to, or that cannot say whether it does, is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const risk = "so no kit was made: a page could have it open an address easybrandkit does not open before easybrandkit had judged that address.";
+  // Started with a profile of its own, as a program that starts the browser
+  // can start it, where preloading is on as it is by default.
+  useRelay(t, parent, {}, [`--user-data-dir=${path.join(parent, "its-own")}`]);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === `The browser preloads pages though its profile asks it not to, as a Chrome policy (NetworkPredictionOptions) or a program that starts it with a profile of its own makes it do, ${risk} Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.` && err.earlierKit === dir);
+  // One that does not know the question.
+  process.env.STAND_IN_RELAY = JSON.stringify({ "Preload.enable": "rename" });
+  process.env.STAND_IN_ARGS = "[]";
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => /^The browser cannot say whether it preloads pages \(.*Preload\.enableUnknown.*\), /.test(err.message) && err.message.endsWith(`${risk} Point CHROME_PATH at another browser, such as Google Chrome.`) && err.earlierKit === dir);
+  assert.equal(asked, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the browser starts, and for an address a site leads to, in words that name it", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {
@@ -3171,9 +3216,11 @@ test("the refusal of downloads is said once, to the whole browser, before any ta
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   const calls = fs.readFileSync(log, "utf8").trim().split("\n");
   // Then the rule for the documents of the whole browser, and the page's
-  // tab and the card's.
-  assert.deepEqual(calls.slice(0, 4), ["Browser.getVersion", "Browser.setDownloadBehavior", "Fetch.enable", "Target.createTarget"]);
+  // tab, which asks whether the browser preloads pages before it opens one,
+  // and the card's.
+  assert.deepEqual(calls.slice(0, 6), ["Browser.getVersion", "Browser.setDownloadBehavior", "Fetch.enable", "Target.createTarget", "Target.attachToTarget", "Preload.enable session"]);
   assert.equal(calls.filter((call) => call.startsWith("Browser.setDownloadBehavior")).length, 1);
+  assert.equal(calls.filter((call) => call === "Preload.enable session").length, 1);
   assert.equal(calls.filter((call) => call === "Target.createTarget").length, 2);
   assert.equal(calls[calls.length - 1], "Browser.close");
 });
