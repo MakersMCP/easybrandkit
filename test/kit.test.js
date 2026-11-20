@@ -2705,6 +2705,33 @@ test("MAKERSMCP_REFUSE_ADDRESSES counts where the browser says it reached the ad
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("MAKERSMCP_REFUSE_ADDRESSES refuses a store listing given, and one a page links, whose store is at an address it names, in its words, and that store is asked nothing", { skip: noBrowser }, async (t) => {
+  const listing = "https://apps.apple.com/us/app/acme/id1234567890";
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)").replace("</footer>", `<a href="${listing}">App Store</a></footer>`)));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "17.253.144.0/24" });
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: /(^|\.)apple\.com$/.test(host) ? "17.253.144.10" : "93.184.216.34", family: 4 }]);
+  // The store would name the site as the listing's website.
+  const asked = storeAnswers(t, () => ({ body: JSON.stringify({ results: [{ trackName: "Acme", sellerUrl: `${site.origin}/` }] }) }));
+  const refused = "host itunes.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses";
+  // Given, the listing ends the run, and the earlier kit stays.
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit(listing, { dir, stores: false }), (err) => err.message === `${listing} could not be read: ${refused}.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  // Linked from the page, it is named in the kit's notes, which is made
+  // from the site.
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "site") });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  assert.ok(kit.notes.includes(`https://apps.apple.com/us/app/id1234567890 could not be read: ${refused}.`), kit.notes.join("\n"));
+  assert.deepEqual(asked, []);
+});
+
 test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any work, in words that name it; empty, it changes nothing", async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
