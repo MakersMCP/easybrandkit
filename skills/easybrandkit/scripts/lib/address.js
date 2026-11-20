@@ -266,8 +266,13 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     if (localName(host)) return ["127.0.0.1", "::1"];
     return (await lookup(host)).list;
   };
-  // On the scheme, host and port of the address given: its own pages.
-  const own = (url) => Boolean(given) && url.protocol === given.protocol && sameHost(url, given);
+  // On the scheme, host and port of the address given: its own pages; and
+  // https on the host and port of an http address given, the same program,
+  // which the browser asks over https by itself for a name that takes only
+  // https (HSTS), as every .dev and .app name, keeping the port. A move
+  // from https down to http there is not the address given, nor https on
+  // port 443 of a host given on port 80, which is another program.
+  const own = (url) => Boolean(given) && sameHost(url, given) && (url.protocol === given.protocol || (given.protocol === "http:" && url.protocol === "https:"));
   const parse = (raw) => {
     try {
       return new URL(String(raw));

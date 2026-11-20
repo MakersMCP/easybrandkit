@@ -76,11 +76,17 @@ test("an address the run was not given is opened on port 80 or 443 only, and the
   }
   // A local site given is the user's own on its own port and nowhere else,
   // this machine's names on that port counting as one host.
+  // https on the host and port of an http address given is the same
+  // program, which the browser asks over https by itself for a name that
+  // takes only https (HSTS); http on those of an https address given is not.
   const local = guardFor("http://localhost:3000/");
-  for (const raw of ["http://localhost:3000/assets/app.css", "http://127.0.0.1:3000/", "http://[::1]:3000/", "http://app.localhost:3000/x"]) assert.equal(await local.judge(raw), "", raw);
-  for (const [raw, why] of [["http://localhost:3001/", "is on port 3001, not 80 or 443"], ["https://localhost:3000/", "is on port 3000, not 80 or 443"], ["http://localhost/", "is not on the public internet"], ["http://10.0.0.5:3000/", "is on port 3000, not 80 or 443"], ["http://10.0.0.5/", "is not on the public internet"]]) {
+  for (const raw of ["http://localhost:3000/assets/app.css", "http://127.0.0.1:3000/", "http://[::1]:3000/", "http://app.localhost:3000/x", "https://localhost:3000/", "https://127.0.0.1:3000/x"]) assert.equal(await local.judge(raw), "", raw);
+  for (const [raw, why] of [["http://localhost:3001/", "is on port 3001, not 80 or 443"], ["https://localhost:3001/", "is on port 3001, not 80 or 443"], ["http://localhost/", "is not on the public internet"], ["https://localhost/", "is not on the public internet"], ["http://10.0.0.5:3000/", "is on port 3000, not 80 or 443"], ["http://10.0.0.5/", "is not on the public internet"]]) {
     assert.equal(await local.judge(raw), why, raw);
   }
+  assert.equal(await guardFor("https://localhost:3000/").judge("http://localhost:3000/"), "is on port 3000, not 80 or 443");
+  assert.equal(await guardFor("https://acme.com:8443/").judge("http://acme.com:8443/"), "is on port 8443, not 80 or 443");
+  assert.equal(await guardFor("http://acme.com:8443/").judge("https://acme.com:8443/x"), "");
   // 127.0.0.1 as a URL writes it mapped into IPv6 is this machine's too; its
   // other IPv6 forms are not names of this machine, and are judged.
   assert.equal(await local.judge("http://[::ffff:127.0.0.1]:3000/"), "");
@@ -164,6 +170,9 @@ test("an address the run was not given is opened only on the public internet, by
   // this machine is, and asks no lookup.
   assert.equal(await guardFor("http://intranet.acme.com:8080/").judge("http://intranet.acme.com:8080/x"), "");
   assert.equal(asked.filter((host) => host === "intranet.acme.com").length, 1);
+  // https on port 443 of a host given on port 80 is another program, held
+  // to the rule as any address the run was not given.
+  assert.equal(await guardFor("http://intranet.acme.com/").judge("https://intranet.acme.com/"), "is at 10.0.0.5, an address not on the public internet");
   // A name that gives no answer in 5 s is not opened.
   const started = Date.now();
   assert.equal(await guard.judge("https://slow.acme.com/"), "is on a host whose name could not be looked up");

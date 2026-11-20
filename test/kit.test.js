@@ -2597,6 +2597,36 @@ test("an http address given is asked for over http as it is written, a name unde
   assert.ok(asked.includes("app.example.com/"), asked.join(" "));
 });
 
+// openssl, which makes the certificate of a test site served over https.
+const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status === 0;
+
+test("an http address given on a name the browser takes only over https, as every .dev name, is read over https on its own port, as the address given", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
+  const https = require("node:https");
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // A site under development on a name of its own, served over TLS on a
+  // port of its own, as a local dev server with a certificate does.
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=myapp.dev", "-addext", "subjectAltName=DNS:myapp.dev"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const asked = [];
+  const server = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => {
+    asked.push(`${req.headers.host}${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = server.address().port;
+  // The browser takes the certificate as a machine that trusts it would.
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP myapp.dev 127.0.0.1", "--ignore-certificate-errors"]);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "127.0.0.1", family: 4 }]);
+  const given = `http://myapp.dev:${port}/`;
+  const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
+  assert.equal(kit.url, `https://myapp.dev:${port}/`);
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(asked.includes(`myapp.dev:${port}/`), asked.join(" "));
+});
+
 test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the browser starts, and for an address a site leads to, in words that name it", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {
