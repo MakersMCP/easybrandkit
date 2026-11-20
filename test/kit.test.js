@@ -2710,27 +2710,76 @@ test("an http address on port 80 that gives no answer or no connection, as a sit
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("an http address on port 80 that answers with a redirect to an address that gives no answer is not read over https in its place, and the last line names where it led", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
+  const https = require("node:https");
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // a.test answers on port 80 with a redirect to b.test, which takes the
+  // connection and closes it with no answer, through the proxy; a.test
+  // also serves a page over https, which is not the address given.
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=a.test", "-addext", "subjectAltName=DNS:a.test,DNS:b.test"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const asked = [];
+  const server = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => {
+    asked.push(`${req.headers.host}${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const web = await serve((req, res) => res.writeHead(302, { location: "http://b.test/" }).end());
+  t.after(() => web.server.close());
+  const proxy = await proxyOf(t, new URL(web.origin).port, ["b.test"], server.address().port);
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors"]);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit("http://a.test/", { dir, stores: false }), (err) => err.message === "http://a.test/ led to http://b.test/, which could not be opened (net::ERR_EMPTY_RESPONSE), so no kit was made." && err.earlierKit === dir);
+  // The browser's own requests to its maker's hosts come through the
+  // proxy's tunnel as well.
+  assert.deepEqual(asked.filter((one) => one.startsWith("a.test")), [], "no https address was read");
+  assert.ok(proxy.hosts.includes("b.test"), proxy.hosts.join(" "));
+  assert.ok(!proxy.hosts.includes("a.test:443"), proxy.hosts.join(" "));
+  assert.deepEqual(filesOf(dir), before);
+});
+
 // A page that gives no answer in its time, or to which the browser makes no
 // connection, is told as one that gave none (silent), which the kit reads
-// over https in its place (see the test above); one whose server answered,
-// or that failed in another way, is not.
-test("a page that gives no answer in its time, or to which the browser makes no connection, is told as one that gave none", async () => {
+// over https in its place (see the tests above); one that answered with a
+// redirect, as hop says, or that failed in another way, is not, and one
+// that led on to where it failed is told by where it led.
+test("a page that gives no answer in its time, or to which the browser makes no connection, is told as one that gave none, and one that answered with a redirect by where it led", async () => {
   const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
-  const tab = (answered, status = 0) => ({ answer: {}, refused: [], on() {}, send: async (method) => (method === "Page.navigate" ? answered(status) : {}) });
+  // A tab whose page, as it is opened, is answered with a redirect to hop
+  // when one is given, and then does what answered says.
+  const tab = (answered, hop = "") => {
+    const one = { answer: {}, refused: [], on() {}, send: async (method) => {
+      if (method !== "Page.navigate") return {};
+      if (hop) one.answer.hop = hop;
+      return answered();
+    } };
+    return one;
+  };
   const late = () => {
     throw Object.assign(new Error("Page.navigate timed out"), { timedOut: true });
   };
   await assert.rejects(navigate(tab(late), "http://acme.test/"), (err) => err.silent === "did not answer in 30 s" && err.message === "http://acme.test/ did not answer in 30 s, so no kit was made. The site may be down or slow: try again later.");
+  const hop = "http://shop.acme.test/";
+  await assert.rejects(navigate(tab(late, hop), "http://acme.test/"), (err) => !err.silent && err.pageFailed === `led to ${hop}, which did not answer` && err.message === `http://acme.test/ led to ${hop}, which did not answer in 30 s, so no kit was made. The site may be down or slow: try again later.`);
   for (const errorText of ["net::ERR_CONNECTION_REFUSED", "net::ERR_CONNECTION_RESET", "net::ERR_CONNECTION_CLOSED", "net::ERR_CONNECTION_ABORTED", "net::ERR_CONNECTION_FAILED", "net::ERR_CONNECTION_TIMED_OUT", "net::ERR_TIMED_OUT", "net::ERR_EMPTY_RESPONSE"]) {
     await assert.rejects(navigate(tab(() => ({ errorText })), "http://acme.test/"), (err) => err.silent === `could not be opened (${errorText})` && err.message === `Could not open http://acme.test/: ${errorText}`, errorText);
+    await assert.rejects(navigate(tab(() => ({ errorText }), hop), "http://acme.test/"), (err) => !err.silent && err.pageFailed === `led to ${hop}, which could not be opened (${errorText})` && err.message === `http://acme.test/ led to ${hop}, which could not be opened (${errorText}), so no kit was made.`, `${errorText} after a redirect`);
   }
   for (const errorText of ["net::ERR_NAME_NOT_RESOLVED", "net::ERR_CERT_AUTHORITY_INVALID", "net::ERR_ADDRESS_UNREACHABLE"]) {
     await assert.rejects(navigate(tab(() => ({ errorText })), "http://acme.test/"), (err) => !err.silent && err.message === `Could not open http://acme.test/: ${errorText}`, errorText);
+    await assert.rejects(navigate(tab(() => ({ errorText }), hop), "http://acme.test/"), (err) => !err.silent && err.message === `http://acme.test/ led to ${hop}, which could not be opened (${errorText}), so no kit was made.`, `${errorText} after a redirect`);
   }
   // Out of the run's time, it is told as that, which more time helps.
   setTimeLimit(1);
   await new Promise((resolve) => setTimeout(resolve, 5));
   await assert.rejects(navigate(tab(late), "http://acme.test/"), (err) => !err.silent && err.outOfTime && err.message.startsWith("http://acme.test/ did not answer before the run's time ran out"));
+  await assert.rejects(navigate(tab(late, hop), "http://acme.test/"), (err) => !err.silent && err.outOfTime && err.pageFailed === `led to ${hop}, which did not answer` && err.message === `http://acme.test/ led to ${hop}, which did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`);
 });
 
 test("a page's speculation rules, a prefetch and a prerender of another program's address and a move there, take the browser nowhere the run does not open, and that program is asked nothing", { skip: noBrowser }, async (t) => {

@@ -1261,21 +1261,27 @@ function triedNotes(tried = [], { sandboxed = false, standIns = STAND_INS } = {}
 // about:blank, as scripts that guard against DevTools make it do. Also where
 // the browser got the document: the address it connected to (ip) and the IP
 // address space Chrome gave that answer (space), which is Unknown when it
-// went through a proxy, whose address ip is then. Frames inside the page do
-// not count. The bodies of the responses are not wanted, so little of them
-// is kept.
+// went through a proxy, whose address ip is then. And hop, the address a
+// redirect led the document to, the last one, which the browser tells as
+// the next request of the same document, as the redirect's answer gets no
+// event of its own. Frames inside the page do not count. The bodies of the
+// responses are not wanted, so little of them is kept.
 async function watchAnswer(cdp) {
   const { frameTree } = await cdp.send("Page.getFrameTree");
   const main = frameTree.frame.id;
-  const answer = { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "" };
+  const answer = { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "", hop: "" };
   // The main frame's document request, and the space of each answer to it,
   // its redirects' first: each comes apart from the answer it belongs to,
   // before it or after it.
   let request = "";
   let spaces = [];
   let answered = "";
-  cdp.on("Network.requestWillBeSent", ({ requestId, type, frameId }) => {
-    if (type !== "Document" || frameId !== main || requestId === request) return;
+  cdp.on("Network.requestWillBeSent", ({ requestId, type, frameId, request: asked, redirectResponse }) => {
+    if (type !== "Document" || frameId !== main) return;
+    if (requestId === request) {
+      if (redirectResponse && asked) answer.hop = String(asked.url || "").slice(0, LONG_ADDRESS);
+      return;
+    }
     request = requestId;
     spaces = [];
   });
@@ -1330,7 +1336,9 @@ const NO_CONNECTION = new Set(["net::ERR_CONNECTION_REFUSED", "net::ERR_CONNECTI
 // file on this machine (file://localhost/...), which Chrome would show. A
 // page that gave no answer in its time, while the run has time left, or to
 // which the browser made no connection, fails with silent, what it did in
-// words that can follow its address (see kit.js readPage).
+// words that can follow its address (see kit.js readPage). One that
+// answered with a redirect did answer: where that led and failed is told by
+// its address (cdp.answer.hop), with no silent.
 async function navigate(cdp, url) {
   let web = false;
   try {
@@ -1343,7 +1351,7 @@ async function navigate(cdp, url) {
   if (cdp.page) await triedSoFar(cdp);
   cdp.page = url;
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
-  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "" });
+  Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "", hop: "" });
   // The documents the run's rule refuses from here on (see holdDocuments):
   // in the tab's page, a hop of this navigation, else a move of the page it
   // opened (see takeMove).
@@ -1358,9 +1366,12 @@ async function navigate(cdp, url) {
     ({ errorText } = await cdp.send("Page.navigate", { url }, limit));
   } catch (err) {
     if (!err.timedOut) throw err;
-    if (outOfTime()) throw pageFailed(`${url} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`, "did not answer", true);
+    // Where a redirect led, which did not answer: the address asked for did.
+    const led = cdp.answer.hop ? `led to ${cdp.answer.hop}, which ` : "";
+    if (outOfTime()) throw pageFailed(`${url} ${led}did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`, `${led}did not answer`, true);
     const said = `did not answer in ${Math.round(limit / 1_000)} s`;
-    throw Object.assign(pageFailed(`${url} ${said}, so no kit was made. The site may be down or slow: try again later.`, "did not answer"), { silent: said });
+    const failed = pageFailed(`${url} ${led}${said}, so no kit was made. The site may be down or slow: try again later.`, `${led}did not answer`);
+    throw led ? failed : Object.assign(failed, { silent: said });
   }
   // A browser that takes signed exchanges, told by the page's own document,
   // which it was not let ask for (see holdDocuments).
@@ -1381,8 +1392,11 @@ async function navigate(cdp, url) {
     // after the browser's answer.
     for (let waited = 0; errorText === "net::ERR_ABORTED" && !cdp.answer.leftTo && waited < 1_000; waited += 50) await sleep(50);
     if (cdp.answer.leftTo) throw pageFailed(`${url} led to ${cdp.answer.leftTo}, which is not a web address, so no kit was made.`, `led to ${cdp.answer.leftTo}, which is not a web address`);
+    // A redirect's address that could not be opened, told by that address:
+    // the address asked for answered.
+    if (cdp.answer.hop) throw pageFailed(`${url} led to ${cdp.answer.hop}, which could not be opened (${errorText}), so no kit was made.`, `led to ${cdp.answer.hop}, which could not be opened (${errorText})`);
     const failed = pageFailed(`Could not open ${url}: ${errorText}`, `could not be opened (${errorText})`);
-    throw NO_CONNECTION.has(errorText) && !cdp.answer.status ? Object.assign(failed, { silent: failed.pageFailed }) : failed;
+    throw NO_CONNECTION.has(errorText) ? Object.assign(failed, { silent: failed.pageFailed }) : failed;
   }
   // The timer goes once the page has loaded, so it does not keep the
   // process up after the kit is done.
