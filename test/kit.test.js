@@ -2650,6 +2650,109 @@ test("an http address given is asked for over http as it is written, a name unde
 // openssl, which makes the certificate of a test site served over https.
 const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status === 0;
 
+// A name as a DNS message writes it: each label after its length, and a
+// zero byte last.
+const dnsName = (name) => Buffer.concat([...name.split(".").map((label) => Buffer.concat([Buffer.from([label.length]), Buffer.from(label)])), Buffer.from([0])]);
+
+// A DNS server of the test's own, over https on this machine, as the
+// browser asks one in its secure mode (DNS over HTTPS): records gives each
+// name's records as [type, data] pairs, a name it has none for is not
+// found, and asked keeps the name and type of each query.
+async function dnsOverHttps(t, dir, records) {
+  const https = require("node:https");
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "dns-key.pem", "-out", "dns-cert.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"], { cwd: dir, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const asked = [];
+  const answer = (query) => {
+    let at = 12;
+    const labels = [];
+    while (at < query.length && query[at]) {
+      labels.push(query.subarray(at + 1, at + 1 + query[at]).toString());
+      at += query[at] + 1;
+    }
+    const type = query.readUInt16BE(at + 1);
+    const name = labels.join(".").toLowerCase();
+    asked.push(`${name} ${type}`);
+    const own = Object.hasOwn(records, name) ? records[name] : null;
+    const found = (own || []).filter(([kind]) => kind === type).map(([kind, data]) => {
+      const head = Buffer.alloc(12);
+      head.writeUInt16BE(0xc00c, 0);
+      head.writeUInt16BE(kind, 2);
+      head.writeUInt16BE(1, 4);
+      head.writeUInt32BE(60, 6);
+      head.writeUInt16BE(data.length, 10);
+      return Buffer.concat([head, data]);
+    });
+    const head = Buffer.alloc(12);
+    head.writeUInt16BE(query.readUInt16BE(0), 0);
+    head.writeUInt16BE(own ? 0x8180 : 0x8183, 2);
+    head.writeUInt16BE(1, 4);
+    head.writeUInt16BE(found.length, 6);
+    return Buffer.concat([head, query.subarray(12, at + 5), ...found]);
+  };
+  const server = https.createServer({ key: fs.readFileSync(path.join(dir, "dns-key.pem")), cert: fs.readFileSync(path.join(dir, "dns-cert.pem")) }, (req, res) => {
+    const reply = (query) => {
+      const body = answer(query);
+      res.writeHead(200, { "content-type": "application/dns-message", "content-length": body.length }).end(body);
+    };
+    const query = new URL(req.url, "https://127.0.0.1").searchParams.get("dns");
+    if (query) return reply(Buffer.from(query, "base64url"));
+    const parts = [];
+    req.on("data", (part) => parts.push(part));
+    req.on("end", () => reply(Buffer.concat(parts)));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  return { origin: `https://127.0.0.1:${server.address().port}`, asked };
+}
+
+test("an http address given is asked for over http also when its name's DNS gives an HTTPS record, as every name behind Cloudflare does", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test DNS server's certificate") }, async (t) => {
+  const net = require("node:net");
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The site, on a port of its own: a request over http is served, and a
+  // TLS hello, which comes from a browser that has moved the address to
+  // https, is kept and its connection closed.
+  const asked = [];
+  const plain = http.createServer((req, res) => {
+    asked.push(`http ${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const site = net.createServer((socket) => {
+    socket.on("error", () => {});
+    socket.once("data", (first) => {
+      if (first[0] === 0x16) {
+        asked.push("tls");
+        return socket.destroy();
+      }
+      socket.pause();
+      socket.unshift(first);
+      plain.emit("connection", socket);
+      socket.resume();
+    });
+  });
+  site.listen(0, "127.0.0.1");
+  await once(site, "listening");
+  t.after(() => site.close());
+  const port = site.address().port;
+  // The name's address, and an HTTPS record for it, at the name and at the
+  // name of its port (_<port>._https), as a browser that uses them asks.
+  const record = Buffer.concat([Buffer.from([0, 1]), dnsName("svcb.test")]);
+  const dns = await dnsOverHttps(t, parent, { "svcb.test": [[1, Buffer.from([127, 0, 0, 1])], [65, record]], [`_${port}._https.svcb.test`]: [[65, record]] });
+  // The browser asks that server alone, and takes its certificate.
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
+  process.env.STAND_IN_LOCAL_STATE = JSON.stringify({ dns_over_https: { mode: "secure", templates: `${dns.origin}/dns-query{?dns}` } });
+  const given = `http://svcb.test:${port}/`;
+  const run = await makeKit(given, { dir: path.join(parent, "kit"), stores: false }).then((made) => ({ made }), (err) => ({ err }));
+  if (!dns.asked.includes("svcb.test 1")) return t.skip("the browser asks no DNS server of the test's own, so what it does with a name's HTTPS record is not seen");
+  assert.ok(run.made, run.err && run.err.message);
+  assert.equal(run.made.kit.url, given);
+  assert.deepEqual(run.made.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(asked.includes("http /"), asked.join(" "));
+  assert.ok(!asked.includes("tls"), "the browser asked the site nothing over https");
+});
+
 test("an http address given on a name the browser takes only over https, as every .dev name, is read over https on its own port, as the address given", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
   const https = require("node:https");
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
@@ -3459,6 +3562,9 @@ test("a page that tries to save files for the whole run leaves nothing in the us
 // are passed on whole, one by one, so that an answer of the relay's comes
 // between two of them.
 // STAND_IN_ARGS, a JSON list, is added to the browser's arguments.
+// STAND_IN_LOCAL_STATE, when given, is written into the profile as the
+// browser's Local State before the browser starts, as a program that starts
+// it with settings of its own can do.
 // STAND_IN_LOG names a file each call's method is added to, with " session"
 // after one sent to a tab.
 const RELAY = `"use strict";
@@ -3468,6 +3574,8 @@ const rules = JSON.parse(process.env.STAND_IN_RELAY || "{}");
 const log = process.env.STAND_IN_LOG;
 const counts = {};
 const args = [...process.argv.slice(2), ...JSON.parse(process.env.STAND_IN_ARGS || "[]")];
+const profile = (args.find((arg) => arg.startsWith("--user-data-dir=")) || "").slice("--user-data-dir=".length);
+if (process.env.STAND_IN_LOCAL_STATE && profile) fs.writeFileSync(require("path").join(profile, "Local State"), process.env.STAND_IN_LOCAL_STATE);
 const browser = spawn(process.env.STAND_IN_BROWSER, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
 browser.on("exit", (code) => process.exit(code === null ? 1 : code));
 const back = fs.createWriteStream(null, { fd: 4 });
@@ -3518,7 +3626,7 @@ function useRelay(t, dir, rules = {}, args = []) {
   const chrome = path.join(dir, "chrome");
   fs.writeFileSync(relay, RELAY);
   fs.writeFileSync(chrome, `#!/bin/sh\nexec ${sh(process.execPath)} ${sh(relay)} "$@"\n`, { mode: 0o755 });
-  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG"];
+  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG", "STAND_IN_LOCAL_STATE"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => {
     for (const [name, value] of Object.entries(env)) {
@@ -3528,6 +3636,7 @@ function useRelay(t, dir, rules = {}, args = []) {
   });
   Object.assign(process.env, { CHROME_PATH: chrome, STAND_IN_BROWSER: real, STAND_IN_RELAY: JSON.stringify(rules), STAND_IN_ARGS: JSON.stringify(args) });
   delete process.env.STAND_IN_LOG;
+  delete process.env.STAND_IN_LOCAL_STATE;
 }
 
 test("the refusal of downloads is said once, to the whole browser, before any tab is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
