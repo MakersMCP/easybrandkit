@@ -170,6 +170,41 @@ test("an address the run was not given is opened only on the public internet, by
   assert.ok(Date.now() - started >= 4_900, `${Date.now() - started} ms`);
 });
 
+test("an address written with http: or https: that the URL parser here cannot read is not opened, as the browser can read it and go where its host leads", async (t) => {
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const why = "is not an address easybrandkit can read";
+  // Labels of broken punycode, which the browser keeps as they are written,
+  // under localhost, which is this machine to it, and under names whose DNS
+  // gives any address; and an IPv6 address with a wide digit. Node 22.22 and
+  // 22.23 read some of them differently, so each counts where this Node
+  // cannot read it, xn--a on every version.
+  const unreadable = [
+    "http://xn--a.localhost:9222/json/list", "http://XN--A.localhost:9222/", "http://xn--a-.localhost:9222/", "http://a.xn--.localhost:9222/", "http://xn---.localhost:9222/",
+    "https://xn--zz.localhost/", "http://xn--a.127.0.0.1.nip.io:9222/", "http://xn--a.169.254.169.254.nip.io/latest/meta-data/", "http://[::１]/",
+    " HTTP://xn--a.localhost/", "ht\ttp://xn--a.localhost/", "http:xn--a.localhost:9222/",
+  ].filter((raw) => {
+    try {
+      new URL(raw);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  assert.ok(unreadable.includes("http://xn--a.localhost:9222/json/list") && unreadable.length >= 8, unreadable.join(" "));
+  const refused = refusedAddresses("127.0.0.0/8,185.137.215.163");
+  for (const guard of [guardFor("https://acme.com/"), guardFor(null), guardFor("http://localhost:9222/"), guardFor("https://acme.com/", { refused })]) {
+    for (const raw of unreadable) assert.equal(await guard.judge(raw), why, JSON.stringify(raw));
+    // What is not written as a web address is left to the browser's own
+    // handling of it, as before.
+    for (const raw of ["not an address", "mailto:a@acme.com", "about:blank", "ftp://xn--a.localhost/"]) assert.equal(await guard.judge(raw), "", raw);
+  }
+  // A request the kit made itself to one would connect to no address.
+  const lookup = guardFor("http://localhost:9222/").lookupFor("http://xn--a.localhost:9222/robots.txt");
+  const err = await new Promise((resolve) => lookup("xn--a.localhost", {}, (failed) => resolve(failed)));
+  assert.equal(err.code, "ENOTPUBLIC");
+  assert.equal(err.message, `xn--a.localhost ${why}`);
+});
+
 test("where the browser says it reached a page counts for an address the run was not given: a name found elsewhere by the browser is told by where it went", async (t) => {
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const guard = guardFor("http://acme.com/");

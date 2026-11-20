@@ -2519,6 +2519,55 @@ test("past the first 50 addresses a page's frames tried to open that the rule re
   assert.equal(other.connections, 0, "nothing reached the other program");
 });
 
+test("an address the browser reads and the URL parser here cannot, as one with a label of broken punycode under localhost, is not opened at a redirect's hop, by a page's own move or in a frame, and the program there is not reached", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  // Each such name is this machine to the browser, which asks no DNS for a
+  // name under localhost and keeps the label as written. The other program
+  // counts what reaches it. Node 22.22 and 22.23 read different ones of
+  // these names: one this Node reads is judged as any name of this machine
+  // on another port, which is not opened either.
+  const other = await counting(t);
+  const at = (label, where) => `http://${label}.localhost:${other.port}${where}`;
+  let lead = "";
+  const site = await serve((req, res) => {
+    const html = (body) => res.writeHead(200, { "content-type": "text/html" }).end(body);
+    if (req.url === "/hop") return res.writeHead(302, { location: at("XN--A", "/hop-inside") }).end();
+    if (req.url !== "/") return res.writeHead(404).end();
+    if (lead === "redirect") return res.writeHead(302, { location: at("xn--a", "/inside") }).end();
+    if (lead === "the second hop") return res.writeHead(302, { location: "/hop" }).end();
+    if (lead === "a script") return html(brandPage("rgb(255,0,0)").replace("</body>", `<script>location.replace(${JSON.stringify(at("xn--a", "/moved"))})</script></body>`));
+    const frames = ["xn--a", "xn--a-", "a.xn--", "xn---", "XN--A"].map((label, n) => `<iframe src="${at(label, `/frame-${n}`)}" width="200" height="100"></iframe>`).join("");
+    html(brandPage("rgb(255,0,0)").replace("</body>", `${frames}</body>`));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const given = `${site.origin}/`;
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  for (const [how, to] of [["redirect", at("xn--a", "/inside")], ["the second hop", at("xn--a", "/hop-inside")], ["a script", at("xn--a", "/moved")]]) {
+    lead = how;
+    await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} led to ${to}, which is not an address easybrandkit can read, so no kit was made.` && err.earlierKit === dir, how);
+    assert.deepEqual(filesOf(dir), before, how);
+  }
+  // Frames at five such names: the page is read with them left empty, and
+  // the notes name the first three and count the rest.
+  lead = "frames";
+  const { kit } = await makeKit(given, { dir: path.join(parent, "framed"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  const told = kit.notes.filter((note) => note.includes("tried to open"));
+  assert.equal(told.length, 4, kit.notes.join("\n"));
+  const label = "(xn--a|xn--a-|a\\.xn--|xn---)";
+  for (const note of told.slice(0, 3)) {
+    assert.match(note, new RegExp(`^${given.replace(/[.]/g, "\\.")} tried to open http://${label}\\.localhost:${other.port}/frame-\\d, which (is not an address easybrandkit can read|is on port ${other.port}, not 80 or 443): it was not opened\\.$`));
+  }
+  assert.equal(told[3], "2 more addresses the pages tried to open were not opened either.");
+  assert.equal(other.connections, 0, "nothing reached the other program");
+  assert.deepEqual(other.asked, []);
+});
+
 test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the browser starts, and for an address a site leads to, in words that name it", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {

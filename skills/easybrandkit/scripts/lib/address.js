@@ -138,6 +138,11 @@ function notPublicByForm(url) {
 // The port a web address is served on, the scheme's own when it names none.
 const portOf = (url) => url.port || (url.protocol === "https:" ? "443" : "80");
 
+// Whether an address is written with http: or https:, read as the URL
+// parser reads a scheme: in any case, with tabs and line breaks taken out
+// and the control characters and spaces before it left off.
+const webScheme = (raw) => /^https?:/i.test(String(raw).replace(/[\t\n\r]/g, "").replace(/^[\u0000- ]+/, ""));
+
 // The ports an address the run was not given may be on.
 const WEB_PORTS = new Set(["80", "443"]);
 
@@ -198,6 +203,10 @@ function refusedAddresses(value = process.env[SETTING]) {
 // What an address that is not opened is, as said after "it" or "which".
 const NOT_PUBLIC = "is not on the public internet";
 const UNRESOLVED = "is on a host whose name could not be looked up";
+// An http or https address that the URL parser here cannot read, as one
+// whose host has a label of broken punycode (xn--a), which the browser
+// reads all the same: where it leads cannot be judged.
+const UNREADABLE = "is not an address easybrandkit can read";
 const onPort = (port) => `is on port ${port}, not 80 or 443`;
 const atNotPublic = (address) => `is at ${address}, an address not on the public internet`;
 const atRefused = (address) => `is at ${address}, an address ${SETTING} refuses`;
@@ -217,7 +226,9 @@ const LOOKUP_WAIT = 5_000;
 // judge(raw, seen) resolves to "" for an address the run may open, and else
 // to why not, to follow "it" or "which". What is not a web address is not
 // judged here: a page that leads to one fails or is cancelled on its own
-// (see chrome.js). seen is what the browser said of where it got the page,
+// (see chrome.js). One written with http: or https: that the URL parser
+// here cannot read is not opened: the browser can read it, and go where
+// its host leads. seen is what the browser said of where it got the page,
 // once it has: the IP address space Chrome gave the response (space) and
 // the address it connected to (ip). Chrome gives a space of its own only
 // when it reached the server itself, so then ip is the server's, and is
@@ -230,7 +241,8 @@ const LOOKUP_WAIT = 5_000;
 // lookupFor(raw): the lookup a request the kit makes itself connects with,
 // which hands back only addresses the rule takes, as the name is found when
 // it connects, so it connects to no address the rule refuses; undefined for
-// an address on the scheme, host and port given when nothing is refused.
+// an address on the scheme, host and port given when nothing is refused,
+// and one that hands back no address for one the URL parser cannot read.
 function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const given = givenRaw ? new URL(givenRaw) : null;
   const answers = new Map();
@@ -267,7 +279,8 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const reached = ({ space = "", ip = "" } = {}) => (space && space !== "Unknown" && net.isIP(plainIp(ip)) ? plainIp(ip) : "");
   async function judge(raw, seen = {}) {
     const url = parse(raw);
-    if (!url || !/^https?:$/.test(url.protocol)) return "";
+    if (!url) return webScheme(raw) ? UNREADABLE : "";
+    if (!/^https?:$/.test(url.protocol)) return "";
     const mine = own(url);
     if (!mine && !WEB_PORTS.has(portOf(url))) return onPort(portOf(url));
     const host = bare(url);
@@ -292,7 +305,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   }
   function lookupFor(raw) {
     const url = parse(raw);
-    if (!url) return undefined;
+    if (!url) return (hostname, options, callback) => callback(Object.assign(new Error(`${hostname} ${UNREADABLE}`), { code: "ENOTPUBLIC", hostname }));
     const mine = own(url);
     if (mine && !refused.size) return undefined;
     return (hostname, options, callback) => {
