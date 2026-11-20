@@ -2014,13 +2014,22 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
   for (const [what, handler, said, last] of cases) {
     home = handler;
     const steps = [];
-    await assert.rejects(makeKit(site.origin, { dir, stores: false, log: (line) => steps.push(line) }), (err) => {
+    let opened = 0;
+    const log = (line) => {
+      steps.push(line);
+      if (line === opening) opened = Date.now();
+    };
+    await assert.rejects(makeKit(site.origin, { dir, stores: false, log }), (err) => {
       assert.equal(err.message, said, what);
       assert.equal(err.earlierKit, dir, what);
       return true;
     });
     if (last) assert.equal(lastStep(steps), last, what);
     assert.deepEqual(filesOf(dir), good, what);
+    // The browser's error page takes the place of a page whose own move is
+    // refused as it loads, so the run is told at once: a page left where it
+    // was never fires its load event, and the run would wait 30 s for it.
+    if (what === "a script that moves on to another port of this machine") assert.ok(Date.now() - opened < 20_000, `${what}: told ${Date.now() - opened} ms after it was opened`);
   }
   // A page that moves on only once the run has got to a step: as the page is
   // walked, it is told before its logos are cut, and as they are cut, after
@@ -2507,10 +2516,19 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the bro
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
   // The address given, on this machine: refused before anything is opened
-  // or started, the user's own site on this machine included.
-  await assert.rejects(makeKit(`${site.origin}/`, { dir, stores: false }), (err) => err.message === `${site.origin}/ is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.`);
-  await assert.rejects(makeKit(`http://localhost:${port}/`, { dir, stores: false }), (err) => err.message === `http://localhost:${port}/ is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.`);
-  await assert.rejects(makeKit("https://vm.test/", { dir, stores: false }), (err) => err.message === "https://vm.test/ is at 185.137.215.163, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.");
+  // or started, the user's own site on this machine included. There is no
+  // browser to start here, so a refusal that came once a browser started
+  // would be told as that, and the folder is not looked at either.
+  const chromePath = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = path.join(parent, "no-chrome");
+  try {
+    await assert.rejects(makeKit(`${site.origin}/`, { dir, stores: false }), (err) => err.message === `${site.origin}/ is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.` && !err.earlierKit);
+    await assert.rejects(makeKit(`http://localhost:${port}/`, { dir, stores: false }), (err) => err.message === `http://localhost:${port}/ is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.` && !err.earlierKit);
+    await assert.rejects(makeKit("https://vm.test/", { dir, stores: false }), (err) => err.message === "https://vm.test/ is at 185.137.215.163, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made." && !err.earlierKit);
+  } finally {
+    if (chromePath === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = chromePath;
+  }
   assert.equal(reached.length, 0, "the site was not opened");
   assert.deepEqual(filesOf(dir), before);
   if (temp) assert.deepEqual(fs.readdirSync(temp), [], "no browser was started");
