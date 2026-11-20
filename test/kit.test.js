@@ -3779,7 +3779,7 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
 });
 
-test("a browser the kit starts listens on no port, has HTTP/3 off, and the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
+test("a browser the kit starts listens on no port, has HTTP/3 off, moves no http address to https by itself, and the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
   const temp = ownTemp(t);
   if (!temp) return t.skip("the temp folder is too deep for a browser");
   const tmpdir = process.env.TMPDIR;
@@ -3839,6 +3839,13 @@ test("a browser the kit starts listens on no port, has HTTP/3 off, and the kit d
       }
     }).find((line) => has(line, "--remote-debugging-pipe") && !has(line, "--type"));
     assert.ok(started && has(started, "--disable-quic"), String(started));
+    // Nor does it move an http address to https by itself: not over https
+    // first (HTTPS-Upgrades, and HTTPS-First on Chrome 157), nor for a name
+    // whose DNS gives an HTTPS record, as every name behind Cloudflare does
+    // (UseDnsHttpsSvcb). The test sites are on names the browser asks no
+    // DNS for, so this is told by its switch.
+    const off = /(?:^|[\0 ])--disable-features=([^\0 ]*)/.exec(started);
+    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "UseDnsHttpsSvcb"], String(started));
     // It answers all the same.
     assert.equal(await browser.alive(), true);
     const cdp = await openPage(browser, { width: 800, height: 600 });

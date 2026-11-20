@@ -464,11 +464,17 @@ async function launch({ width, height }, { judge = null } = {}) {
         // Chrome 157 HTTPS-First, which then refuses a site that answers on
         // no https), at an address on port 443 that the run was not given,
         // so a site of this machine or of a private network by a name under
-        // a public suffix was refused before the browser tried http. A site
-        // that wants https sends its visitors there itself, and a name the
-        // browser takes only over https (HSTS), as every .dev and .app name,
-        // is still asked for over https (see address.js guardFor).
-        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable",
+        // a public suffix was refused before the browser tried http. It also
+        // moves one to https without asking http at all when the name's DNS
+        // gives an HTTPS record (UseDnsHttpsSvcb), as every name behind
+        // Cloudflare does, and then a site of this machine or of a private
+        // network by such a name was refused the same way. A site that wants
+        // https sends its visitors there itself, and a name the browser
+        // takes only over https (HSTS), as every .dev and .app name, is
+        // still asked for over https (see address.js guardFor). Without the
+        // HTTPS record, the browser gives up only Encrypted Client Hello and
+        // the record's ALPN, and HTTP/3 is off already.
+        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb",
         // Chrome refuses to start as root without it (a container, a CI box).
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",
