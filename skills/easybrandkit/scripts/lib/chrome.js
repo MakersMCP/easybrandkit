@@ -474,7 +474,17 @@ async function launch({ width, height }, { judge = null } = {}) {
         // still asked for over https (see address.js guardFor). Without the
         // HTTPS record, the browser gives up only Encrypted Client Hello and
         // the record's ALPN, and HTTP/3 is off already.
-        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb",
+        //
+        // No Reporting API and no Web Payments either: the browser itself
+        // sent a page's reports (Reporting-Endpoints with a policy's
+        // report-to, Report-To with NEL) and fetched a payment method's
+        // manifest (PaymentRequest's canMakePayment) at any https address
+        // and port the page named, past the rule (see holdDocuments) and
+        // past Chrome's own refusal of a public page's requests to this
+        // machine, so a site sent a CORS preflight or a HEAD, with a path
+        // of its choosing, to another program of this machine or of its
+        // network whose certificate the machine trusts.
+        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb,Reporting,WebPayments",
         // Chrome refuses to start as root without it (a container, a CI box).
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",

@@ -2792,6 +2792,44 @@ test("a frame and a prefetch that answer with a signed exchange take the browser
   assert.equal(other.connections, 0, "no connection reached the program the certificate's address names");
 });
 
+// A page's reports, by Reporting-Endpoints and a policy's report-to, and a
+// payment method's manifest, by PaymentRequest's canMakePayment, which the
+// browser itself fetches at any https address the page names: it sent a
+// CORS preflight and a HEAD there, past the rule and past Chrome's own
+// refusal of a public page's requests to this machine, until the kit
+// started it with the Reporting API and Web Payments off.
+test("a page's reports and a payment method's manifest take the browser nowhere: the program whose port they name is asked nothing", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test program's certificate") }, async (t) => {
+  const https = require("node:https");
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const asked = [];
+  const other = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => {
+    asked.push(`${req.method} ${req.url}`);
+    res.writeHead(404).end();
+  });
+  other.listen(0, "127.0.0.1");
+  await once(other, "listening");
+  t.after(() => other.close());
+  const at = `https://127.0.0.1:${other.address().port}`;
+  // The site over https, as the browser takes a page's reports only from
+  // one.
+  const site = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => {
+    if (req.url === "/framed") return res.writeHead(200, { "content-type": "text/html" }).end("<!doctype html><p>framed</p>");
+    res.writeHead(200, { "content-type": "text/html", "reporting-endpoints": `e="${at}/report"`, "content-security-policy": "frame-src 'none'; report-to e" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="/framed" width="200" height="100"></iframe><script>try { new PaymentRequest([{ supportedMethods: "${at}/pay" }], { total: { label: "x", amount: { currency: "USD", value: "1" } } }).canMakePayment().catch(() => {}); } catch {}</script></body>`));
+  });
+  site.listen(0, "127.0.0.1");
+  await once(site, "listening");
+  t.after(() => site.close());
+  // The browser takes the certificate of the site and of that program, as
+  // a machine that trusts it would.
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
+  const { kit } = await makeKit(`https://127.0.0.1:${site.address().port}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.deepEqual(asked, [], "the program the page named was asked nothing");
+});
+
 test("a browser that takes signed exchanges though the kit's profile asks it not to is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let asked = 0;
   const site = await serve((req, res) => {
@@ -3960,9 +3998,10 @@ test("a browser the kit starts listens on no port, has HTTP/3 off, moves no http
     // first (HTTPS-Upgrades, and HTTPS-First on Chrome 157), nor for a name
     // whose DNS gives an HTTPS record, as every name behind Cloudflare does
     // (UseDnsHttpsSvcb). The test sites are on names the browser asks no
-    // DNS for, so this is told by its switch.
+    // DNS for, so this is told by its switch. The Reporting API and Web
+    // Payments are off too (see the test of a page's reports below).
     const off = /(?:^|[\0 ])--disable-features=([^\0 ]*)/.exec(started);
-    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "UseDnsHttpsSvcb"], String(started));
+    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "Reporting", "UseDnsHttpsSvcb", "WebPayments"], String(started));
     // It answers all the same.
     assert.equal(await browser.alive(), true);
     const cdp = await openPage(browser, { width: 800, height: 600 });
