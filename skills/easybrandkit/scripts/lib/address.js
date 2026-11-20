@@ -209,9 +209,10 @@ const atRefused = (address) => `is at ${address}, an address ${SETTING} refuses`
 const LOOKUP_WAIT = 5_000;
 
 // The rule for the addresses a run opens, for the address given (given, a
-// web address; for a site another source named, the address of that
-// source, see makeKit), with the addresses refused (refused, from
-// refusedAddresses). Each name is looked up once a run.
+// web address, whose scheme, host and port are the run's own; null for a
+// run that has none, as one reading a site another source named, see
+// makeKit), with the addresses refused (refused, from refusedAddresses).
+// Each name is looked up once a run.
 //
 // judge(raw, seen) resolves to "" for an address the run may open, and else
 // to why not, to follow "it" or "which". What is not a web address is not
@@ -231,7 +232,7 @@ const LOOKUP_WAIT = 5_000;
 // it connects, so it connects to no address the rule refuses; undefined for
 // an address on the scheme, host and port given when nothing is refused.
 function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
-  const given = new URL(givenRaw);
+  const given = givenRaw ? new URL(givenRaw) : null;
   const answers = new Map();
   const lookup = (host) => {
     if (!answers.has(host)) {
@@ -254,7 +255,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     return (await lookup(host)).list;
   };
   // On the scheme, host and port of the address given: its own pages.
-  const own = (url) => url.protocol === given.protocol && sameHost(url, given);
+  const own = (url) => Boolean(given) && url.protocol === given.protocol && sameHost(url, given);
   const parse = (raw) => {
     try {
       return new URL(String(raw));
@@ -304,7 +305,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
       });
     };
   }
-  return { given: given.href, refused, judge, inside, lookupFor };
+  return { given: given ? given.href : "", refused, judge, inside, lookupFor };
 }
 
 module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, atRefused };

@@ -2612,6 +2612,10 @@ test("a site another source named, given with namedBy or --named-by, is read as 
   ]) {
     await assert.rejects(makeKit(named, { dir, stores: false, namedBy: listing }), (err) => err.message === `${named}, named by ${listing}, ${why}, so no kit was made.`, named);
   }
+  // The source is not opened, so its scheme, host and port are not the
+  // run's own: a site there is held to the rule as any other.
+  const local = `${site.origin}/listing`;
+  await assert.rejects(makeKit(`${site.origin}/`, { dir, stores: false, namedBy: local }), (err) => err.message === `${site.origin}/, named by ${local}, is on port ${site.port}, not 80 or 443, so no kit was made.`);
   assert.equal(site.connections, 0, "nothing was opened");
   assert.deepEqual(proxy.hosts, []);
   assert.deepEqual(filesOf(dir), before);
@@ -2631,6 +2635,30 @@ test("a site another source named, given with namedBy or --named-by, is read as 
     assert.equal(refused.code, 2, args.join(" "));
   }
   assert.deepEqual(filesOf(dir), before);
+});
+
+test("a site another source named that leads to the source's own scheme, host and port is refused at that hop, as the run has no address of its own", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  // The site by a name of its own on port 80, through a proxy, sends its
+  // visitors on to this machine, on the port of the source.
+  const asked = [];
+  const site = await serve((req, res) => {
+    asked.push(`${req.headers.host}${req.url}`);
+    if (String(req.headers.host).startsWith("acme.test")) return res.writeHead(302, { location: `${site.origin}/inside` }).end();
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(0,128,0)"));
+  });
+  const port = new URL(site.origin).port;
+  const proxy = await proxyOf(t, port);
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  const source = `${site.origin}/listing`;
+  await assert.rejects(makeKit("http://acme.test/", { dir: path.join(parent, "kit"), stores: false, namedBy: source }), (err) => err.message === `http://acme.test/ led to ${site.origin}/inside, which is on port ${port}, not 80 or 443, so no kit was made.`);
+  assert.ok(!asked.some((one) => one.endsWith("/inside")), asked.join(" "));
+  assert.ok(!proxy.hosts.includes(`127.0.0.1:${port}`), proxy.hosts.join(" "));
 });
 
 // kit.js loaded afresh, for what the test has mocked of the modules it takes

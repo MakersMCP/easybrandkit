@@ -91,6 +91,24 @@ test("an address the run was not given is opened on port 80 or 443 only, and the
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8081/")), false);
 });
 
+test("a run that has no address of its own, as one reading a site another source named, holds every address to the rule, this machine's and those on any port included", async (t) => {
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const none = guardFor(null);
+  for (const [raw, why] of [
+    ["http://localhost:3000/", "is on port 3000, not 80 or 443"],
+    ["http://127.0.0.1/", "is not on the public internet"],
+    ["https://acme.com:8443/", "is on port 8443, not 80 or 443"],
+    ["https://acme.com/", ""],
+    ["http://www.acme.com/about", ""],
+  ]) {
+    assert.equal(await none.judge(raw), why, raw);
+  }
+  // A request the kit makes itself, as for robots.txt, connects by the
+  // rule's own lookup there, where one on the address given need not.
+  for (const raw of ["https://acme.com/robots.txt", "http://localhost:3000/robots.txt"]) assert.equal(typeof none.lookupFor(raw), "function", raw);
+  assert.equal(guardFor("https://acme.com/").lookupFor("https://acme.com/robots.txt"), undefined);
+});
+
 test("an address the run was not given is opened only on the public internet, by its form and by every address its name is found at, and never where its name is not found in time", async (t) => {
   const asked = [];
   t.mock.method(dns.promises, "lookup", async (host) => {

@@ -478,9 +478,10 @@ function siteOfListing(raw) {
 // namedBy: when another source named the site, as a store listing names its
 // maker's website, and not the user, the address of that source. The site
 // is then read as a page easybrandkit chose itself, as the website a
-// listing names is, held to the rule for one (see address.js), with namedBy
-// as the address given; refused there, it ends the run before anything is
-// opened.
+// listing names is, held to the rule for one (see address.js); refused
+// there, it ends the run before anything is opened. The source is not
+// opened, so the run has no address of its own: every address it opens is
+// held to the rule, one on the source's scheme, host and port included.
 async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 120_000, namedBy = "", log = () => {} } = {}) {
   setTimeLimit(timeLimit);
   // MAKERSMCP_REFUSE_ADDRESSES, a value of which that does not parse ends
@@ -495,9 +496,10 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   }
   // The rule for every address the run opens. The address given is opened
   // whatever its host and port, unless the setting refuses where it is; a
-  // site another source named is not the address given. A store listing is
-  // read from its store's own hosts (see stores.js).
-  const guard = guardFor(source || asked, { refused });
+  // site another source named is not the address given, and with it the
+  // run has none. A store listing is read from its store's own hosts (see
+  // stores.js).
+  const guard = guardFor(source ? null : asked, { refused });
   if (!listing) {
     const why = await guard.judge(asked);
     if (why) throw new Error(`${asked}${source ? `, named by ${source},` : ""} ${why}, so no kit was made.`);
