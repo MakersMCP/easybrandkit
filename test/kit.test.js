@@ -27,6 +27,7 @@ const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 const { storeAnswers } = require("./store-answers");
+const { partedTemp } = require("./parted-temp");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -35,7 +36,7 @@ const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit
 // up.
 test.beforeEach(() => setTimeLimit(120_000));
 const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
-const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
+const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp;
 
 // A value written into a shell script as one word, whatever it holds, as a
 // temp folder's path with a space, a quote or a $ in it: in single quotes,
@@ -776,7 +777,7 @@ test("a run that fails leaves its folder as it was: an earlier kit stays whole, 
   assert.deepEqual(fs.readdirSync(parent), ["kit"]);
 });
 
-test("a temp folder with no room left for the browser's profile is told as the temp folder's, not the kit's", async (t) => {
+test("a temp folder with no room left for the browser's profile is told as the temp folder's, not the kit's", { skip: partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   // A browser is found, any file will do, and its profile cannot be made.
   const chrome = process.env.CHROME_PATH;
@@ -929,7 +930,7 @@ fi
 exec ${ANSWER}
 `;
 
-test("a browser that ends takes its helpers with it and leaves nothing of its own in the temp folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser that ends takes its helpers with it and leaves nothing of its own in the temp folder", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
@@ -1015,7 +1016,7 @@ while [ ! -s "$profile/helper.pid" ]; do sleep 0.01; done
 exec ${ANSWER}
 `;
 
-test("a browser's crash handler goes with it, also once its helpers have ended, and no other process it names does", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
+test("a browser's crash handler goes with it, also once its helpers have ended, and no other process it names does", { skip: (process.platform !== "linux" && "a browser's processes are told on Linux only") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
@@ -1104,7 +1105,7 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
   assert.equal(ended(handler), false, "a pid that has come round again on another process");
 });
 
-test("a browser that has ended is not looked up by its pid, which can be another process's by now", { skip: process.platform !== "linux" && "a browser's processes are told on Linux only" }, async (t) => {
+test("a browser that has ended is not looked up by its pid, which can be another process's by now", { skip: (process.platform !== "linux" && "a browser's processes are told on Linux only") || partedTemp }, async (t) => {
   // The browser's start, stood in for only to choose the pid of a browser
   // that has ended: the process below has it now.
   const other = spawn("sleep", ["30"], { stdio: "ignore" });
@@ -1191,7 +1192,7 @@ function withSocket(t) {
   };
 }
 
-test("a browser killed as it begins to quit on Ctrl-C leaves no folder of its own in the temp folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser killed as it begins to quit on Ctrl-C leaves no folder of its own in the temp folder", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const { temp, started } = withSocket(t);
   // Ended by a stop, as the CLI's handler of Ctrl-C ends it, and by close,
   // as a run that fails then ends it.
@@ -1209,7 +1210,7 @@ test("a browser killed as it begins to quit on Ctrl-C leaves no folder of its ow
   }
 });
 
-test("a browser's crash reports go into its throwaway profile, not into the user's own browser's folder", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser's crash reports go into its throwaway profile, not into the user's own browser's folder", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const { temp, started } = withSocket(t);
   await launch({ width: 800, height: 600 });
   const { profile } = started();
@@ -1255,7 +1256,7 @@ test("a browser that quits when asked leaves nothing of its component updater's 
   assert.deepEqual(fs.readdirSync(temp), []);
 });
 
-test("a browser that is slow to answer still runs; one that has ended does not", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser that is slow to answer still runs; one that has ended does not", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const chrome = process.env.CHROME_PATH;
   t.after(() => {
@@ -1285,7 +1286,7 @@ test("a browser that is slow to answer still runs; one that has ended does not",
   assert.equal(await browser.alive(), false, "ended");
 });
 
-test("a browser slow to start, to open a tab or to answer the connection to it is waited for as long as the run has left, and then told in words", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser slow to start, to open a tab or to answer the connection to it is waited for as long as the run has left, and then told in words", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
@@ -1433,7 +1434,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
-test("a browser that does not answer is told within seconds when the temp folder has no room, and is waited for as long as the run has left otherwise", { skip: process.platform === "win32" && "a shell script stands in for the browser" }, async (t) => {
+test("a browser that does not answer is told within seconds when the temp folder has no room, and is waited for as long as the run has left otherwise", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
@@ -1550,7 +1551,7 @@ test("a browser that does not answer is told within seconds when the temp folder
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
-test("a browser that cannot start because the temp folder's path is too long for its socket says so", { skip: process.platform !== "linux" && "told on Linux only" }, async (t) => {
+test("a browser that cannot start because the temp folder's path is too long for its socket says so", { skip: (process.platform !== "linux" && "told on Linux only") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
   t.after(() => {
@@ -4608,7 +4609,7 @@ function setEnv(t, values) {
 // leads.
 const WAYLAND_CLIENT = "import ctypes; l = ctypes.CDLL('libwayland-client.so.0'); l.wl_display_connect.restype = ctypes.c_void_p; l.wl_display_connect.argtypes = [ctypes.c_char_p]; print('a display' if l.wl_display_connect(None) else 'no display')";
 
-test("on Linux the browser starts with a session bus where nothing listens, no display and the stand-ins first on its PATH, whatever this process has", { skip: process.platform !== "linux" && "the bus and the stand-ins are given on Linux" }, async (t) => {
+test("on Linux the browser starts with a session bus where nothing listens, no display and the stand-ins first on its PATH, whatever this process has", { skip: (process.platform !== "linux" && "the bus and the stand-ins are given on Linux") || partedTemp }, async (t) => {
   const net = require("node:net");
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
@@ -4663,11 +4664,18 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   assert.equal(first, path.join(profile[1], "stand-ins"));
   const nothing = ["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file));
   assert.deepEqual(rest.slice(0, 6), Array(6).fill(nothing));
-  // A temp folder whose path has a : in it, which parts the folders of
-  // PATH, is refused before anything is made in it.
+});
+
+// Also where this process's own temp folder has one, as the tests above
+// skip there.
+test("on Linux a temp folder whose path has a : in it, which parts the folders of PATH, is refused before anything is made in it", { skip: process.platform !== "linux" && "the stand-ins are given on Linux" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const browser = path.join(parent, "browser");
+  fs.writeFileSync(browser, "#!/bin/sh\nexit 3\n", { mode: 0o755 });
   const parted = path.join(parent, "te:mp");
   fs.mkdirSync(parted);
-  process.env.TMPDIR = parted;
+  setEnv(t, { CHROME_PATH: browser, TMPDIR: parted });
   await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === `browser was not started: the path of the temp folder, ${parted}, has a : in it, which parts the folders of PATH, so the stand-ins that keep a site from starting a program of this machine could not come first on the browser's PATH. Set TMPDIR to a folder whose path has none.`);
   assert.deepEqual(fs.readdirSync(parted), []);
 });

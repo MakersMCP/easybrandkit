@@ -21,8 +21,9 @@ const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome, launch, openPage, navigate, inOwnWorld } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
+const { partedTemp } = require("./parted-temp");
 
-const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
+const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp;
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
 // robots.txt as a site answers it to the kit's own request for it, over

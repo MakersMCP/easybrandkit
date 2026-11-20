@@ -13,11 +13,12 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { wrongWith, lookOnPath, noexecMount, firstLine, browserPlace, ownSandbox } = require("../skills/easybrandkit/scripts/lib/program");
 const { storeAnswers } = require("./store-answers");
+const { partedTemp } = require("./parted-temp");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const linux = process.platform === "linux";
 const root = process.getuid && process.getuid() === 0;
-const skip = (!linux && "the cases are built for Linux") || (root && "root may run and read any file");
+const skip = (!linux && "the cases are built for Linux") || (root && "root may run and read any file") || partedTemp;
 
 // A folder of the test's own, and a temp folder in it for the run, short
 // enough for Chrome's socket.
@@ -423,8 +424,9 @@ test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it
   assert.equal(lookOnPath("chrome", `"${none}";'${spaced}';${bin}`, true).file, path.join(spaced, "chrome.exe"));
   assert.equal(lookOnPath("chrome", `"${parted}";${bin}`, true).file, path.join(parted, "chrome.exe"));
   assert.equal(lookOnPath("chrome", `${none};"${spaced}`, true).file, path.join(spaced, "chrome.exe"));
-  // Elsewhere a name is looked for as it is.
-  if (linux) {
+  // Elsewhere a name is looked for as it is, in a folder PATH can hold,
+  // which one whose path has a : in it is not there.
+  if (linux && !bin.includes(path.delimiter)) {
     assert.equal(lookOnPath("chrome", bin, false).file, "");
     assert.equal(lookOnPath("brave", bin, false).file, path.join(bin, "brave"));
   }
