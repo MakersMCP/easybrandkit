@@ -36,6 +36,11 @@ test.beforeEach(() => setTimeLimit(120_000));
 const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
 const noBrowser = !findChrome() && "no Chrome, Chromium, Edge or Brave installed";
 
+// A value written into a shell script as one word, whatever it holds, as a
+// temp folder's path with a space, a quote or a $ in it: in single quotes,
+// each quote in it closed, escaped and opened again.
+const sh = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
 // Minimal PNG reader for 8-bit RGB/RGBA, non-interlaced (what Chrome writes).
 function readPng(file) {
   const buf = fs.readFileSync(file);
@@ -970,7 +975,7 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
   if (linux) {
     const quick = path.join(parent, "quick");
     const pidFile = path.join(parent, "quick.pid");
-    fs.writeFileSync(quick, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\n'${process.execPath}' -e 'setTimeout(() => {}, 30000)' "$profile" &\necho $! > "${pidFile}"\n`, { mode: 0o755 });
+    fs.writeFileSync(quick, `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac\ndone\n${sh(process.execPath)} -e 'setTimeout(() => {}, 30000)' "$profile" &\necho $! > ${sh(pidFile)}\n`, { mode: 0o755 });
     process.env.CHROME_PATH = quick;
     await assert.rejects(launch({ width: 800, height: 600 }), /^Error: quick did not start: CHROME_PATH is .*, which ended before it answered: it printed nothing and exited with 0\. /);
     const helper = Number(fs.readFileSync(pidFile, "utf8"));
@@ -1255,7 +1260,7 @@ test("a browser that is slow to answer still runs; one that has ended does not",
   process.env.STAND_IN_ANSWERS = JSON.stringify({ "Browser.getVersion": [0, "never"] });
   const stand = path.join(parent, "chrome");
   const pidFile = path.join(parent, "chrome.pid");
-  fs.writeFileSync(stand, `#!/bin/sh\necho $$ > "${pidFile}"\nexec ${ANSWER}\n`, { mode: 0o755 });
+  fs.writeFileSync(stand, `#!/bin/sh\necho $$ > ${sh(pidFile)}\nexec ${ANSWER}\n`, { mode: 0o755 });
   process.env.CHROME_PATH = stand;
   const browser = await launch({ width: 800, height: 600 });
   const started = Date.now();
@@ -3113,7 +3118,7 @@ function useRelay(t, dir, rules = {}, args = []) {
   const relay = path.join(dir, "relay.js");
   const chrome = path.join(dir, "chrome");
   fs.writeFileSync(relay, RELAY);
-  fs.writeFileSync(chrome, `#!/bin/sh\nexec "${process.execPath}" "${relay}" "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(chrome, `#!/bin/sh\nexec ${sh(process.execPath)} ${sh(relay)} "$@"\n`, { mode: 0o755 });
   const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => {
@@ -4177,7 +4182,7 @@ function recordHandlers(t) {
   const started = path.join(parent, "started.log");
   fs.mkdirSync(handlers);
   for (const name of ["xdg-open", "xdg-email", "xdg-settings", "x-www-browser", "www-browser", "sensible-browser", "gio", "xdg-mime"]) {
-    fs.writeFileSync(path.join(handlers, name), `#!/bin/sh\necho "${name} $*" >> "${started}"\nexit 0\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(handlers, name), `#!/bin/sh\necho "${name} $*" >> ${sh(started)}\nexit 0\n`, { mode: 0o755 });
   }
   const names = ["PATH", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -4367,7 +4372,7 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   // its search for a display at once.
   const seen = path.join(parent, "seen.txt");
   const browser = path.join(parent, "browser");
-  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "\${WAYLAND_DISPLAY-unset}"; [ -e "$WAYLAND_DISPLAY" ] && echo there || echo nothing; echo "DISPLAY \${DISPLAY-unset}, WAYLAND_SOCKET \${WAYLAND_SOCKET-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; ${client ? `(unset WAYLAND_SOCKET; python3 -I -c "${WAYLAND_CLIENT}")` : "echo no client"}; } > "${seen}"\nexit 3\n`, { mode: 0o755 });
+  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "\${WAYLAND_DISPLAY-unset}"; [ -e "$WAYLAND_DISPLAY" ] && echo there || echo nothing; echo "DISPLAY \${DISPLAY-unset}, WAYLAND_SOCKET \${WAYLAND_SOCKET-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; ${client ? `(unset WAYLAND_SOCKET; python3 -I -c "${WAYLAND_CLIENT}")` : "echo no client"}; } > ${sh(seen)}\nexit 3\n`, { mode: 0o755 });
   setEnv(t, { CHROME_PATH: browser, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-0", WAYLAND_SOCKET: "9", XDG_RUNTIME_DIR: runtime, TMPDIR: parent });
   await assert.rejects(launch({ width: 800, height: 600 }), /ended before it answered: it printed nothing and exited with 3\./);
   const [address, there, wayland, waylandThere, x, first, ...rest] = fs.readFileSync(seen, "utf8").trim().split("\n");
@@ -4508,7 +4513,7 @@ test("a browser installed as a snap or a Flatpak is not said to have opened noth
   const exports = path.join(parent, "share", "flatpak", "exports", "bin");
   fs.mkdirSync(exports, { recursive: true });
   const browser = path.join(exports, "org.chromium.Chromium");
-  fs.writeFileSync(browser, `#!/bin/sh\nexec "${findChrome()}" "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(browser, `#!/bin/sh\nexec ${sh(findChrome())} "$@"\n`, { mode: 0o755 });
   setEnv(t, { CHROME_PATH: browser });
   const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `${frame("mailto:frame@acme.example")}${frame("mailto:both@acme.example")}<script>setTimeout(() => (location.href = "mailto:both@acme.example"), 300); setTimeout(() => (location.href = "mailto:own@acme.example"), 600);</script></body>`)));

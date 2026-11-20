@@ -71,6 +71,11 @@ function stoppedBeforeAnyWork(result, line) {
 // Text as a regular expression that matches it as it is.
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// A value written into a shell script as one word, whatever it holds, as a
+// temp folder's path with a space, a quote or a $ in it: in single quotes,
+// each quote in it closed, escaped and opened again.
+const sh = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
 const SET = "Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it.";
 const FOUND = "Install Chrome, Chromium, Edge or Brave, or point CHROME_PATH at one that runs.";
 
@@ -374,7 +379,7 @@ test("a browser whose pipe closes a moment before it ends is told by how it ende
   // that closes its file descriptors first does: the run says so, and
   // stops it.
   const pid = at("pid");
-  const keeps = write("keeps", `#!/bin/sh\nexec 3>&- 4>&-\necho $$ > "${pid}"\necho "starting the browser" >&2\nexec sleep 60\n`);
+  const keeps = write("keeps", `#!/bin/sh\nexec 3>&- 4>&-\necho $$ > ${sh(pid)}\necho "starting the browser" >&2\nexec sleep 60\n`);
   const handOn = "A program that starts the browser has to hand it the kit's pipe, its file descriptors 3 and 4: point CHROME_PATH at the browser's own program.";
   stoppedBeforeAnyWork(run(parent, { CHROME_PATH: keeps }), `keeps did not start: CHROME_PATH is ${keeps}, which closed the kit's pipe before it answered and kept running, having printed "starting the browser". ${handOn}`);
   let state = "";

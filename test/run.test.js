@@ -92,6 +92,11 @@ function livePid(t) {
 
 const posixOnly = process.platform === "win32" && "POSIX modes and signals";
 
+// A value written into a shell script as one word, whatever it holds, as a
+// temp folder's path with a space, a quote or a $ in it: in single quotes,
+// each quote in it closed, escaped and opened again.
+const sh = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+
 test("a new folder: the part folder sits next to it and becomes it when the run ends well", async (t) => {
   const parent = tempParent(t);
   const dir = path.join(parent, "new", "acme");
@@ -111,9 +116,10 @@ test("a part folder gets the mode any folder made there gets, so a default ACL i
   const umask = process.umask(0o022);
   t.after(() => process.umask(umask));
   const mode = (at) => fs.statSync(at).mode & 0o7777;
+  // What a folder made there gets: 0755 under this umask, or what a default
+  // ACL on the temp folder gives, which takes the umask's place.
   fs.mkdirSync(path.join(parent, "plain"));
   const want = mode(path.join(parent, "plain"));
-  assert.equal(want, 0o755);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const inside = startRun(dir, checkDir(dir));
@@ -1345,7 +1351,7 @@ test("an error that nothing catches still leaves the folder as it was and ends t
   // run's part folder is there.
   const chrome = path.join(parent, "chrome");
   const pidFile = path.join(parent, "chrome.pid");
-  fs.writeFileSync(chrome, `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 30\n`, { mode: 0o755 });
+  fs.writeFileSync(chrome, `#!/bin/sh\necho $$ > ${sh(pidFile)}\nexec sleep 30\n`, { mode: 0o755 });
   const boom = path.join(parent, "boom.js");
   fs.writeFileSync(
     boom,
