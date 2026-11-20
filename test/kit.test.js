@@ -3867,8 +3867,14 @@ test("what a page says reaches no terminal with its control characters, and a no
   assert.doesNotMatch(went.stdout, CONTROL, "the note");
   const note = `The home page, ${site.origin}/, could not be read: it answered with a bot check ("Just a moment [2J [Hcleared by it"). ${site.origin}/project/ was read as given, and its name, header and colors can differ from the home page's.`;
   assert.ok(went.stdout.includes(`  Note    ${note}\n`), went.stdout);
-  assert.ok(fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8").endsWith(`## Notes\n\n- ${note}\n`));
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8")).notes, [note]);
+  // On a busy machine the kit can add a note of its own after it, that the
+  // tab did not give all of the page's words or that the card could not be
+  // drawn, and no other: each on a line of its own too.
+  const notes = JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8")).notes;
+  assert.equal(notes[0], note);
+  for (const more of notes.slice(1)) assert.match(more, /^((The|Some of the) page's headings and button labels were not read|The card could not be drawn): /, more);
+  const md = fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8");
+  assert.ok(md.endsWith(`## Notes\n\n${notes.map((one) => `- ${one}\n`).join("")}`), md.slice(md.indexOf("## Notes")));
 
   // And in the error for the address given.
   const refused = await run(site.origin, "bot");
