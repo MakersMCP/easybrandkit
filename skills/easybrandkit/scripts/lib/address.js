@@ -8,10 +8,14 @@
 // site another source named, a menu page with --facts), each hop of a
 // redirect, a page's own move, a frame or a window a page opens, and
 // robots.txt with each of its redirects. Such an address is opened only on
-// port 80 or 443 and only on the public internet, so no site, listing or
-// redirect leads the kit to another program of this machine or of a private
-// network, to another port of a public host, or to a router's page or a
-// cloud server's metadata.
+// port 80 or 443 and only on the public internet: no document the browser
+// loads and no request the kit makes itself goes to another program of this
+// machine or of a private network, to another port of a public host, or to
+// a router's page or a cloud server's metadata. What a page asks for itself
+// is left to the browser's own rules, and the requests the browser makes by
+// itself, as the fetch of a certificate's issuer from the address the
+// certificate names, a page's WebAuthn check of another name or a page's
+// WebRTC, are held by no rule here (see the README's Limits).
 //
 // MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and CIDR ranges,
 // names more addresses that the host the kit runs on refuses, as a server's
