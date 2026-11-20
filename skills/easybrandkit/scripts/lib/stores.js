@@ -25,11 +25,13 @@ const MAX_SCREENSHOTS = 5;
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 // Pinterest's own hosts: pinterest.com with its country sites, as
-// uk.pinterest.com, and the country domains that send their visitors there,
-// as pinterest.co.uk. A host such as pinterest.acme.example is not one.
+// uk.pinterest.com, and a list of the country domains that send their
+// visitors there with the path kept, as pinterest.co.uk and pinterest.be
+// do, each checked on 2026-11-20. A host such as pinterest.acme.example is
+// not one.
 const PINTEREST = [
   /^([a-z]{2}\.|www\.)?pinterest\.com$/,
-  /^(www\.)?pinterest\.(at|ca|ch|cl|co\.in|co\.kr|co\.nz|co\.uk|com\.au|com\.mx|de|dk|es|fr|ie|it|jp|nl|nz|ph|pt|ru|se)$/,
+  /^(www\.)?pinterest\.(at|be|ca|ch|cl|co\.in|co\.kr|co\.nz|co\.uk|com\.au|com\.bo|com\.ec|com\.mx|com\.pe|com\.py|com\.uy|com\.vn|de|dk|es|fr|hu|id|ie|it|jp|nl|nz|ph|pt|ru|se|th|tw|vn)$/,
 ];
 const FETCH_HOSTS = [
   /^itunes\.apple\.com$/, /^apps\.apple\.com$/, /^[a-z0-9-]+\.mzstatic\.com$/,

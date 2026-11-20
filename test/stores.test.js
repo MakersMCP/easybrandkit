@@ -42,9 +42,10 @@ test("classifies store listings and social profiles, and nothing else", () => {
     assert.equal(stores.classify(bad), null, bad);
   }
   // Pinterest at its own hosts only: pinterest.com and its country sites,
-  // and the country domains that send their visitors there. A host whose
-  // first label is pinterest is anyone's.
-  for (const own of ["https://www.pinterest.com/acme/", "https://pinterest.com/acme", "https://uk.pinterest.com/acme/", "https://www.pinterest.co.uk/acme/", "https://www.pinterest.de/acme/", "https://pinterest.com.au/acme/"]) {
+  // and the country domains that send their visitors there, the path kept,
+  // as pinterest.be, pinterest.com.pe, pinterest.com.ec and pinterest.id do.
+  // A host whose first label is pinterest is anyone's.
+  for (const own of ["https://www.pinterest.com/acme/", "https://pinterest.com/acme", "https://uk.pinterest.com/acme/", "https://www.pinterest.co.uk/acme/", "https://www.pinterest.de/acme/", "https://pinterest.com.au/acme/", "https://www.pinterest.be/acme/", "https://www.pinterest.com.pe/acme/", "https://www.pinterest.com.ec/acme/", "https://www.pinterest.id/acme/", "https://pinterest.com.vn/acme/", "https://www.pinterest.tw/acme/", "https://www.pinterest.hu/acme/"]) {
     assert.equal((stores.classify(own) || {}).type, "pinterest", own);
   }
   for (const other of ["https://pinterest.evil.example/brand", "https://www.pinterest.attacker.com/x", "https://pinterest.com.evil.example/x", "https://www.pinterest.co.evil/x", "https://a.b.pinterest.com/x"]) {
