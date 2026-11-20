@@ -2839,6 +2839,9 @@ test("a browser that preloads pages though the kit's profile asks it not to, or 
   process.env.STAND_IN_RELAY = JSON.stringify({ "Preload.enable": "rename" });
   process.env.STAND_IN_ARGS = "[]";
   await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => /^The browser cannot say whether it preloads pages \(.*Preload\.enableUnknown.*\), /.test(err.message) && err.message.endsWith(`${risk} Point CHROME_PATH at another browser, such as Google Chrome.`) && err.earlierKit === dir);
+  // One that takes the question and tells nothing.
+  process.env.STAND_IN_RELAY = JSON.stringify({ "Preload.enable": "silent" });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === `The browser does not say whether it preloads pages, ${risk} Point CHROME_PATH at another browser, such as Google Chrome.` && err.earlierKit === dir);
   assert.equal(asked, 0, "the site was not opened");
   assert.deepEqual(filesOf(dir), before);
 });
@@ -3311,8 +3314,12 @@ test("a page that tries to save files for the whole run leaves nothing in the us
 // what becomes of a method's calls: "drop", as a browser too busy to answer
 // them, "rename", as one that does not know them and answers so, "end", as
 // one that ends when it is sent one, the relay with it at once, as its own
-// exit would wait for its read of the kit's pipe, or "pass", or a list of
-// these for its calls in turn, the last of them for all calls after.
+// exit would wait for its read of the kit's pipe, "silent", as one that
+// answers them and does nothing, the relay answering each in its place, or
+// "pass", or a list of these for its calls in turn, the last of them for
+// all calls after. Where a rule says "silent", the browser's own messages
+// are passed on whole, one by one, so that an answer of the relay's comes
+// between two of them.
 // STAND_IN_ARGS, a JSON list, is added to the browser's arguments.
 // STAND_IN_LOG names a file each call's method is added to, with " session"
 // after one sent to a tab.
@@ -3325,7 +3332,19 @@ const counts = {};
 const args = [...process.argv.slice(2), ...JSON.parse(process.env.STAND_IN_ARGS || "[]")];
 const browser = spawn(process.env.STAND_IN_BROWSER, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
 browser.on("exit", (code) => process.exit(code === null ? 1 : code));
-browser.stdio[4].pipe(fs.createWriteStream(null, { fd: 4 }));
+const back = fs.createWriteStream(null, { fd: 4 });
+const answers = Object.values(rules).some((rule) => [].concat(rule).includes("silent"));
+if (answers) {
+  let told = "";
+  browser.stdio[4].setEncoding("utf8");
+  browser.stdio[4].on("data", (chunk) => {
+    const parts = (told + chunk).split("\\0");
+    told = parts.pop();
+    for (const part of parts) back.write(part + "\\0");
+  });
+} else {
+  browser.stdio[4].pipe(back);
+}
 let rest = "";
 fs.createReadStream(null, { fd: 3, encoding: "utf8" })
   .on("data", (chunk) => {
@@ -3343,6 +3362,10 @@ fs.createReadStream(null, { fd: 3, encoding: "utf8" })
         process.kill(process.pid, "SIGKILL");
       }
       if (now === "rename") msg.method += "Unknown";
+      if (now === "silent") {
+        back.write(JSON.stringify({ id: msg.id, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}), result: {} }) + "\\0");
+        continue;
+      }
       browser.stdio[3].write(JSON.stringify(msg) + "\\0");
     }
   })
