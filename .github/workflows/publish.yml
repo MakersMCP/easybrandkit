@@ -7,12 +7,13 @@ on:
 jobs:
   test:
     # The same tests as on every push, on Ubuntu 22.04, as the hosted
-    # service runs it, on Ubuntu 24.04 and on ubuntu-latest; nothing is
-    # published unless all of them pass.
+    # service runs it, on Ubuntu 24.04 and on ubuntu-latest, each with
+    # Node.js 22 and 24; nothing is published unless all of them pass.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04, ubuntu-latest]
+        node: [22, 24]
     runs-on: ${{ matrix.os }}
 
     permissions:
@@ -25,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
 
       # Ubuntu 24.04 and later block the user namespaces Chrome's sandbox
       # needs; 22.04 has no such setting.
