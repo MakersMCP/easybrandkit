@@ -81,6 +81,12 @@ test("an address the run was not given is opened on port 80 or 443 only, and the
   for (const [raw, why] of [["http://localhost:3001/", "is on port 3001, not 80 or 443"], ["https://localhost:3000/", "is on port 3000, not 80 or 443"], ["http://localhost/", "is not on the public internet"], ["http://10.0.0.5:3000/", "is on port 3000, not 80 or 443"], ["http://10.0.0.5/", "is not on the public internet"]]) {
     assert.equal(await local.judge(raw), why, raw);
   }
+  // 127.0.0.1 as a URL writes it mapped into IPv6 is this machine's too; its
+  // other IPv6 forms are not names of this machine, and are judged.
+  assert.equal(await local.judge("http://[::ffff:127.0.0.1]:3000/"), "");
+  for (const raw of ["http://[::7f00:1]:3000/", "http://[::ffff:0:7f00:1]:3000/", "http://[2002:7f00:1::]:3000/", "http://[64:ff9b::7f00:1]:3000/"]) {
+    assert.equal(await local.judge(raw), "is on port 3000, not 80 or 443", raw);
+  }
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8080/")), true);
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8081/")), false);
 });

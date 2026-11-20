@@ -115,11 +115,15 @@ const bare = (url) => url.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace
 
 // Whether a host is this machine itself, by a name or an address of its
 // own: localhost and the names under it, 127/8, ::1, and 0.0.0.0 and ::,
-// which reach this machine too, also written in IPv6 as an IPv4 address.
+// which reach this machine too, 127/8 and 0.0.0.0 also mapped into IPv6
+// (::ffff:127.0.0.1), as a URL writes such an address. The other IPv6 forms
+// of 127.0.0.1 (::7f00:1, ::ffff:0:7f00:1, 2002:7f00:1::, 64:ff9b::7f00:1)
+// are not this machine's own names, and are judged as any other address.
 function loopback(host) {
-  const v4 = heldIpv4(host) || host;
+  const groups = net.isIP(host) === 6 ? groupsOf(host) : null;
+  const mapped = Boolean(groups) && groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+  const v4 = mapped ? heldIpv4(host) : host;
   if (net.isIP(v4) === 4) return v4.startsWith("127.") || v4 === "0.0.0.0";
-  const groups = net.isIP(v4) === 6 ? groupsOf(v4) : null;
   if (groups) return groups.slice(0, 7).every((group) => group === 0) && groups[7] <= 1;
   return localName(v4);
 }
