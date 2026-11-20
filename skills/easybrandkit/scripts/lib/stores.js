@@ -8,10 +8,13 @@
 // It fetches only HTTPS URLs on port 443 of the listed store, social and
 // image hosts, re-checks every redirect, refuses addresses that are not on
 // the public internet and those MAKERSMCP_REFUSE_ADDRESSES names (see
-// address.js), and caps each file at 15 MB.
+// address.js), connects only to the addresses it judged, and caps each file
+// at 15 MB.
 
 const fs = require("fs");
+const https = require("https");
 const path = require("path");
+const zlib = require("zlib");
 const { promises: dns } = require("dns");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
@@ -21,6 +24,13 @@ const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
+// Pinterest's own hosts: pinterest.com with its country sites, as
+// uk.pinterest.com, and the country domains that send their visitors there,
+// as pinterest.co.uk. A host such as pinterest.acme.example is not one.
+const PINTEREST = [
+  /^([a-z]{2}\.|www\.)?pinterest\.com$/,
+  /^(www\.)?pinterest\.(at|ca|ch|cl|co\.in|co\.kr|co\.nz|co\.uk|com\.au|com\.mx|de|dk|es|fr|ie|it|jp|nl|nz|ph|pt|ru|se)$/,
+];
 const FETCH_HOSTS = [
   /^itunes\.apple\.com$/, /^apps\.apple\.com$/, /^[a-z0-9-]+\.mzstatic\.com$/,
   /^play\.google\.com$/, /^play-lh\.googleusercontent\.com$/, /^lh\d\.googleusercontent\.com$/,
@@ -29,7 +39,8 @@ const FETCH_HOSTS = [
   /^(www\.|m\.)?facebook\.com$/, /^(www\.)?linkedin\.com$/, /^media\.licdn\.com$/,
   /^(www\.)?(x|twitter)\.com$/, /^pbs\.twimg\.com$/,
   /^(www\.)?tiktok\.com$/, /^[a-z0-9.-]+\.tiktokcdn(-[a-z]+)?\.com$/,
-  /^(www\.)?threads\.(net|com)$/, /^(www\.)?pinterest\.[a-z.]+$/, /^i\.pinimg\.com$/,
+  /^(www\.)?threads\.(net|com)$/, /^i\.pinimg\.com$/,
+  ...PINTEREST,
 ];
 const PROFILE_HOSTS = [
   [/^(www\.)?instagram\.com$/, "instagram"],
@@ -39,7 +50,7 @@ const PROFILE_HOSTS = [
   [/^(www\.)?(x|twitter)\.com$/, "x"],
   [/^(www\.)?tiktok\.com$/, "tiktok"],
   [/^(www\.)?threads\.(net|com)$/, "threads"],
-  [/^(www\.)?pinterest\.[a-z.]+$/, "pinterest"],
+  ...PINTEREST.map((pattern) => [pattern, "pinterest"]),
 ];
 
 // What a link is: an App Store app, a Google Play app or a social profile.
@@ -81,8 +92,10 @@ function classify(raw) {
 
 // The address of a store's page or picture, refused unless it is a plain
 // HTTPS address on a listed host, at addresses that are all on the public
-// internet, none of them one the run's rule refuses (guard, see address.js).
-async function checkFetchUrl(raw, guard = null) {
+// internet, none of them one the run's rule refuses (guard, see address.js),
+// with the addresses its host was found at (found), which its request
+// connects to (see get).
+async function judgedFetch(raw, guard = null) {
   const url = new URL(raw);
   const host = url.hostname.toLowerCase();
   if (url.protocol !== "https:") throw new Error(`not HTTPS: ${raw}`);
@@ -94,44 +107,89 @@ async function checkFetchUrl(raw, guard = null) {
   if (!records.length || !records.every((record) => isPublicAddress(record.address))) {
     throw new Error(`host does not resolve to a public address: ${host}`);
   }
-  return url;
+  return { url, found: records.map(({ address, family }) => ({ address, family })) };
+}
+
+// The address alone, judged as above.
+async function checkFetchUrl(raw, guard = null) {
+  return (await judgedFetch(raw, guard)).url;
+}
+
+// The lookup a store's request connects with: it hands back the addresses
+// its host was found and judged at, and asks the DNS nothing again, so a
+// name whose next answer is another address still reaches none of those.
+function judgedLookup(found) {
+  return (hostname, options, callback) => {
+    const family = options && options.family;
+    const list = found.filter((record) => !family || record.family === family);
+    if (!list.length) return callback(Object.assign(new Error(`${hostname} has no address of the family asked for`), { code: "ENOTFOUND", hostname }));
+    if (options && options.all) callback(null, list);
+    else callback(null, list[0].address, list[0].family);
+  };
+}
+
+// The answer to a GET of url, connected through lookup.
+function answerOf(url, { headers, signal, lookup }) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers, signal, lookup }, resolve);
+    req.on("error", reject);
+  });
+}
+
+// An answer's body, decompressed, failed past 15 MB.
+async function bodyOf(res, host) {
+  const coding = String(res.headers["content-encoding"] || "").trim().toLowerCase();
+  const decoder = coding === "gzip" || coding === "x-gzip" ? zlib.createGunzip() : coding === "deflate" ? zlib.createInflate() : coding === "br" ? zlib.createBrotliDecompress() : null;
+  if (!decoder && coding && coding !== "identity") throw new Error(`answered in an encoding the kit does not read (${coding.slice(0, 40)}): ${host}`);
+  const stream = decoder ? res.pipe(decoder) : res;
+  if (decoder) res.on("error", (err) => decoder.destroy(err));
+  const chunks = [];
+  let size = 0;
+  try {
+    for await (const chunk of stream) {
+      size += chunk.length;
+      if (size > MAX_BYTES) throw new Error(`larger than 15 MB: ${host}`);
+      chunks.push(chunk);
+    }
+  } finally {
+    res.destroy();
+    if (decoder) decoder.destroy();
+  }
+  return Buffer.concat(chunks);
 }
 
 // GET with every redirect re-checked against the host list and the run's
-// rule (guard), a size cap and a timeout inside the run's deadline.
+// rule (guard), connected only to the addresses judged, with a size cap and
+// a timeout inside the run's deadline.
 async function get(raw, { binary = false, accept = "*/*", guard = null } = {}) {
   let current = raw;
   for (let hop = 0; hop < 5; hop++) {
-    const url = await checkFetchUrl(current, guard);
+    const { url, found } = await judgedFetch(current, guard);
     const left = timeLeft();
     if (left < 2_000) throw new Error("out of time");
     const wait = Math.min(25_000, left - 1_000);
+    const signal = AbortSignal.timeout(wait);
     try {
-      const res = await fetch(url, {
-        redirect: "manual",
-        headers: { "user-agent": UA, accept, "accept-language": "en-US,en;q=0.8" },
-        signal: AbortSignal.timeout(wait),
-      });
-      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-        current = new URL(res.headers.get("location"), url).href;
+      const res = await answerOf(url, { headers: { "user-agent": UA, accept, "accept-language": "en-US,en;q=0.8", "accept-encoding": "gzip, deflate, br" }, signal, lookup: judgedLookup(found) });
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.destroy();
+        current = new URL(res.headers.location, url).href;
         continue;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status} from ${url.hostname}`);
-      const declared = Number(res.headers.get("content-length") || 0);
-      if (declared > MAX_BYTES) throw new Error(`larger than 15 MB: ${url.hostname}`);
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of res.body) {
-        size += chunk.length;
-        if (size > MAX_BYTES) throw new Error(`larger than 15 MB: ${url.hostname}`);
-        chunks.push(chunk);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.destroy();
+        throw new Error(`HTTP ${res.statusCode} from ${url.hostname}`);
       }
-      const body = Buffer.concat(chunks);
-      return { body: binary ? body : body.toString("utf8"), type: res.headers.get("content-type") || "", url: url.href };
+      if (Number(res.headers["content-length"] || 0) > MAX_BYTES) {
+        res.destroy();
+        throw new Error(`larger than 15 MB: ${url.hostname}`);
+      }
+      const body = await bodyOf(res, url.hostname);
+      return { body: binary ? body : body.toString("utf8"), type: String(res.headers["content-type"] || ""), url: url.href };
     } catch (err) {
       // Told by the server that did not answer, not in the words of Node's
       // timer, which name nothing.
-      if (err.name === "TimeoutError") throw new Error(`${url.hostname} did not answer in ${Math.round(wait / 1_000)} s`);
+      if (signal.aborted) throw new Error(`${url.hostname} did not answer in ${Math.round(wait / 1_000)} s`);
       throw err;
     }
   }

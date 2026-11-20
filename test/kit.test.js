@@ -26,6 +26,7 @@ const { noControls, plainText, noEndSlashes } = require("../skills/easybrandkit/
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
+const { storeAnswers } = require("./store-answers");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -2235,15 +2236,13 @@ test("a store listing whose website fails keeps what the listing gave and says s
   let seller = `${named}/app`;
   // A picture whose address holds this does not come.
   let missing = "";
-  const realFetch = globalThis.fetch;
-  t.mock.method(globalThis, "fetch", async (url, ...rest) => {
-    const { hostname } = new URL(url);
-    if (hostname === "itunes.apple.com") return new Response(JSON.stringify({ results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, sellerUrl: seller, screenshotUrls: [`${art}/1.png/392x696bb.jpg`] }] }));
-    if (hostname.endsWith("mzstatic.com")) {
-      if (missing && String(url).includes(missing)) throw new TypeError("fetch failed");
-      return new Response(png);
+  storeAnswers(t, (url) => {
+    if (url.hostname === "itunes.apple.com") return { body: JSON.stringify({ results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, sellerUrl: seller, screenshotUrls: [`${art}/1.png/392x696bb.jpg`] }] }) };
+    if (url.hostname.endsWith("mzstatic.com")) {
+      if (missing && url.href.includes(missing)) throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+      return { body: png };
     }
-    return realFetch(url, ...rest);
+    return undefined;
   });
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "17.253.144.10", family: 4 }]);
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));

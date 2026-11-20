@@ -12,6 +12,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 const { wrongWith, lookOnPath, noexecMount, firstLine, browserPlace, ownSandbox } = require("../skills/easybrandkit/scripts/lib/program");
+const { storeAnswers } = require("./store-answers");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 const linux = process.platform === "linux";
@@ -243,9 +244,7 @@ test("a browser that cannot be started stops a run before anything is fetched, a
   });
   // The listing would be read first if the browser were started only once a
   // page needs it: nothing at all is asked of the network.
-  const fetched = [];
-  t.mock.method(globalThis, "fetch", async (url) => {
-    fetched.push(String(url));
+  const fetched = storeAnswers(t, () => {
     throw new Error("no network in this test");
   });
   const kit = path.join(parent, "kit");

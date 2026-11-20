@@ -13,6 +13,7 @@ const path = require("node:path");
 const test = require("node:test");
 const stores = require("../skills/easybrandkit/scripts/lib/stores");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
+const { storeAnswers, neverAnswers } = require("./store-answers");
 
 test("classifies store listings and social profiles, and nothing else", () => {
   assert.deepEqual(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), {
@@ -39,6 +40,15 @@ test("classifies store listings and social profiles, and nothing else", () => {
   assert.equal(stores.classify("https://x.com/acme").type, "x");
   for (const bad of ["https://acme.com/", "https://www.instagram.com/", "https://play.google.com/store/apps", "ftp://apps.apple.com/id1", "not a url"]) {
     assert.equal(stores.classify(bad), null, bad);
+  }
+  // Pinterest at its own hosts only: pinterest.com and its country sites,
+  // and the country domains that send their visitors there. A host whose
+  // first label is pinterest is anyone's.
+  for (const own of ["https://www.pinterest.com/acme/", "https://pinterest.com/acme", "https://uk.pinterest.com/acme/", "https://www.pinterest.co.uk/acme/", "https://www.pinterest.de/acme/", "https://pinterest.com.au/acme/"]) {
+    assert.equal((stores.classify(own) || {}).type, "pinterest", own);
+  }
+  for (const other of ["https://pinterest.evil.example/brand", "https://www.pinterest.attacker.com/x", "https://pinterest.com.evil.example/x", "https://www.pinterest.co.evil/x", "https://a.b.pinterest.com/x"]) {
+    assert.equal(stores.classify(other), null, other);
   }
 });
 
@@ -161,13 +171,62 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
   assert.equal((await stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/"))).hostname, "apps.apple.com");
   // A listing read under that rule is not asked for at all, and says why.
-  const fetched = t.mock.method(globalThis, "fetch", async () => new Response("{}"));
+  const fetched = storeAnswers(t, () => ({ body: "{}" }));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir, guard);
   assert.equal(source.ok, false);
   assert.equal(source.error, "host itunes.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
-  assert.equal(fetched.mock.callCount(), 0);
+  assert.deepEqual(fetched, []);
+});
+
+test("a store's request connects only to the addresses its host was judged at, and asks the DNS nothing again", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const judged = [{ address: "17.253.144.10", family: 4 }, { address: "2620:149:a44::10", family: 6 }];
+  const found = t.mock.method(dns.promises, "lookup", async () => judged);
+  // A second lookup, as fetch makes of its own, could be given another
+  // address: the system's lookup and fetch are not to be used.
+  const again = t.mock.method(dns, "lookup", (host, options, callback) => callback(new Error("the DNS was asked again")));
+  t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("fetch connects through a lookup of its own");
+  });
+  const lookup = { results: [{ trackName: "Acme" }] };
+  const asked = storeAnswers(t, () => ({ body: JSON.stringify(lookup) }));
+  const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir);
+  assert.equal(source.ok, true, source.error);
+  assert.equal(asked.length, 1);
+  const connect = asked[0].options.lookup;
+  const all = await new Promise((resolve, reject) => connect("itunes.apple.com", { all: true }, (err, list) => (err ? reject(err) : resolve(list))));
+  assert.deepEqual(all, judged);
+  const v6 = await new Promise((resolve, reject) => connect("itunes.apple.com", { family: 6 }, (err, address, family) => (err ? reject(err) : resolve([address, family]))));
+  assert.deepEqual(v6, ["2620:149:a44::10", 6]);
+  assert.equal(found.mock.callCount(), 1);
+  assert.equal(again.mock.callCount(), 0);
+});
+
+test("a store's answer is read decompressed, and refused past 15 MB once decompressed", async (t) => {
+  const zlib = require("node:zlib");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
+  const json = JSON.stringify({ results: [{ trackName: "Acme" }] });
+  let body = zlib.gzipSync(json);
+  let coding = "gzip";
+  storeAnswers(t, () => ({ headers: { "content-encoding": coding }, body }));
+  const link = stores.classify("https://apps.apple.com/us/app/acme/id1234567890");
+  for (const [name, packed] of [["gzip", zlib.gzipSync(json)], ["deflate", zlib.deflateSync(json)], ["br", zlib.brotliCompressSync(Buffer.from(json))]]) {
+    coding = name;
+    body = packed;
+    assert.equal((await stores.readSource(link, dir)).name, "Acme", name);
+  }
+  // 16 MB of spaces packed into a few kilobytes.
+  coding = "gzip";
+  body = zlib.gzipSync(Buffer.alloc(16 * 1024 * 1024, 32));
+  assert.equal((await stores.readSource(link, dir)).error, "larger than 15 MB: itunes.apple.com");
+  coding = "zstd";
+  body = Buffer.from("x");
+  assert.equal((await stores.readSource(link, dir)).error, "answered in an encoding the kit does not read (zstd): itunes.apple.com");
 });
 
 test("a picture that does not come is skipped, a host that cannot be found is told, and a picture that cannot be written fails the run", async (t) => {
@@ -179,9 +238,9 @@ test("a picture that does not come is skipped, a host that cannot be found is to
   png.writeUInt32BE(1024, 20);
   const art = "https://is1-ssl.mzstatic.com/image/thumb";
   const lookup = { results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, screenshotUrls: [`${art}/1.png/392x696bb.jpg`, `${art}/2.png/392x696bb.jpg`] }] };
-  t.mock.method(globalThis, "fetch", async (url) => {
-    if (url.hostname === "itunes.apple.com") return new Response(JSON.stringify(lookup));
-    return url.pathname.includes("/1.png/") ? new Response("gone", { status: 404 }) : new Response(png);
+  storeAnswers(t, (url) => {
+    if (url.hostname === "itunes.apple.com") return { body: JSON.stringify(lookup) };
+    return url.pathname.includes("/1.png/") ? { status: 404, body: "gone" } : { body: png };
   });
   const found = t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
   const link = stores.classify("https://apps.apple.com/us/app/acme/id1234567890");
@@ -211,21 +270,21 @@ test("a store that does not answer in time is named, not told in the words of No
     setTimeLimit(120_000);
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  setTimeLimit(120_000);
-  t.mock.method(globalThis, "fetch", async () => {
-    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
-  });
+  // A request gets 25 s, or what the run has left but a second: here 3 s
+  // at most, less on a machine slow to get there.
+  setTimeLimit(4_000);
+  storeAnswers(t, (url, options) => neverAnswers(options));
   t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
   const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir);
   assert.equal(source.ok, false);
-  assert.equal(source.error, "itunes.apple.com did not answer in 25 s");
+  assert.match(source.error, /^itunes\.apple\.com did not answer in [1-3] s$/);
 });
 
 test("what a listing says comes in without control characters, and its description keeps its lines", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const lookup = { results: [{ trackName: "Acme\u001b[2J App", sellerName: "Acme\u0007 Inc", primaryGenreName: "Tools\u009b", description: "One\u001b[31m\nTwo" }] };
-  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(lookup)));
+  storeAnswers(t, () => ({ body: JSON.stringify(lookup) }));
   t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
   const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir);
   assert.deepEqual([source.name, source.by, source.category, source.description], ["Acme [2J App", "Acme Inc", "Tools", "One [31m\nTwo"]);

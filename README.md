@@ -213,7 +213,7 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 3. Reads one DOM snapshot with layout and computed styles. Logo candidates are images, outermost SVGs and elements named "logo" or "brand". They are kept only in the page header, in the page footer, inside a link to the home page, or when they are named after the brand.
 4. Brings each logo to the middle of the screen, finishes its fade-in, hides whatever paints over it (a popup backdrop, the next line of text) and cuts it out with a margin of its own background. The background is read from that margin's pixels, not from the CSS. A logo drawn as SVG is also written out as a vector, with the page's styles on it and its scripts removed.
 5. Hides floating overlays and takes the first screen at 2x.
-6. Fetches store listings and profile pictures over HTTPS on port 443 from a fixed list of hosts, and refuses addresses that are not on the public internet and those `MAKERSMCP_REFUSE_ADDRESSES` names.
+6. Fetches store listings and profile pictures over HTTPS on port 443 from a fixed list of hosts, refuses addresses that are not on the public internet and those `MAKERSMCP_REFUSE_ADDRESSES` names, and connects only to the addresses it judged for the host.
 7. Writes the kit into a folder of the run's own, inside the kit's folder or next to it, and moves the files into place only once the run has ended well, so a run that fails or is stopped changes nothing there. A browser that is closed or crashes on the way, or a file that cannot be written, fails the run. A card that the browser cannot draw while it runs is told in the kit's notes.
 
 ## Limits
