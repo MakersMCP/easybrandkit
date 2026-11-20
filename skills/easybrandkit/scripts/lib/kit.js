@@ -550,11 +550,10 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (page) {
       const had = fs.readdirSync(work);
       try {
-        // A page the kit chose that the run's rule refuses is not opened.
-        // Where only the browser finds it elsewhere, it is refused once the
-        // browser says so (refuseByRule).
-        const why = page === asked ? "" : await guard.judge(page);
-        if (why) throw pageFailed(`${page} ${why}, so no kit was made.`, why);
+        // A page the kit chose that the run's rule refuses is not asked for:
+        // the browser holds every document to the rule (see chrome.js
+        // holdDocuments), and where only the browser finds it elsewhere, it
+        // is refused once the browser says so (refuseByRule).
         read = await readPage(page, work, log, { alsoNamed: appName, facts, guard, browser: take() });
       } catch (err) {
         if (!err.pageFailed || page === asked || err.outOfTime) throw err;
