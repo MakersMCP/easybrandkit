@@ -25,13 +25,17 @@
 const net = require("net");
 const dns = require("dns");
 
-// The ranges that are not on the public internet: this machine, private and
-// shared networks, link-local, and the ranges kept for documentation,
-// benchmarks, multicast and later use, as MakersMCP's worker counts them. In
-// IPv6 also Teredo (2001::/32), whose addresses hold the IPv4 addresses of a
-// server and of a client, either of which can be this machine or its
-// network, NAT64's local use prefix (64:ff9b:1::/48) and the site local
-// range (fec0::/10). The test cases are in test/address-cases.json.
+// The ranges that are not on the public internet, as MakersMCP's worker
+// counts them: this machine, private and shared networks, link-local, and
+// in IPv4 the ranges kept for documentation, benchmarks, multicast and later
+// use; in IPv6 multicast, the documentation range 2001:db8::/32, the discard
+// range 100::/64, Teredo (2001::/32), whose addresses hold the IPv4
+// addresses of a server and of a client, either of which can be this
+// machine or its network, NAT64's local use prefix (64:ff9b:1::/48) and the
+// site local range (fec0::/10). The other IPv6 ranges count as public, the
+// newer documentation range 3fff::/20 and the benchmarking one, 2001:2::/48,
+// among them, as the worker counts them too. The test cases are in
+// test/address-cases.json.
 const V4 = [
   ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
   ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16],
