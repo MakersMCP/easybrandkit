@@ -2929,9 +2929,11 @@ test("a page that tries to save files for the whole run leaves nothing in the us
 // browser STAND_IN_BROWSER names with its own arguments and passes the calls
 // on the pipe to it, and its answers back. STAND_IN_RELAY says, as JSON,
 // what becomes of a method's calls: "drop", as a browser too busy to answer
-// them, "rename", as one that does not know them and answers so, or "pass",
-// or a list of these for its calls in turn, the last of them for all calls
-// after. STAND_IN_ARGS, a JSON list, is added to the browser's arguments.
+// them, "rename", as one that does not know them and answers so, "end", as
+// one that ends when it is sent one, the relay with it at once, as its own
+// exit would wait for its read of the kit's pipe, or "pass", or a list of
+// these for its calls in turn, the last of them for all calls after.
+// STAND_IN_ARGS, a JSON list, is added to the browser's arguments.
 // STAND_IN_LOG names a file each call's method is added to, with " session"
 // after one sent to a tab.
 const RELAY = `"use strict";
@@ -2956,6 +2958,10 @@ fs.createReadStream(null, { fd: 3, encoding: "utf8" })
       const rule = [].concat(rules[msg.method] || "pass");
       const now = rule[Math.min(counts[msg.method], rule.length) - 1];
       if (now === "drop") continue;
+      if (now === "end") {
+        browser.kill("SIGKILL");
+        process.kill(process.pid, "SIGKILL");
+      }
       if (now === "rename") msg.method += "Unknown";
       browser.stdio[3].write(JSON.stringify(msg) + "\\0");
     }
@@ -3124,6 +3130,9 @@ test("a browser that does not take the rule for the pages it opens, in time or a
   // does not take.
   process.env.STAND_IN_RELAY = JSON.stringify({ "Fetch.enable": "rename" });
   await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser refused the kit's request to judge the pages it opens, so no kit was made. Try again." && err.earlierKit === dir);
+  // One that ends as it is sent it.
+  process.env.STAND_IN_RELAY = JSON.stringify({ "Fetch.enable": "end" });
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser ended before it took the kit's request to judge the pages it opens, so no kit was made. Try again." && err.earlierKit === dir);
   assert.equal(asked, 0, "the site was not opened");
   assert.deepEqual(filesOf(dir), before);
   if (temp) assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
