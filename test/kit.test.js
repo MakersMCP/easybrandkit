@@ -2490,6 +2490,26 @@ test("a frame of a page at an address the run was not given is held to the same 
   assert.deepEqual(other.asked, []);
 });
 
+test("past the first 50 addresses a page's frames tried to open that the rule refused, the notes say at least how many more there were", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  const other = await counting(t);
+  const frames = Array.from({ length: 55 }, (_, n) => `<iframe src="http://far.test:${other.port}/frame-${n}" width="10" height="10"></iframe>`).join("");
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `${frames}</body>`)));
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const given = `http://brand.test:${new URL(site.origin).port}/`;
+  const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
+  const told = kit.notes.filter((note) => note.includes("tried to open"));
+  assert.equal(told.length, 4, kit.notes.join("\n"));
+  for (const note of told.slice(0, 3)) assert.match(note, new RegExp(`^${given.replace(/[.]/g, "\\.")} tried to open http://far\\.test:${other.port}/frame-\\d+, which is on port ${other.port}, not 80 or 443: it was not opened\\.$`));
+  assert.equal(told[3], "At least 48 more addresses the pages tried to open were not opened either.");
+  assert.equal(other.connections, 0, "nothing reached the other program");
+});
+
 test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the browser starts, and for an address a site leads to, in words that name it", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {
@@ -3077,6 +3097,33 @@ test("the notes name the first three addresses the rule did not let a page open,
   assert.deepEqual(five.slice(0, 3), [1, 2, 3].map((n) => `${page} tried to open http://10.0.0.${n}/, which is not on the public internet: it was not opened.`));
   assert.deepEqual(five.slice(3), ["2 more addresses the pages tried to open were not opened either."]);
   assert.deepEqual(refusedNotes([one(1), one(2), one(3), one(4)]).slice(3), ["1 more address the pages tried to open was not opened either."]);
+});
+
+test("a move of a tab's own page that the rule refuses is kept to be told as where the page led, also past the first 50 addresses of frames and windows, which are kept once each and told past those as at least that many", async () => {
+  const { holdDocuments, takeMove, refusedNotes } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const listeners = new Map();
+  const answers = [];
+  const pipe = { on: (method, listener) => listeners.set(method, listener), send: async (method, params) => answers.push([method, params.errorReason || ""]) };
+  const page = "https://acme.com/";
+  const tab = { page, refused: [] };
+  await holdDocuments(pipe, new Map([["tab", tab]]), async (url) => (url.startsWith("http://10.") ? "is not on the public internet" : ""), 1_000);
+  const paused = listeners.get("Fetch.requestPaused");
+  // A frame that asks for one address ten times, frames at 59 others, and
+  // one the rule takes; then the page's own move.
+  for (let n = 0; n < 10; n++) await paused({ requestId: `again-${n}`, frameId: "frame", request: { url: "http://10.0.0.1/" } });
+  for (let n = 2; n <= 60; n++) await paused({ requestId: `frame-${n}`, frameId: `frame-${n}`, request: { url: `http://10.0.0.${n}/` } });
+  await paused({ requestId: "fine", frameId: "frame", request: { url: "https://acme.com/fine" } });
+  await paused({ requestId: "moved", frameId: "tab", request: { url: "http://10.0.0.99/moved" } });
+  assert.deepEqual(takeMove(tab), { page, url: "http://10.0.0.99/moved", why: "is not on the public internet", main: true });
+  assert.equal(tab.refused.length, 50);
+  const notes = refusedNotes(tab.refused, tab.refusedMore);
+  assert.deepEqual(notes.slice(0, 3), [1, 2, 3].map((n) => `${page} tried to open http://10.0.0.${n}/, which is not on the public internet: it was not opened.`));
+  assert.deepEqual(notes.slice(3), ["At least 48 more addresses the pages tried to open were not opened either."]);
+  // Every document the rule refused was given up, the page's own with the
+  // error page a page shows, and the one it takes went on.
+  assert.equal(answers.filter(([method, why]) => method === "Fetch.failRequest" && why === "Aborted").length, 69);
+  assert.equal(answers.filter(([method, why]) => method === "Fetch.failRequest" && why === "BlockedByClient").length, 1);
+  assert.equal(answers.filter(([method]) => method === "Fetch.continueRequest").length, 1);
 });
 
 test("a browser started with no rule for the addresses its pages open opens no web page", { skip: noBrowser }, async (t) => {

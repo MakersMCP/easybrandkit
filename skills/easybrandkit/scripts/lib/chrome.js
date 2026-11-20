@@ -950,12 +950,13 @@ const LONG_ADDRESS = 300;
 // own page ends on the browser's error page: given up the same way, a move
 // the page made before its load event left the tab taking no more input
 // (Chrome 155), so the page could not be read anyway. The refusal is kept
-// with the tab it came from, in its refused list: the tab whose page it
-// was, by the page's id, marked main, else the tab opened last, whose frame
-// or window it was, as the kit reads in one tab at a time and the card's
-// tab asks for nothing (see navigate, takeMove and refusedNotes). With no
-// rule, no web page is opened. A page's pictures, styles, scripts and data
-// are no documents, and are left to the browser's own rules.
+// with the tab it came from, in its refused list (see keepRefused): the tab
+// whose page it was, by the page's id, marked main, else the tab opened
+// last, whose frame or window it was, as the kit reads in one tab at a time
+// and the card's tab asks for nothing (see navigate, takeMove and
+// refusedNotes). With no rule, no web page is opened. A page's pictures,
+// styles, scripts and data are no documents, and are left to the browser's
+// own rules.
 async function holdDocuments(pipe, tabs, judge, ms) {
   pipe.on("Fetch.requestPaused", async (paused) => {
     const url = String((paused.request && paused.request.url) || "");
@@ -970,10 +971,27 @@ async function holdDocuments(pipe, tabs, judge, ms) {
     if (!why) return void pipe.send("Fetch.continueRequest", { requestId: paused.requestId }, HELD_ANSWER).catch(() => {});
     const page = tabs.get(paused.frameId);
     const tab = page || [...tabs.values()].pop();
-    if (tab && tab.refused.length < 50) tab.refused.push({ page: tab.page || "", url: url.slice(0, LONG_ADDRESS), why, main: Boolean(page) });
+    if (tab) keepRefused(tab, { page: tab.page || "", url: url.slice(0, LONG_ADDRESS), why, main: Boolean(page) });
     pipe.send("Fetch.failRequest", { requestId: paused.requestId, errorReason: page ? "BlockedByClient" : "Aborted" }, HELD_ANSWER).catch(() => {});
   });
   await pipe.send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] }, ms);
+}
+
+// A document the run's rule refused, kept in the tab's refused list (see
+// holdDocuments): a move of the tab's own page always, to be told as where
+// the page led, the list holding 100 at most; a frame's or a window's once
+// for each address, the first 50 addresses, past which the tab's
+// refusedMore says that there were more.
+function keepRefused(tab, one) {
+  const list = tab.refused;
+  if (one.main) {
+    if (list.length < 100) list.push(one);
+    return;
+  }
+  const others = list.filter((kept) => !kept.main);
+  if (others.some((kept) => kept.url === one.url)) return;
+  if (others.length < 50) list.push(one);
+  else if (!list.some((kept) => kept.url === one.url)) tab.refusedMore = true;
 }
 
 // The move to an address the run's rule refused that the tab's page made
@@ -988,14 +1006,15 @@ function takeMove(cdp) {
 // The notes on the addresses the run's rule did not let the pages open
 // (tab.refused, see holdDocuments): a frame, a window, or a page's own move
 // that was not told as where the page led, each named once, the first three
-// of them.
-function refusedNotes(refused = []) {
+// of them, and how many more there were: at least that many when the list
+// did not keep them all (tab.refusedMore, see keepRefused).
+function refusedNotes(refused = [], past = false) {
   const byAddress = new Map();
   for (const one of refused) if (!byAddress.has(one.url)) byAddress.set(one.url, one);
   const list = [...byAddress.values()];
   const notes = list.slice(0, 3).map(({ page, url, why }) => `${page || "The page"} tried to open ${url}, which ${why}: it was not opened.`);
-  const more = list.length - 3;
-  if (more > 0) notes.push(`${more} more ${more === 1 ? "address the pages tried to open was" : "addresses the pages tried to open were"} not opened either.`);
+  const more = Math.max(0, list.length - 3) + (past ? 1 : 0);
+  if (more > 0) notes.push(`${past ? "At least " : ""}${more} more ${more === 1 ? "address the pages tried to open was" : "addresses the pages tried to open were"} not opened either.`);
   return notes;
 }
 
@@ -1316,4 +1335,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, refusedNotes, takeMove, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, refusedNotes, takeMove, holdDocuments, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };

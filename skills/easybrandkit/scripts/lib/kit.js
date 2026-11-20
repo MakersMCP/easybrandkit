@@ -343,7 +343,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     // whether the browser runs in a sandbox of its own (see triedNotes),
     // and those the run's rule did not let them open (see refusedNotes).
     const tried = await triedSoFar(cdp);
-    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], sandboxed: Boolean(chrome.sandboxed) };
+    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], refusedMore: Boolean(cdp.refusedMore), sandboxed: Boolean(chrome.sandboxed) };
   } catch (err) {
     // A browser that ended on the way is told as that, whichever call was
     // waiting for it; a call it never answered is not told by its name in
@@ -584,7 +584,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       notes.push(`${some} not read: ${read.wordsUnread === "time" ? "the run's time ran out. Give it more time with --timeout." : "the browser tab stopped answering."}`);
     }
     if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
-    if (read) notes.push(...triedNotes(read.tried, read), ...refusedNotes(read.refused));
+    if (read) notes.push(...triedNotes(read.tried, read), ...refusedNotes(read.refused, read.refusedMore));
     if (facts && !read) notes.push(failed ? "No facts were read: the website it names could not be read." : "No facts were read: the listing names no website.");
     const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : [], guard) : [];
     const sources = [...(given ? [given] : []), ...others];
