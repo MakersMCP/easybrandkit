@@ -38,6 +38,17 @@ test("MAKERSMCP_REFUSE_ADDRESSES: IP addresses and ranges, an IPv6 form of a ref
     assert.equal(refused.match(address), said, address);
   }
   for (const address of ["185.137.215.164", "11.0.0.1", "fe80::1", "2a01:4f8::6", "", "intranet"]) assert.equal(refused.match(address), "", address);
+  // An entry written as an IPv6 form of an IPv4 address or range refuses
+  // that IPv4 address or range too, and every form of it, as
+  // easyscreenshotkit reads the setting.
+  for (const entry of ["2002:b989:d7a3::/48", "2002:b989:d7a3::", "64:ff9b::185.137.215.163", "64:ff9b::b989:d7a3", "::185.137.215.163", "::ffff:0:185.137.215.163", "::ffff:185.137.215.163", "::ffff:185.137.215.0/120", "2002:b989:d700::/40"]) {
+    const one = refusedAddresses(entry);
+    for (const address of ["185.137.215.163", "::ffff:185.137.215.163", "2002:b989:d7a3::1", "64:ff9b::b989:d7a3"]) assert.equal(one.match(address), "185.137.215.163", `${entry} ${address}`);
+    assert.equal(one.match("185.137.216.1"), "", entry);
+  }
+  assert.equal(refusedAddresses("::ffff:185.137.215.0/120").match("185.137.215.9"), "185.137.215.9");
+  // :: and ::1 hold no IPv4 address.
+  for (const entry of ["::", "::1", "::/127"]) assert.equal(refusedAddresses(entry).match("0.0.0.1"), "", entry);
   for (const value of [undefined, "", " ", ",", " , ,"]) {
     const none = refusedAddresses(value);
     assert.equal(none.size, 0, String(value));

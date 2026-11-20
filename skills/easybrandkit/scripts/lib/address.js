@@ -96,6 +96,32 @@ function heldIpv4(raw) {
   return "";
 }
 
+// The IPv4 address or range an IPv6 address or range holds, in one of the
+// forms heldIpv4 reads, as [address, prefix], or null: the IPv4 part is the
+// last 32 bits of the mapped, compatible, translated and NAT64 forms, so a
+// range of them at /96 or longer holds the IPv4 range of its last bits, and
+// the 32 bits after 2002 in 6to4, so a range of those at /16 or longer holds
+// the IPv4 range of its next bits, /32 from /48 on. A compatible range that
+// holds only :: and ::1, which are no IPv4 address, holds none.
+// ::ffff:185.137.215.0/120 holds 185.137.215.0/24. As easyscreenshotkit
+// reads it.
+function heldRange(groups, bits) {
+  const v4 = (high, low) => [high >> 8, high & 255, low >> 8, low & 255].join(".");
+  const zero = (from, to) => groups.slice(from, to).every((group) => group === 0);
+  if (bits >= 96) {
+    const prefix = bits - 96;
+    if ((zero(0, 5) && groups[5] === 0xffff) || (zero(0, 4) && groups[4] === 0xffff && groups[5] === 0) || (groups[0] === 0x64 && groups[1] === 0xff9b && zero(2, 6))) return [v4(groups[6], groups[7]), prefix];
+    if (zero(0, 6)) {
+      const low = ((groups[6] << 16) | groups[7]) >>> 0;
+      const size = 2 ** (32 - prefix);
+      const first = low - (low % size);
+      return first + size - 1 >= 2 ? [v4(groups[6], groups[7]), prefix] : null;
+    }
+  }
+  if (groups[0] === 0x2002 && bits >= 16) return [v4(groups[1], groups[2]), Math.min(bits, 48) - 16];
+  return null;
+}
+
 // Whether an IP address is on the public internet. Anything that is no IP
 // address is not.
 function isPublicAddress(raw) {
@@ -184,6 +210,12 @@ function refusedAddresses(value = process.env[SETTING]) {
       throw new Error(`${SETTING} holds ${JSON.stringify(shown)}, which is neither an IP address nor a range such as 10.0.0.0/8, so nothing was read. Give IP addresses and ranges parted by commas, or leave it empty.`);
     }
     list.addSubnet(range[1], prefix, family === 6 ? "ipv6" : "ipv4");
+    // An entry written as an IPv6 form of an IPv4 address or range refuses
+    // that IPv4 address or range as well, and so every form of it, as an
+    // IPv4 entry does: 2002:b989:d7a3::/48 named only itself, and
+    // 185.137.215.163 was opened.
+    const held = family === 6 ? heldRange(groupsOf(range[1]) || [], prefix) : null;
+    if (held) list.addSubnet(held[0], held[1], "ipv4");
     size++;
   }
   const one = (address) => {
