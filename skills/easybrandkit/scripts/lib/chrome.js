@@ -371,11 +371,18 @@ async function launch({ width, height }, { judge = null } = {}) {
   // judged that address, and the address refused there still got the
   // connection, with no request in it, and a page's speculation rules had it
   // fetch an address ahead of the page's move there. Each tab the kit reads
-  // pages in asks it whether it took that (see noPreloading).
+  // pages in asks it whether it took that (see noPreloading). It takes no
+  // signed exchange either (web_package.signed_exchange.enabled): with its
+  // default, a page, a frame or a prefetch that answered with one had the
+  // browser fetch the certificate the exchange names, at any https address
+  // and port the site wrote there, a request of its own that is no document
+  // and that the rule never sees, so a site reached any port of this machine
+  // or of its network. A browser that asks for them all the same is told by
+  // the first document it asks for (see holdDocuments).
   const preferences = path.join(profile, "Default", "Preferences");
   try {
     fs.mkdirSync(path.join(profile, "Default"));
-    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 } }));
+    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 }, web_package: { signed_exchange: { enabled: false } } }));
   } catch (err) {
     // For anything but no room, the refusal still holds.
     if (NO_ROOM.has(err.code)) throw room(err, preferences);
@@ -972,11 +979,25 @@ const LONG_ADDRESS = 300;
 // refusedNotes). With no rule, no web page is opened. A page's pictures,
 // styles, scripts and data are no documents, and are left to the browser's
 // own rules.
+//
+// A document asked for with signed exchanges in its Accept header comes from
+// a browser that takes them though its profile asks it not to (see launch),
+// as a Chrome policy (SignedHTTPExchangeEnabled) makes it do: it is not
+// asked for, and its tab is marked signedExchanges, so that the run ends
+// there (see navigate). The first document a browser asks for is the page
+// the kit opens, so nothing of the site has been asked for by then.
 async function holdDocuments(pipe, tabs, judge, ms) {
   pipe.on("Fetch.requestPaused", async (paused) => {
     const url = String((paused.request && paused.request.url) || "");
+    const page = tabs.get(paused.frameId);
+    const tab = page || [...tabs.values()].pop();
+    const fail = () => pipe.send("Fetch.failRequest", { requestId: paused.requestId, errorReason: page ? "BlockedByClient" : "Aborted" }, HELD_ANSWER).catch(() => {});
     let why = "";
     if (/^https?:/i.test(url)) {
+      if (asksSignedExchanges(paused.request)) {
+        if (tab) tab.signedExchanges = true;
+        return void fail();
+      }
       try {
         why = judge ? await judge(url) : "is not opened by a browser the kit gave no rule for the addresses it opens";
       } catch {
@@ -984,13 +1005,18 @@ async function holdDocuments(pipe, tabs, judge, ms) {
       }
     }
     if (!why) return void pipe.send("Fetch.continueRequest", { requestId: paused.requestId }, HELD_ANSWER).catch(() => {});
-    const page = tabs.get(paused.frameId);
-    const tab = page || [...tabs.values()].pop();
     if (tab) keepRefused(tab, { page: tab.page || "", url: url.slice(0, LONG_ADDRESS), why, main: Boolean(page) });
-    pipe.send("Fetch.failRequest", { requestId: paused.requestId, errorReason: page ? "BlockedByClient" : "Aborted" }, HELD_ANSWER).catch(() => {});
+    fail();
   });
   await pipe.send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] }, ms);
 }
+
+// Whether a request the browser holds asks for signed exchanges, by its
+// Accept header, as Chrome's documents do while it takes them.
+const asksSignedExchanges = (request) => Object.entries((request && request.headers) || {}).some(([name, value]) => name.toLowerCase() === "accept" && /application\/signed-exchange/i.test(String(value)));
+
+// The end of a run whose browser takes signed exchanges (see holdDocuments).
+const SIGNED_EXCHANGES = "The browser takes signed exchanges though its profile asks it not to, as a Chrome policy (SignedHTTPExchangeEnabled) or a program that starts it with a profile of its own makes it do, so no kit was made: a page could have it fetch the certificate a signed exchange names, at an address easybrandkit does not open, without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
 
 // The browser preloads nothing, as its profile asks (see launch): asked in
 // each tab the kit reads pages in, before it opens one there.
@@ -1312,6 +1338,9 @@ async function navigate(cdp, url) {
     if (outOfTime()) throw pageFailed(`${url} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.`, "did not answer", true);
     throw pageFailed(`${url} did not answer in ${Math.round(limit / 1_000)} s, so no kit was made. The site may be down or slow: try again later.`, "did not answer");
   }
+  // A browser that takes signed exchanges, told by the page's own document,
+  // which it was not let ask for (see holdDocuments).
+  if (cdp.signedExchanges) throw new Error(SIGNED_EXCHANGES);
   if (errorText) {
     // The address, or a hop of its redirects, that the run's rule refused,
     // which the browser then did not ask for: told by the address and why,

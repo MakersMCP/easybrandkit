@@ -2655,6 +2655,74 @@ test("a page's speculation rules, a prefetch and a prerender of another program'
   assert.equal(other.connections, 0, "no connection reached the other program");
 });
 
+// A signed exchange (application/signed-exchange;v=b3), as a page, a frame
+// or a prefetch can answer with: its magic, its fallback address, its
+// signature and its headers in CBOR, keys in their canonical order, then the
+// body. The browser that takes one fetches the certificate its signature
+// names (cert-url) from that address, whatever its host and port, before it
+// checks the signature, which here is made up.
+function signedExchange(certUrl) {
+  const bytes = (text) => {
+    const data = Buffer.from(text);
+    return Buffer.concat([Buffer.from(data.length < 24 ? [0x40 + data.length] : [0x58, data.length]), data]);
+  };
+  const pairs = [[":status", "200"], ["content-type", "text/html"], ["content-encoding", "mi-sha256-03"], ["digest", `mi-sha256-03=${crypto.randomBytes(32).toString("base64")}`]].map(([key, value]) => [bytes(key), bytes(value)]);
+  pairs.sort(([a], [b]) => a.length - b.length || Buffer.compare(a, b));
+  const headers = Buffer.concat([Buffer.from([0xa0 + pairs.length]), ...pairs.flat()]);
+  const now = Math.floor(Date.now() / 1_000);
+  const signature = Buffer.from(`sig1;sig=*${crypto.randomBytes(64).toString("base64")}*;integrity="digest/mi-sha256-03";cert-url="${certUrl}";cert-sha256=*${crypto.randomBytes(32).toString("base64")}*;validity-url="https://example.com/v";date=${now - 60};expires=${now + 3_600}`);
+  const fallback = Buffer.from("https://example.com/");
+  const size = (n, width) => Buffer.from(Array.from({ length: width }, (_, i) => (n >> (8 * (width - 1 - i))) & 255));
+  const body = Buffer.from("<!doctype html><title>Signed</title><p>signed</p>");
+  return Buffer.concat([Buffer.from("sxg1-b3\0", "latin1"), size(fallback.length, 2), fallback, size(signature.length, 3), size(headers.length, 3), signature, headers, size(0, 4), size(body.length, 4), body]);
+}
+
+test("a frame and a prefetch that answer with a signed exchange take the browser nowhere: the program whose port its certificate's address names gets no connection", { skip: noBrowser }, async (t) => {
+  const other = await counting(t);
+  const signed = [];
+  const site = await serve((req, res) => {
+    if (req.url === "/signed") {
+      signed.push(req.url);
+      return res.writeHead(200, { "content-type": "application/signed-exchange;v=b3", "x-content-type-options": "nosniff" }).end(signedExchange(`https://127.0.0.1:${other.port}/cert.cbor`));
+    }
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="/signed" width="200" height="100"></iframe><link rel="prefetch" href="/signed"></body>`));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const { kit } = await makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.equal(signed.length, 2, "the frame and the prefetch asked for the signed exchange");
+  assert.equal(other.connections, 0, "no connection reached the program the certificate's address names");
+});
+
+test("a browser that takes signed exchanges though the kit's profile asks it not to is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // Started with a profile of its own, as a program that starts the browser
+  // can start it, which preloads no page and takes signed exchanges, as
+  // Chrome does by default.
+  const own = path.join(parent, "its-own");
+  writeFiles(own, { "Default/Preferences": JSON.stringify({ net: { network_prediction_options: 2 } }) });
+  useRelay(t, parent, {}, [`--user-data-dir=${own}`]);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser takes signed exchanges though its profile asks it not to, as a Chrome policy (SignedHTTPExchangeEnabled) or a program that starts it with a profile of its own makes it do, so no kit was made: a page could have it fetch the certificate a signed exchange names, at an address easybrandkit does not open, without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser." && err.earlierKit === dir);
+  assert.equal(asked, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("a browser that preloads pages though the kit's profile asks it not to, or that cannot say whether it does, is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let asked = 0;
   const site = await serve((req, res) => {
