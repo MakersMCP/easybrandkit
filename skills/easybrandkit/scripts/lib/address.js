@@ -27,7 +27,8 @@ const dns = require("dns");
 
 // The ranges that are not on the public internet, as MakersMCP's worker
 // counts them: this machine, private and shared networks, link-local, and
-// in IPv4 the ranges kept for documentation, benchmarks, multicast and later
+// in IPv4 the ranges kept for protocol assignments (192.0.0.0/24), 6to4
+// relays (192.88.99.0/24), documentation, benchmarks, multicast and later
 // use; in IPv6 multicast, the documentation range 2001:db8::/32, the discard
 // range 100::/64, Teredo (2001::/32), whose addresses hold the IPv4
 // addresses of a server and of a client, either of which can be this
