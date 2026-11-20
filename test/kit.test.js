@@ -3033,6 +3033,18 @@ test("a browser that does not take the refusal of downloads reads the site, and 
   assert.deepEqual(fs.readdirSync(temp), [], "and went with it");
 });
 
+test("the notes name the first three addresses the rule did not let a page open, each once, and count the rest", () => {
+  const { refusedNotes } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const page = "https://acme.com/";
+  const one = (n) => ({ page, url: `http://10.0.0.${n}/`, why: "is not on the public internet", main: false });
+  assert.deepEqual(refusedNotes([]), []);
+  assert.deepEqual(refusedNotes([one(1), one(1), { ...one(2), page: "" }]), [`${page} tried to open http://10.0.0.1/, which is not on the public internet: it was not opened.`, "The page tried to open http://10.0.0.2/, which is not on the public internet: it was not opened."]);
+  const five = refusedNotes([one(1), one(2), one(1), one(3), one(4), one(5)]);
+  assert.deepEqual(five.slice(0, 3), [1, 2, 3].map((n) => `${page} tried to open http://10.0.0.${n}/, which is not on the public internet: it was not opened.`));
+  assert.deepEqual(five.slice(3), ["2 more addresses the pages tried to open were not opened either."]);
+  assert.deepEqual(refusedNotes([one(1), one(2), one(3), one(4)]).slice(3), ["1 more address the pages tried to open was not opened either."]);
+});
+
 test("a browser started with no rule for the addresses its pages open opens no web page", { skip: noBrowser }, async (t) => {
   let asked = 0;
   const site = await serve((req, res) => {
@@ -3047,6 +3059,11 @@ test("a browser started with no rule for the addresses its pages open opens no w
   const cdp = await openPage(chrome, { width: 800, height: 600 });
   const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
   await assert.rejects(navigate(cdp, `${site.origin}/`), (err) => err.message === `${site.origin}/ is not opened by a browser the kit gave no rule for the addresses it opens, so no kit was made.`);
+  // A rule that fails as it judges an address opens nothing either.
+  const failing = await launch({ width: 800, height: 600 }, { judge: async () => { throw new Error("no answer"); } });
+  t.after(() => failing.close());
+  const tab = await openPage(failing, { width: 800, height: 600 });
+  await assert.rejects(navigate(tab, `${site.origin}/`), (err) => err.message === `${site.origin}/ could not be judged, so no kit was made.`);
   assert.equal(asked, 0);
 });
 
