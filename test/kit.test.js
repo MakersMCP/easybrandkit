@@ -163,7 +163,7 @@ function writeFiles(dir, files) {
 // Linux and 104 elsewhere): null, and the temp files not checked, when the
 // system's temp folder is too deep for one.
 function ownTemp(t) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "t"));
+  const temp = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "t"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   if (path.join(temp, "com.google.Chrome.XXXXXX", "SingletonSocket").length > (process.platform === "linux" ? 107 : 103)) {
     t.diagnostic(`${temp} is too deep for Chrome's socket, so what the browser leaves in the temp folder is not checked`);
@@ -672,7 +672,7 @@ test("stores and social networks: a listing leads to its website, a profile is r
   assert.equal(siteOfListing("https://www.acme.com/help/support-request"), "https://www.acme.com/");
   assert.equal(siteOfListing("https://www.facebook.com/acme"), "");
   assert.equal(siteOfListing("not a url"), "");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   try {
     for (const profile of ["x.com/acme", "https://www.instagram.com/acme/", "https://www.linkedin.com/company/acme", "apps.apple.com"]) {
@@ -685,7 +685,7 @@ test("stores and social networks: a listing leads to its website, a profile is r
 });
 
 test("never writes into a folder that holds someone else's files, and reads an earlier kit without changing it", (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-dir-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-dir-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const dir = path.join(parent, "kit");
   assert.equal(checkDir(dir), null, "not there");
@@ -721,7 +721,7 @@ test("never writes into a folder that holds someone else's files, and reads an e
 });
 
 test("prepareDir still readies a folder for a kit written straight into it, as runs did up to 0.4.0", (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-dir-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-dir-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // Made when it is not there, with the folders above it.
   const fresh = path.join(parent, "new", "acme");
@@ -759,7 +759,7 @@ test("prepareDir still readies a folder for a kit written straight into it, as r
 });
 
 test("a run that fails leaves its folder as it was: an earlier kit stays whole, and a folder it would have made is not left", async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   // No browser: the run gets past the folder and fails as it starts one.
   const chrome = process.env.CHROME_PATH;
   process.env.CHROME_PATH = path.join(parent, "no-chrome");
@@ -778,7 +778,7 @@ test("a run that fails leaves its folder as it was: an earlier kit stays whole, 
 });
 
 test("a temp folder with no room left for the browser's profile is told as the temp folder's, not the kit's", { skip: partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   // A browser is found, any file will do, and its profile cannot be made.
   const chrome = process.env.CHROME_PATH;
   process.env.CHROME_PATH = process.execPath;
@@ -931,7 +931,7 @@ exec ${ANSWER}
 `;
 
 test("a browser that ends takes its helpers with it and leaves nothing of its own in the temp folder", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR, HELPER_PID: process.env.HELPER_PID };
@@ -1023,7 +1023,7 @@ exec ${ANSWER}
 `;
 
 test("a browser's crash handler goes with it, also once its helpers have ended, and no other process it names does", { skip: (process.platform !== "linux" && "a browser's processes are told on Linux only") || partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
   const names = ["CHROME_PATH", "TMPDIR", "NODE_BIN", "HANDLER_BIN", "HANDLER_PID", "HANDLER_GIVEN"];
@@ -1169,7 +1169,7 @@ while :; do sleep 0.05; done
 
 // The stand-in above, as the browser, in a temp folder of the test's own.
 function withSocket(t) {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
   const names = ["CHROME_PATH", "TMPDIR", "STAND_IN_PID", "STAND_IN_DUMPS"];
@@ -1226,7 +1226,7 @@ test("a browser's crash reports go into its throwaway profile, not into the user
 });
 
 test("what Chrome's component updater was fetching goes once a browser has ended, and only what came while it ran", (t) => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-temp-"));
+  const temp = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-temp-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const fetched = ["com.google.Chrome.chrome_chrome_url_fetcher_.a1b2c3", "com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.d4e5f6"];
   writeFiles(temp, {
@@ -1246,7 +1246,7 @@ test("what Chrome's component updater was fetching goes once a browser has ended
 
 test("a browser that quits when asked leaves nothing of its component updater's in the temp folder", { skip: noBrowser }, async (t) => {
   const temp = ownTemp(t);
-  if (!temp) return;
+  if (!temp) return t.skip("the temp folder is too deep for a browser");
   const system = process.env.TMPDIR;
   process.env.TMPDIR = temp;
   t.after(() => {
@@ -1263,7 +1263,7 @@ test("a browser that quits when asked leaves nothing of its component updater's 
 });
 
 test("a browser that is slow to answer still runs; one that has ended does not", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const chrome = process.env.CHROME_PATH;
   t.after(() => {
     if (chrome === undefined) delete process.env.CHROME_PATH;
@@ -1293,7 +1293,7 @@ test("a browser that is slow to answer still runs; one that has ended does not",
 });
 
 test("a browser slow to start, to open a tab or to answer the connection to it is waited for as long as the run has left, and then told in words", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
@@ -1441,7 +1441,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
 });
 
 test("a browser that does not answer is told within seconds when the temp folder has no room, and is waited for as long as the run has left otherwise", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
   fs.mkdirSync(temp);
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
@@ -1558,7 +1558,7 @@ test("a browser that does not answer is told within seconds when the temp folder
 });
 
 test("a browser that cannot start because the temp folder's path is too long for its socket says so", { skip: (process.platform !== "linux" && "told on Linux only") || partedTemp }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const env = { CHROME_PATH: process.env.CHROME_PATH, TMPDIR: process.env.TMPDIR };
   t.after(() => {
     for (const [name, value] of Object.entries(env)) {
@@ -1601,7 +1601,7 @@ test("a browser that cannot start because the temp folder's path is too long for
   if (env.TMPDIR === undefined) delete process.env.TMPDIR;
   else process.env.TMPDIR = env.TMPDIR;
   const temp = ownTemp(t);
-  if (!temp) return;
+  if (!temp) return t.skip("the temp folder is too deep for a browser");
   process.env.TMPDIR = temp;
   await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.message === `chrome did not start: CHROME_PATH is ${chrome}, which ended before it answered: it printed nothing and exited with 134. Point CHROME_PATH at the program of a Chrome, Chromium, Edge or Brave that runs, or unset it.`);
   assert.deepEqual(fs.readdirSync(temp), []);
@@ -1675,7 +1675,7 @@ test("logos: the site's own marks on their real background, plus colors, fonts, 
     if (body) res.writeHead(200, { "content-type": "image/svg+xml" }).end(body);
     else res.writeHead(200, { "content-type": "text/html" }).end(html);
   });
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-")), "kit");
+  const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
   try {
     // A blog post's address: the kit is read from the home page.
     const { kit } = await makeKit(`${origin}/blog/first-post`, { dir, stores: false });
@@ -1780,7 +1780,7 @@ test("a bot check served instead of the page fails with a reason and leaves noth
     <body style="margin:0;font-family:Arial"><h1 style="color:rgb(221,107,16)">Confirm you are human</h1>
     <button style="width:200px;height:44px;background:rgb(255,153,2)">Begin</button></body></html>`;
   const { server, origin } = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(html));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   try {
     await assert.rejects(makeKit(origin, { dir, stores: false }), /answered with a bot check \("Human Verification"\)/);
@@ -1815,7 +1815,7 @@ test("logos: the mark alone, as it stands once settled: no neighbour cut by the 
     <div class="backdrop"></div><div class="dialog">Sale</div>
   </body></html>`;
   const { server, origin } = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(html));
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-")), "kit");
+  const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
   try {
     const { kit } = await makeKit(origin, { dir, stores: false });
     assert.equal(kit.logos[0].where, "header", JSON.stringify(kit.logos));
@@ -1862,7 +1862,7 @@ test("logos: a lockup on a picture is not the logo; the vector keeps the page's 
     <footer><a href="/">${svg("rgb(255,255,255)", 140, 36)}</a></footer>
   </body></html>`;
   const { server, origin } = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(html));
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-")), "kit");
+  const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
   try {
     const { kit } = await makeKit(origin, { dir, stores: false });
     assert.deepEqual(kit.logos.map((l) => [l.where, l.onPicture, l.svg]), [["header", true, "logo-01.svg"], ["footer", false, "logo-02.svg"]], JSON.stringify(kit.logos));
@@ -1889,7 +1889,7 @@ test("logos: a lockup on a picture is not the logo; the vector keeps the page's 
 });
 
 test("a vector that still holds a script or an event handler when it comes back from the page is not saved", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const cdp = (value) => ({ world: 7, send: async (method) => (method === "DOM.resolveNode" ? { object: { objectId: "o" } } : { result: { value } }) });
   const mark = { kind: "svg", backendNodeId: 1, src: "" };
@@ -1944,7 +1944,7 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   let html = brandPage("rgb(255,0,0)", "rgb(255,255,255)");
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(html));
   const bot = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(BOT_CHECK));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   // The browser's profile and the folders Chrome makes in the temp folder go
   // too, whether the run fails or ends well.
@@ -2022,7 +2022,7 @@ test("a home page that ends on an HTTP error, on a page that cannot be opened or
     if (req.url === "/drop") return req.socket.destroy();
     return res.writeHead(404).end();
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -2135,7 +2135,7 @@ test("a deeper address whose home page fails is read as given and says so, and i
     if (req.url === "/when") return when.ask(res);
     return res.writeHead(404).end();
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2291,7 +2291,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
     return undefined;
   });
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "17.253.144.10", family: 4 }]);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2463,7 +2463,7 @@ test("an address a site leads to is opened only on port 80 or 443 and on the pub
     html(brandPage("rgb(255,0,0)"));
   });
   port = new URL(site.origin).port;
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2530,7 +2530,7 @@ test("a frame of a page at an address the run was not given is held to the same 
     if (req.url === "/moving") return html(`<!doctype html><title>Moving</title><script>setTimeout(() => location.replace("http://far.test:${other.port}/moved"), 300)</script>`);
     html(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="http://far.test:${other.port}/frame" width="200" height="100"></iframe><iframe src="http://127.0.0.1:${other.port}/frame" width="200" height="100"></iframe><iframe src="/fine" width="200" height="100"></iframe><iframe src="/moving" width="200" height="100"></iframe></body>`));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2553,7 +2553,7 @@ test("past the first 50 addresses a page's frames tried to open that the rule re
   const other = await counting(t);
   const frames = Array.from({ length: 55 }, (_, n) => `<iframe src="http://far.test:${other.port}/frame-${n}" width="10" height="10"></iframe>`).join("");
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `${frames}</body>`)));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2588,7 +2588,7 @@ test("an address the browser reads and the URL parser here cannot, as one with a
     const frames = ["xn--a", "xn--a-", "a.xn--", "xn---", "XN--A"].map((label, n) => `<iframe src="${at(label, `/frame-${n}`)}" width="200" height="100"></iframe>`).join("");
     html(brandPage("rgb(255,0,0)").replace("</body>", `${frames}</body>`));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2629,7 +2629,7 @@ test("an http address given is asked for over http as it is written, a name unde
     asked.push(`${req.headers.host}${req.url}`);
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2652,7 +2652,7 @@ const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status =
 
 test("an http address given on a name the browser takes only over https, as every .dev name, is read over https on its own port, as the address given", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
   const https = require("node:https");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // A site under development on a name of its own, served over TLS on a
   // port of its own, as a local dev server with a certificate does.
@@ -2679,7 +2679,7 @@ test("an http address given on a name the browser takes only over https, as ever
 
 test("an http address on port 80 that gives no answer or no connection, as a site that serves only https, is read over https on port 443 in its place, held to the rule for an address the run was not given, and the kit's notes say so", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
   const https = require("node:https");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // The site over TLS, as a site that serves only https, reached through
   // the proxy, which closes every http connection to these names with no
@@ -2727,7 +2727,7 @@ test("an http address on port 80 that gives no answer or no connection, as a sit
 
 test("an http address on port 80 that answers with a redirect to an address that gives no answer is not read over https in its place, and the last line names where it led", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
   const https = require("node:https");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // a.test answers on port 80 with a redirect to b.test, which takes the
   // connection and closes it with no answer, through the proxy; a.test
@@ -2761,7 +2761,7 @@ test("an http address on port 80 that answers with a redirect to an address that
 
 test("an https address read in the place of an http one that fails is told with both: one that runs out of the run's time with the advice to give it more, and a tab that stops answering as the tab's, with its own advice", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
   const https = require("node:https");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // Both sites serve only https, through the proxy, which closes their http
   // connections with no answer; slow.test never answers over https either.
@@ -2837,7 +2837,7 @@ test("a page's speculation rules, a prefetch and a prerender of another program'
   const away = `http://127.0.0.1:${other.port}/x`;
   const rules = JSON.stringify({ prefetch: [{ source: "list", urls: [away] }], prerender: [{ source: "list", urls: [away] }] });
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script type="speculationrules">${rules}</script><script>setTimeout(() => (location.href = ${JSON.stringify(away)}), 2000)</script></body>`)));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2880,7 +2880,7 @@ test("a frame and a prefetch that answer with a signed exchange take the browser
     }
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="/signed" width="200" height="100"></iframe><link rel="prefetch" href="/signed"></body>`));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2899,7 +2899,7 @@ test("a frame and a prefetch that answer with a signed exchange take the browser
 // started it with the Reporting API and Web Payments off.
 test("a page's reports and a payment method's manifest take the browser nowhere: the program whose port they name is asked nothing", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test program's certificate") }, async (t) => {
   const https = require("node:https");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1"], { cwd: parent, encoding: "utf8" });
   assert.equal(made.status, 0, made.stderr);
@@ -2935,7 +2935,7 @@ test("a browser that takes signed exchanges though the kit's profile asks it not
     asked++;
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2960,7 +2960,7 @@ test("a browser that preloads pages though the kit's profile asks it not to, or 
     asked++;
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -2994,7 +2994,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the bro
   site.server.on("connection", () => reached.push(Date.now()));
   const port = new URL(site.origin).port;
   const proxy = await proxyOf(t, port);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = ownTemp(t);
   const tmpdir = process.env.TMPDIR;
   if (temp) process.env.TMPDIR = temp;
@@ -3040,7 +3040,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the bro
 
 test("MAKERSMCP_REFUSE_ADDRESSES counts where the browser says it reached the address given, as a name found elsewhere by its own lookup", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3061,7 +3061,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES counts where the browser says it reached the ad
 test("MAKERSMCP_REFUSE_ADDRESSES refuses a store listing given, and one a page links, whose store is at an address it names, in its words, and that store is asked nothing", { skip: noBrowser }, async (t) => {
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)").replace("</footer>", `<a href="${listing}">App Store</a></footer>`)));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3086,7 +3086,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES refuses a store listing given, and one a page l
 });
 
 test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any work, in words that name it; empty, it changes nothing", async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -3116,7 +3116,7 @@ test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any 
 test("a site another source named, given with namedBy or --named-by, is read as a page the kit chose: only on port 80 or 443 and on the public internet, refused before anything is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await counting(t);
   const proxy = await proxyOf(t, site.port);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
@@ -3169,7 +3169,7 @@ test("a site another source named that leads to the source's own scheme, host an
   });
   const port = new URL(site.origin).port;
   const proxy = await proxyOf(t, port);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3217,7 +3217,7 @@ test("a tab that stops answering is told in words, and more time is advised only
     if (req.url === "/deep") return res.writeHead(200, { "content-type": "text/html" }).end(page);
     res.writeHead(200, { "content-type": "text/html" }).end(html);
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -3263,7 +3263,7 @@ function withTab(t, change) {
 test("a page's words are read once the run's time is up, and those the tab did not give are told in the kit's notes", { skip: noBrowser }, async (t) => {
   const page = brandPage("rgb(255,0,0)").replace("<main><h1>Acme</h1></main>", "<main><h1>Acme</h1><h2>Plans for teams</h2><h2>Ship every day</h2></main>");
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3304,7 +3304,7 @@ test("with --facts, the page the kit read is read for its claims only while it i
     if (req.url === "/when") return when.ask(res);
     res.writeHead(200, { "content-type": "text/html" }).end(home);
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     other.server.close();
     site.server.close();
@@ -3340,7 +3340,7 @@ test("with --facts, the page the kit read is read for its claims only while it i
 
 test("a kit's folder removed while a run makes its kit is told as that, not as a file the run could not write", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3383,7 +3383,7 @@ test("through a proxy, which the browser does not tell past, the kit's own looku
   });
   const port = new URL(site.origin).port;
   const proxy = await proxyOf(t, port);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3418,7 +3418,7 @@ async function savingSite(t) {
     }
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>let n = 0; setInterval(() => { const a = document.createElement("a"); a.href = "/report.bin?" + ++n; a.download = "report-" + n + ".bin"; document.body.appendChild(a); a.click(); a.remove(); }, 25)</script></body>`));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const env = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DOWNLOAD_DIR: process.env.XDG_DOWNLOAD_DIR };
   t.after(() => {
     for (const [name, value] of Object.entries(env)) {
@@ -3532,7 +3532,7 @@ function useRelay(t, dir, rules = {}, args = []) {
 
 test("the refusal of downloads is said once, to the whole browser, before any tab is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3559,7 +3559,7 @@ test("a browser too busy to answer the kit's refusal of downloads ends the run b
     asked++;
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = ownTemp(t);
   const tmpdir = process.env.TMPDIR;
   if (temp) process.env.TMPDIR = temp;
@@ -3682,7 +3682,7 @@ test("a browser that does not take the rule for the pages it opens, in time or a
     asked++;
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = ownTemp(t);
   const tmpdir = process.env.TMPDIR;
   if (temp) process.env.TMPDIR = temp;
@@ -3724,7 +3724,7 @@ test("what a page says reaches no terminal with its control characters, and a no
     if (req.url === "/project/") return html(200, brandPage("rgb(255,0,0)"));
     html(403, bot);
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3770,7 +3770,7 @@ test("what a page says reaches no terminal with its control characters, and a no
 
 test("with --facts, an error while the pages are read is one line in the summary", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3785,7 +3785,7 @@ test("with --facts, an error while the pages are read is one line in the summary
 
 test("with --facts, rules that do not finish are told as that: the page was read, and no claim is said to be missing", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -3817,7 +3817,7 @@ test("a robots.txt rule built to keep a matcher busy cannot keep a run from bein
     }
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<nav><a href="/pricing?${"a".repeat(400)}">Pricing</a></nav></body>`));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let child;
@@ -3852,7 +3852,7 @@ test("a page built to keep the read of its snapshot busy cannot keep a run from 
   const words = Array.from({ length: 50 }, (_, i) => `aa${String.fromCharCode(98 + (i % 25))}${String.fromCharCode(98 + Math.floor(i / 25))}`).join(" ");
   const images = `<script>const l="a".repeat(2000);const f=document.createDocumentFragment();for(let i=0;i<40000;i++){const m=document.createElement("img");m.setAttribute("alt",l+i);m.setAttribute("title",l);m.setAttribute("aria-label",l);m.src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";m.width=40;m.height=40;m.style.cssText="position:absolute;left:0;top:0";f.appendChild(m);}document.body.appendChild(f);</script>`;
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("<title>", `<meta property="og:site_name" content="${words}"><title>`).replace("</body>", `${images}</body>`)));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   const temp = ownTemp(t);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -3889,7 +3889,7 @@ test("a page built to keep the read of its snapshot busy cannot keep a run from 
 
 test("a disk that fills up while the card or a vector is written fails the run, and no file cut off goes into the kit", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -3932,7 +3932,7 @@ test("a browser killed while the page is read fails the run at once and says so,
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
   // Takes the connection and never answers.
   const silent = await serve(() => {});
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -3961,7 +3961,7 @@ test("a home page the run used up its time on ends the run, with the advice to g
     // Takes the connection and never answers, but for the deeper page.
     if (req.url === "/project/") res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.closeAllConnections();
@@ -3984,7 +3984,7 @@ test("a home page the run used up its time on ends the run, with the advice to g
 test("a short time limit reads what a page shows, and says so when the page shows nothing and there is no time to wait", { skip: noBrowser }, async (t) => {
   const plain = "<!doctype html><meta charset=utf-8><title>No Logo Home</title><h1>A home page with plenty on it</h1><p><a href=/x>link</a></p><div style=height:2000px>text</div>";
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(req.url === "/deep" ? brandPage("rgb(255,0,0)") : req.url === "/tr" ? "<!doctype html><title>Loading</title><p>Loading</p>" : plain));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
@@ -4013,7 +4013,7 @@ test("a browser killed while the page loads is told at once, not after the wait 
     }
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="/slow.png" width="10" height="10"></body>`));
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.closeAllConnections();
@@ -4133,7 +4133,7 @@ test("a browser whose tab has just not answered is given a second to quit, also 
       throw fail(method);
     },
   });
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -4281,7 +4281,7 @@ function withClosingTab(t, method, tooLarge, closing = Infinity) {
 test("a page whose tab closes while the browser runs fails the run in words, and one too large to take is told as too large to read", { skip: noBrowser }, async (t) => {
   const page = brandPage("rgb(255,0,0)");
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -4306,7 +4306,7 @@ test("a page whose tab closes while the browser runs fails the run in words, and
 });
 
 test("files of someone's that come into a folder made during the run are refused, not taken for a kit", { skip: noBrowser }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   let came = false;
   const site = await serve((req, res) => {
@@ -4327,7 +4327,7 @@ test("files of someone's that come into a folder made during the run are refused
 
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -4401,7 +4401,7 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
 });
 
 test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   writeFiles(dir, { "brand.json": JSON.stringify({ version: 1, logos: [{ file: "logo-01.png" }] }), "BRAND.md": "one", "_brand.yml": "one", "logo-01.png": "one" });
   // Another run's kit, with a second logo, takes the earlier one's place
@@ -4425,7 +4425,7 @@ test("the folder is read again as the new kit goes in: a kit put there while the
 
 test("the CLI says once that a new kit could not be put in place, and the kit there stays as it was", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -4450,7 +4450,7 @@ test("the CLI says once that a new kit could not be put in place, and the kit th
 
 test("a run that ends well exits 0 when nobody reads what it prints, and 1, saying the kit was saved, when its output cannot be written", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     site.server.close();
@@ -4509,7 +4509,7 @@ function processesIn(group) {
 
 test("a run stopped by SIGINT, SIGQUIT, SIGTERM or SIGHUP leaves the earlier kit as it was, says so, and leaves no browser running and nothing in the temp folder", { skip: noBrowser || (process.platform === "win32" && "no POSIX signals") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)")));
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const dir = path.join(parent, "kit");
   const groups = [];
   t.after(() => {
@@ -4518,7 +4518,8 @@ test("a run stopped by SIGINT, SIGQUIT, SIGTERM or SIGHUP leaves the earlier kit
     fs.rmSync(parent, { recursive: true, force: true });
   });
   const temp = ownTemp(t);
-  const env = { ...process.env, ...(temp ? { TMPDIR: temp } : {}) };
+  // Its full path: the runs below start in another folder.
+  const env = { ...process.env, TMPDIR: temp || path.resolve(os.tmpdir()) };
   const tempLeft = () => (temp ? fs.readdirSync(temp) : []);
   // The kit, made by the CLI, whose process ends once it has printed its
   // summary, not when a timer of the page's load runs out.
@@ -4591,7 +4592,7 @@ test("a run stopped by SIGINT, SIGQUIT, SIGTERM or SIGHUP leaves the earlier kit
 // session bus and no display to reach one either. Gives what was started
 // so far.
 function recordHandlers(t) {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-handlers-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-handlers-"));
   const handlers = path.join(parent, "handlers");
   const started = path.join(parent, "started.log");
   fs.mkdirSync(handlers);
@@ -4617,7 +4618,7 @@ function recordHandlers(t) {
 
 test("a site cannot make the browser start a program of this machine with an address that is not a web address", { skip: noBrowser || (process.platform !== "linux" && "on macOS and Windows such an address in a frame would open the system's own program") }, async (t) => {
   const startedSoFar = recordHandlers(t);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const mail = "mailto:hello@acme.example?subject=Hi";
   let way = "";
@@ -4754,7 +4755,7 @@ const WAYLAND_CLIENT = "import ctypes; l = ctypes.CDLL('libwayland-client.so.0')
 
 test("on Linux the browser starts with a session bus where nothing listens, no display and the stand-ins first on its PATH, whatever this process has", { skip: (process.platform !== "linux" && "the bus and the stand-ins are given on Linux") || partedTemp }, async (t) => {
   const net = require("node:net");
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-env-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // The test's own sockets, a bus and a display, are made in its folder,
   // whose path has to leave them the 107 bytes a socket's path takes.
@@ -4786,10 +4787,14 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   // and the Wayland display it was given lead anywhere, and what a Wayland
   // client it starts finds, and ends. The client is started without
   // WAYLAND_SOCKET, which the test gives this process and which would end
-  // its search for a display at once.
+  // its search for a display at once, and what it prints goes nowhere:
+  // under a temp folder whose path leaves the profile's no-display past the
+  // 107 bytes of a socket's path, libwayland says so and connects to
+  // nothing, which is what the test looks for, and its line would be taken
+  // for one the browser printed.
   const seen = path.join(parent, "seen.txt");
   const browser = path.join(parent, "browser");
-  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "\${WAYLAND_DISPLAY-unset}"; [ -e "$WAYLAND_DISPLAY" ] && echo there || echo nothing; echo "DISPLAY \${DISPLAY-unset}, WAYLAND_SOCKET \${WAYLAND_SOCKET-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; ${client ? `(unset WAYLAND_SOCKET; python3 -I -c "${WAYLAND_CLIENT}")` : "echo no client"}; } > ${sh(seen)}\nexit 3\n`, { mode: 0o755 });
+  fs.writeFileSync(browser, `#!/bin/sh\nfirst=\${PATH%%:*}\nbus=\${DBUS_SESSION_BUS_ADDRESS#unix:path=}\n{ echo "$DBUS_SESSION_BUS_ADDRESS"; [ -e "$bus" ] && echo there || echo nothing; echo "\${WAYLAND_DISPLAY-unset}"; [ -e "$WAYLAND_DISPLAY" ] && echo there || echo nothing; echo "DISPLAY \${DISPLAY-unset}, WAYLAND_SOCKET \${WAYLAND_SOCKET-unset}"; echo "$first"; for name in xdg-open xdg-email xdg-settings x-www-browser www-browser sensible-browser; do readlink "$first/$name"; done; ${client ? `(unset WAYLAND_SOCKET; python3 -I -c "${WAYLAND_CLIENT}" 2>/dev/null)` : "echo no client"}; } > ${sh(seen)}\nexit 3\n`, { mode: 0o755 });
   setEnv(t, { CHROME_PATH: browser, DBUS_SESSION_BUS_ADDRESS: `unix:path=${desktop}`, DISPLAY: ":99", WAYLAND_DISPLAY: "wayland-0", WAYLAND_SOCKET: "9", XDG_RUNTIME_DIR: runtime, TMPDIR: parent });
   await assert.rejects(launch({ width: 800, height: 600 }), /ended before it answered: it printed nothing and exited with 3\./);
   const [address, there, wayland, waylandThere, x, first, ...rest] = fs.readFileSync(seen, "utf8").trim().split("\n");
@@ -4815,7 +4820,7 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
 // Also where this process's own temp folder has one, as the tests above
 // skip there.
 test("on Linux a temp folder whose path has a : in it, which parts the folders of PATH, is refused before anything is made in it", { skip: process.platform !== "linux" && "the stand-ins are given on Linux" }, async (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-env-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-env-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const browser = path.join(parent, "browser");
   fs.writeFileSync(browser, "#!/bin/sh\nexit 3\n", { mode: 0o755 });
@@ -4873,7 +4878,7 @@ async function privateBus(t) {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const python = spawnSync("python3", ["-I", "-c", "import gi; gi.require_version('Gio', '2.0'); from gi.repository import Gio"], { stdio: "ignore" });
   if (python.status !== 0 || spawnSync("dbus-daemon", ["--version"], { stdio: "ignore" }).status !== 0) return null;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-bus-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-bus-"));
   const socket = path.join(dir, "bus");
   fs.writeFileSync(path.join(dir, "bus.conf"), `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">\n<busconfig><type>session</type><listen>unix:path=${busPath(socket)}</listen><auth>EXTERNAL</auth><policy context="default"><allow send_destination="*" eavesdrop="true"/><allow eavesdrop="true"/><allow own="*"/></policy></busconfig>\n`);
   fs.writeFileSync(path.join(dir, "portal.py"), PORTAL);
@@ -4907,7 +4912,7 @@ test("on Linux a site's mailto: reaches no desktop portal, also when this proces
   assert.equal(bus.calls().length, 1);
   assert.match(bus.calls()[0], /OpenURI OpenURI \('', 'mailto:control@acme\.example'/);
   process.env.DBUS_SESSION_BUS_ADDRESS = bus.address;
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   let way = "";
   const frame = (src) => `<iframe src="${src}" style="width:1px;height:1px;border:0"></iframe>`;
@@ -4947,7 +4952,7 @@ test("on Linux a site's mailto: reaches no desktop portal, also when this proces
 
 test("a browser installed as a snap or a Flatpak is not said to have opened nothing that reached it", { skip: noBrowser || (process.platform !== "linux" && "snaps and Flatpaks are on Linux") }, async (t) => {
   const startedSoFar = recordHandlers(t);
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // The browser through a link in a Flatpak's exports, as such an install
   // gives it.
@@ -4987,7 +4992,7 @@ test("a page the kit chose on another port than 80 or 443 is not opened, a menu 
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("<h1>Acme</h1>", `<h1>Acme</h1><a href="http://brand.test:${otherPort}/pricing">Pricing</a>`));
   });
   const port = new URL(site.origin).port;
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-out-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     other.server.close();

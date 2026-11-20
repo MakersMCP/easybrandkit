@@ -75,7 +75,7 @@ const kitOf = (tag, logos) => ({
 });
 
 const tempParent = (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-run-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-run-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   return parent;
 };
@@ -1143,7 +1143,7 @@ test("an error never names the part folder, and a full disk is told as the kit's
     // The browser's profile in the temp folder, which here holds the kit's
     // folder too.
     const full = code === "ENOSPC" ? `The disk that holds the temp folder, ${temp}, is full (ENOSPC).` : `This user has no room left on the disk that holds the temp folder, ${temp} (EDQUOT).`;
-    assert.equal(toldPlainly(failed(code, path.join(os.tmpdir(), "easybrandkit-chrome-XXXXXX")), run).message, `${full} Free some space on it, or set ${variable} to a folder on another disk.`);
+    assert.equal(toldPlainly(failed(code, path.join(path.resolve(os.tmpdir()), "easybrandkit-chrome-XXXXXX")), run).message, `${full} Free some space on it, or set ${variable} to a folder on another disk.`);
   }
   // Anywhere else, the error is told as it is.
   const other = failed("ENOSPC", path.join(path.parse(temp).root, "easybrandkit-elsewhere", "file"));

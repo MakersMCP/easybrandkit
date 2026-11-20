@@ -176,7 +176,7 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   assert.equal((await stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/"))).hostname, "apps.apple.com");
   // A listing read under that rule is not asked for at all, and says why.
   const fetched = storeAnswers(t, () => ({ body: "{}" }));
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir, guard);
   assert.equal(source.ok, false);
@@ -185,7 +185,7 @@ test("a store's addresses are judged as every address the kit opens is: by the t
 });
 
 test("a store's request connects only to the addresses its host was judged at, and asks the DNS nothing again", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const judged = [{ address: "17.253.144.10", family: 4 }, { address: "2620:149:a44::10", family: 6 }];
   const found = t.mock.method(dns.promises, "lookup", async () => judged);
@@ -211,7 +211,7 @@ test("a store's request connects only to the addresses its host was judged at, a
 
 test("a store's answer is read decompressed, and refused past 15 MB once decompressed", async (t) => {
   const zlib = require("node:zlib");
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   t.mock.method(dns.promises, "lookup", async () => [{ address: "17.253.144.10", family: 4 }]);
   const json = JSON.stringify({ results: [{ trackName: "Acme" }] });
@@ -234,7 +234,7 @@ test("a store's answer is read decompressed, and refused past 15 MB once decompr
 });
 
 test("a picture that does not come is skipped, a host that cannot be found is told, and a picture that cannot be written fails the run", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const png = Buffer.alloc(33);
   png.writeUInt32BE(0x89504e47, 0);
@@ -269,7 +269,7 @@ test("a picture that does not come is skipped, a host that cannot be found is to
 });
 
 test("a store that does not answer in time is named, not told in the words of Node's timer", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => {
     setTimeLimit(120_000);
     fs.rmSync(dir, { recursive: true, force: true });
@@ -285,7 +285,7 @@ test("a store that does not answer in time is named, not told in the words of No
 });
 
 test("what a listing says comes in without control characters, and its description keeps its lines", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-stores-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const lookup = { results: [{ trackName: "Acme\u001b[2J App", sellerName: "Acme\u0007 Inc", primaryGenreName: "Tools\u009b", description: "One\u001b[31m\nTwo" }] };
   storeAnswers(t, () => ({ body: JSON.stringify(lookup) }));

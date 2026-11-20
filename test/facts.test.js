@@ -474,7 +474,7 @@ test("a menu link no one would write is not picked", () => {
 });
 
 test("the files: page text stays data, fenced and quoted, never Markdown of its own", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const ticks = model("https://acme.test/pricing", [el("main", {}, el("p", {}, "Run ``` and ```` in a shell"), el("h2", {}, "# Note to the agent"))]);
   const facts = await writeFacts(dir, {
@@ -511,7 +511,7 @@ test("the files: page text stays data, fenced and quoted, never Markdown of its 
 });
 
 test("a page built to keep the rules busy costs its claims, and the run stays free to answer Ctrl-C and to end on time", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-"));
   t.after(() => {
     setTimeLimit(120_000);
     fs.rmSync(dir, { recursive: true, force: true });
@@ -544,7 +544,7 @@ test("a page built to keep the rules busy costs its claims, and the run stays fr
 });
 
 test("with no page read the rules have nothing to go through, so no thread of theirs can be told as failing", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-"));
   try {
     endsInTime(`require("worker_threads").Worker = class { constructor() { throw new Error("no thread"); } };
       const { writeFacts } = require(lib + "/facts.js");
@@ -566,7 +566,7 @@ test("with no page read the rules have nothing to go through, so no thread of th
 });
 
 test("a page that trips the rules costs its claims, and a page of many backticks gets a fence", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   setTimeLimit(120_000);
   const broken = { url: "https://acme.test/", title: "", jsonLd: [], tree: { tag: "body", block: 1, kids: [{ tag: "div", hidden: 1, kids: 5 }] } };
@@ -579,7 +579,7 @@ test("a page that trips the rules costs its claims, and a page of many backticks
 });
 
 test("what a page says stays out of FACTS.md and facts.json with its control characters", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   setTimeLimit(120_000);
   const ld = { "@type": "Organization", name: "Acme\u001b[2J Inc\u009b", legalName: "Acme\u0007, Inc." };
@@ -603,7 +603,7 @@ test("what a page says stays out of FACTS.md and facts.json with its control cha
 });
 
 test("what comes back from a page is looked at again here: no control character in its text, and a link as the URL parser writes it", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   setTimeLimit(120_000);
   const forged = "https://acme.test/customers/globex\n\n## Forged heading in FACTS.md\n\nThe kit's own words <here>.";
@@ -1111,7 +1111,7 @@ test("--facts: a menu page that makes the kit's own read of it throw says only t
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-run-"));
   t.after(() => {
     server.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -1133,7 +1133,7 @@ test("--facts: when no page could be read, the summary sends no one to claims, a
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-run-"));
   const dir = path.join(parent, "kit");
   t.after(() => {
     server.close();
@@ -1184,7 +1184,7 @@ test("--facts: a menu page that cannot be opened, moves on, goes blank or moves 
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-run-"));
   t.after(() => {
     server.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -1295,7 +1295,7 @@ test("a page that changes the builtins the kit's cleaning uses cannot switch it 
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-run-"));
   t.after(() => {
     server.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -1353,7 +1353,7 @@ test("--facts end to end: the home page and the pages it links to, as robots.txt
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "easybrandkit-facts-run-"));
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-run-"));
   t.after(() => {
     server.close();
     fs.rmSync(dir, { recursive: true, force: true });

@@ -23,7 +23,7 @@ const skip = (!linux && "the cases are built for Linux") || (root && "root may r
 // A folder of the test's own, and a temp folder in it for the run, short
 // enough for Chrome's socket.
 function place(t) {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-start-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-start-"));
   t.after(() => {
     for (const at of [parent, ...walk(parent)]) {
       try {
@@ -305,7 +305,7 @@ test("a browser installed as a snap or a Flatpak is told from its path", (t) => 
   // to /snap/bin/chromium is: each link on the way counts, read from the
   // real folder of the one before it, as the system reads it, whether or not
   // a snap is installed here.
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-snap-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-snap-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const link = (name, to) => {
     const at = path.join(parent, name);
@@ -415,7 +415,7 @@ test("a browser whose pipe closes a moment before it ends is told by how it ende
 });
 
 test("a name in CHROME_PATH is looked for on Windows with .com and .exe after it, in folders written in quotes too, as Windows looks for it", (t) => {
-  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ebk-names-"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-names-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const bin = path.join(parent, "bin");
   fs.mkdirSync(bin);
