@@ -18,7 +18,7 @@ const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
-const { findChrome, launch, openPage, browserWait, killBrowsers, removeTemps, pipeOf, busPath } = require("../skills/easybrandkit/scripts/lib/chrome");
+const { findChrome, launch, openPage, browserWait, killBrowsers, removeTemps, pipeOf, busPath, proxyNotes } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { groundOf, saveVector, readWords } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
@@ -3635,18 +3635,44 @@ test("every request the browser makes, whatever makes it, goes through the kit's
 
 test("a run's notes name what the kit's proxy refused while it read the page, and a run that reaches what it may is read as before", { skip: noBrowser }, async (t) => {
   const other = await countingBoth(t);
-  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://127.0.0.1:${other.port}/pic.png"></body>`)));
+  // A picture on another port, and one on a name the lookup does not find,
+  // which the notes leave out: a page's trackers on names that are gone
+  // would fill them, and such a name reaches nothing anyway.
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://127.0.0.1:${other.port}/pic.png"><img src="http://pixel.gone.test/p.png"></body>`)));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
+  const looked = [];
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    looked.push(host);
+    throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+  });
   const given = `${site.origin}/`;
   const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(looked.includes("pixel.gone.test"), "the proxy looked the picture's name up");
   assert.deepEqual(kit.notes, [`While easybrandkit read ${given}, the browser asked for http://127.0.0.1:${other.port}/pic.png, which is on port ${other.port}, not 80 or 443: it was not reached.`]);
   assert.ok(fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8").includes(`- ${kit.notes[0]}\n`));
   assert.equal(other.connections, 0);
+});
+
+test("the notes of what the kit's proxy refused leave out a name that could not be looked up and what the browser asked for before any page, and count the rest past the first three", () => {
+  const page = "https://acme.com/";
+  const refused = [
+    { what: "http://update.example:8080/check", why: "is on port 8080, not 80 or 443", page: "" },
+    { what: "http://pixel.gone.example/p.png", why: "is on a host whose name could not be looked up", page },
+    ...["10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.8", "10.0.0.9"].map((ip) => ({ what: `http://${ip}/p.png`, why: "is not on the public internet", page })),
+  ];
+  const named = (ip) => `While easybrandkit read ${page}, the browser asked for http://${ip}/p.png, which is not on the public internet: it was not reached.`;
+  assert.deepEqual(proxyNotes(refused.slice(0, 3)), [named("10.0.0.5")]);
+  assert.deepEqual(proxyNotes(refused), [named("10.0.0.5"), named("10.0.0.6"), named("10.0.0.7"), "2 more addresses the browser asked for were not reached either."]);
+  assert.deepEqual(proxyNotes(refused.slice(0, 6)), [named("10.0.0.5"), named("10.0.0.6"), named("10.0.0.7"), "1 more address the browser asked for was not reached either."]);
+  // Past the 50 the proxy keeps, at least one more.
+  assert.deepEqual(proxyNotes(refused.slice(0, 3), true), [named("10.0.0.5"), "At least 1 more address the browser asked for was not reached either."]);
+  assert.deepEqual(proxyNotes(refused, true), [named("10.0.0.5"), named("10.0.0.6"), named("10.0.0.7"), "At least 3 more addresses the browser asked for were not reached either."]);
+  assert.deepEqual(proxyNotes(refused.slice(0, 2)), []);
 });
 
 test("a page's WebRTC and WebTransport send no UDP past the kit's proxy, and WebRTC's TURN over TCP goes through the proxy, which refuses it", { skip: noBrowser }, async (t) => {
