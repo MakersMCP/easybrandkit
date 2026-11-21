@@ -12,8 +12,24 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const stores = require("../skills/easybrandkit/scripts/lib/stores");
+const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { storeAnswers, neverAnswers } = require("./store-answers");
+
+// Each connection a request makes, kept as [host, address, port], and made
+// to nothing; connected(options) has the request's own connection made, and
+// resolves to the code it failed with.
+function dialNowhere(t) {
+  const dials = [];
+  t.mock.method(dialLib.wire, "dial", (address, port, name) => {
+    dials.push([name, address, port]);
+    const socket = new net.Socket();
+    process.nextTick(() => socket.destroy(Object.assign(new Error("not made here"), { code: "ECONNREFUSED" })));
+    return socket;
+  });
+  return dials;
+}
+const connected = (options) => new Promise((resolve) => options.createConnection({}, (err) => resolve(err && err.code)));
 
 test("classifies store listings and social profiles, and nothing else", () => {
   assert.deepEqual(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), {
@@ -184,7 +200,7 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   assert.deepEqual(fetched, []);
 });
 
-test("a store's request connects only to the addresses its host was judged at, and asks the DNS nothing again", async (t) => {
+test("a store's request connects only to the addresses its host was judged at, with no agent and so through no proxy the environment names, and asks the DNS nothing again", async (t) => {
   const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const judged = [{ address: "17.253.144.10", family: 4 }, { address: "2620:149:a44::10", family: 6 }];
@@ -200,11 +216,12 @@ test("a store's request connects only to the addresses its host was judged at, a
   const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir);
   assert.equal(source.ok, true, source.error);
   assert.equal(asked.length, 1);
-  const connect = asked[0].options.lookup;
-  const all = await new Promise((resolve, reject) => connect("itunes.apple.com", { all: true }, (err, list) => (err ? reject(err) : resolve(list))));
-  assert.deepEqual(all, judged);
-  const v6 = await new Promise((resolve, reject) => connect("itunes.apple.com", { family: 6 }, (err, address, family) => (err ? reject(err) : resolve([address, family]))));
-  assert.deepEqual(v6, ["2620:149:a44::10", 6]);
+  const { options } = asked[0];
+  assert.equal(options.agent, undefined);
+  assert.equal(options.lookup, undefined);
+  const dials = dialNowhere(t);
+  assert.equal(await connected(options), "ECONNREFUSED");
+  assert.deepEqual(dials, [["itunes.apple.com", "17.253.144.10", 443], ["itunes.apple.com", "2620:149:a44::10", 443]]);
   assert.equal(found.mock.callCount(), 1);
   assert.equal(again.mock.callCount(), 0);
 });
@@ -296,9 +313,11 @@ test("a listing's hosts are each looked up once, its pictures and its redirects 
   assert.deepEqual(source.assets.map((asset) => asset.file), ["appstore-icon.png", "appstore-shot-01.png", "appstore-shot-02.png"]);
   assert.deepEqual([...answered], [["itunes.apple.com", 1], ["is1-ssl.mzstatic.com", 1]]);
   assert.equal(found.mock.callCount(), 2);
+  const dials = dialNowhere(t);
   for (const { url, options } of asked) {
-    const to = await new Promise((resolve) => options.lookup(new URL(url).hostname, {}, (err, address) => resolve(err || address)));
-    assert.equal(to, "17.253.144.10", url);
+    dials.length = 0;
+    assert.equal(await connected(options), "ECONNREFUSED", url);
+    assert.deepEqual(dials, [[new URL(url).hostname, "17.253.144.10", 443]], url);
   }
   // A second listing read in the same run asks the DNS nothing more.
   await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir, guard);

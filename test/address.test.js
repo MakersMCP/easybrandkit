@@ -210,10 +210,12 @@ test("a run that has no address of its own, as one reading a site another source
   ]) {
     assert.equal(await none.judge(raw), why, raw);
   }
-  // A request the kit makes itself, as for robots.txt, connects by the
-  // rule's own lookup, on the address given too.
-  for (const raw of ["https://acme.com/robots.txt", "http://localhost:3000/robots.txt"]) assert.equal(typeof none.lookupFor(raw), "function", raw);
-  assert.equal(typeof guardFor("https://acme.com/").lookupFor("https://acme.com/robots.txt"), "function");
+  // A request the kit makes itself, as for robots.txt, connects to the
+  // addresses of the rule's own lookup, held to the rule, on the address
+  // given too.
+  assert.deepEqual(await none.addressesFor("https://acme.com/robots.txt"), ["93.184.216.34"]);
+  await assert.rejects(none.addressesFor("http://localhost:3000/robots.txt"), (err) => err.code === "ENOTPUBLIC" && err.message === "http://localhost:3000/robots.txt is on port 3000, not 80 or 443");
+  assert.deepEqual(await guardFor("http://localhost:3000/").addressesFor("http://localhost:3000/robots.txt"), ["127.0.0.1", "::1"]);
 });
 
 test("an address the run was not given is opened only on the public internet, by its form and by every address its name is found at, and never where its name is not found in time", async (t) => {
@@ -303,10 +305,7 @@ test("an address written with http: or https: that the URL parser here cannot re
     for (const raw of ["not an address", "mailto:a@acme.com", "about:blank", "ftp://xn--a.localhost/"]) assert.equal(await guard.judge(raw), "", raw);
   }
   // A request the kit made itself to one would connect to no address.
-  const lookup = guardFor("http://localhost:9222/").lookupFor("http://xn--a.localhost:9222/robots.txt");
-  const err = await new Promise((resolve) => lookup("xn--a.localhost", {}, (failed) => resolve(failed)));
-  assert.equal(err.code, "ENOTPUBLIC");
-  assert.equal(err.message, `xn--a.localhost ${why}`);
+  await assert.rejects(guardFor("http://localhost:9222/").addressesFor("http://xn--a.localhost:9222/robots.txt"), (err) => err.code === "ENOTPUBLIC" && err.message === `http://xn--a.localhost:9222/robots.txt ${why}`);
   // A label that decodes is the name it stands for, and is judged.
   for (const raw of ["https://xn--bcher-kva.example/", "https://xn--80ak6aa92e.com/", "https://www.xn--zca.example/"]) assert.equal(await guardFor("https://acme.com/").judge(raw), "", raw);
   assert.equal(await guardFor("http://localhost:9222/").judge("http://xn--bcher-kva.localhost:9222/"), "");
@@ -466,26 +465,19 @@ test("a request the kit makes itself connects only to an address the rule took, 
   let answers = 0;
   const found = t.mock.method(dns.promises, "lookup", async (host) => (host === "rebind.acme.com" && answers++ ? [{ address: "127.0.0.1", family: 4 }] : [{ address: "93.184.216.34", family: 4 }, { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 }]));
   const system = t.mock.method(dns, "lookup", (host, options, callback) => callback(new Error("the DNS was asked again")));
-  const ask = (lookup, host, options) => new Promise((resolve) => lookup(host, options, (err, ...got) => resolve(err || got)));
   const guard = guardFor("https://acme.com/");
   assert.equal(await guard.judge("https://rebind.acme.com/"), "");
-  const lookup = guard.lookupFor("https://rebind.acme.com/robots.txt");
-  assert.deepEqual(await ask(lookup, "rebind.acme.com", { all: true }), [[{ address: "93.184.216.34", family: 4 }, { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 }]]);
-  assert.deepEqual(await ask(lookup, "rebind.acme.com", {}), ["93.184.216.34", 4]);
-  assert.deepEqual(await ask(lookup, "rebind.acme.com", { family: 6 }), ["2606:2800:220:1:248:1893:25c8:1946", 6]);
+  for (let i = 0; i < 3; i++) assert.deepEqual(await guard.addressesFor("https://rebind.acme.com/robots.txt"), ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]);
   assert.equal(found.mock.calls.filter((call) => call.arguments[0] === "rebind.acme.com").length, 1);
   // The address given and its own pages connect the same way.
-  assert.deepEqual(await ask(guard.lookupFor("https://acme.com/robots.txt"), "acme.com", {}), ["93.184.216.34", 4]);
+  assert.deepEqual(await guard.addressesFor("https://acme.com/robots.txt"), ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]);
   assert.equal(system.mock.callCount(), 0);
   // One the rule refuses, or whose name is not found, connects nowhere.
   const refusing = guardFor("http://acme.com:8080/", { refused: refusedAddresses("93.184.216.0/24") });
-  const own = await ask(refusing.lookupFor("http://acme.com:8080/robots.txt"), "acme.com", {});
-  assert.ok(own instanceof Error && own.code === "ENOTPUBLIC" && /MAKERSMCP_REFUSE_ADDRESSES refuses$/.test(own.message), String(own));
-  const port = await ask(guard.lookupFor("http://rebind.acme.com:9222/json/list"), "rebind.acme.com", {});
-  assert.ok(port instanceof Error && port.message === "rebind.acme.com is on port 9222, not 80 or 443", String(port));
+  await assert.rejects(refusing.addressesFor("http://acme.com:8080/robots.txt"), (err) => err.code === "ENOTPUBLIC" && /MAKERSMCP_REFUSE_ADDRESSES refuses$/.test(err.message));
+  await assert.rejects(guard.addressesFor("http://rebind.acme.com:9222/json/list"), (err) => err.code === "ENOTPUBLIC" && err.message === "http://rebind.acme.com:9222/json/list is on port 9222, not 80 or 443");
   found.mock.mockImplementation(async () => {
     throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.acme.com"), { code: "ENOTFOUND" });
   });
-  const gone = await ask(guardFor("https://gone.acme.com/").lookupFor("https://gone.acme.com/robots.txt"), "gone.acme.com", {});
-  assert.ok(gone instanceof Error && gone.code === "ENOTFOUND", String(gone));
+  await assert.rejects(guardFor("https://gone.acme.com/").addressesFor("https://gone.acme.com/robots.txt"), (err) => err.code === "ENOTFOUND");
 });

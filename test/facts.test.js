@@ -21,6 +21,7 @@ const { makeKit } = require("../skills/easybrandkit/scripts/lib/kit");
 const { findChrome, launch, openPage, navigate, inOwnWorld } = require("../skills/easybrandkit/scripts/lib/chrome");
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
+const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { partedTemp, roomlessTemp } = require("./temp-skip");
 
 const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp || roomlessTemp;
@@ -936,30 +937,39 @@ test("robots.txt: its redirects are followed five at most, each only to a page t
   assert.deepEqual(asked, ["/robots.txt"]);
 });
 
-test("robots.txt is asked for only through the rule's own lookup, on the host given too, which hands back only the addresses it judged and asks the DNS once a run", async (t) => {
+test("robots.txt is asked for only through the rule's own lookup, on the host given too, connected only to the addresses it judged, with no agent and so through no proxy the environment names, and the DNS is asked once a run", async (t) => {
   setTimeLimit(120_000);
   // A name whose next answer would be this machine.
   let answers = 0;
   const found = t.mock.method(dns.promises, "lookup", async (host) => (host === "www.acme.test" && answers++ ? [{ address: "127.0.0.1", family: 4 }] : [{ address: "93.184.216.34", family: 4 }]));
   const system = t.mock.method(dns, "lookup", (host, options, callback) => callback(new Error("the DNS was asked again")));
-  const lookups = [];
+  const asked = [];
   const answer = (url, options) => {
-    lookups.push([String(url), options.lookup]);
+    asked.push([String(url), options]);
     const req = new EventEmitter();
     process.nextTick(() => req.emit("error", new Error("not sent here")));
     return req;
   };
   t.mock.method(http, "get", answer);
   t.mock.method(https, "get", answer);
+  // Each connection of a request, kept, and made to nothing.
+  const dials = [];
+  t.mock.method(dialLib.wire, "dial", (address, port, name) => {
+    dials.push([name, address, port]);
+    const socket = new (require("node:net").Socket)();
+    process.nextTick(() => socket.destroy(Object.assign(new Error("not made here"), { code: "ECONNREFUSED" })));
+    return socket;
+  });
+  const connected = (options) => new Promise((resolve) => options.createConnection({}, (err) => resolve(err && err.code)));
   const guard = guardFor("https://acme.test/");
-  const to = (lookup, host) => new Promise((resolve) => lookup(host, {}, (err, address) => resolve(err || address)));
   // The home page's own robots.txt, and one on another host.
   assert.deepEqual(await readRobots("https://acme.test", guard), { error: "its robots.txt could not be read" });
   assert.deepEqual(await readRobots("http://www.acme.test", guard), { error: "its robots.txt could not be read" });
   assert.deepEqual(await readRobots("http://www.acme.test", guard), { error: "its robots.txt could not be read" });
-  assert.deepEqual(lookups.map(([url, lookup]) => [url, typeof lookup]), [["https://acme.test/robots.txt", "function"], ["http://www.acme.test/robots.txt", "function"], ["http://www.acme.test/robots.txt", "function"]]);
-  assert.equal(await to(lookups[0][1], "acme.test"), "93.184.216.34");
-  assert.equal(await to(lookups[2][1], "www.acme.test"), "93.184.216.34");
+  assert.deepEqual(asked.map(([url, options]) => [url, options.agent, typeof options.createConnection, options.lookup]), [["https://acme.test/robots.txt", undefined, "function", undefined], ["http://www.acme.test/robots.txt", undefined, "function", undefined], ["http://www.acme.test/robots.txt", undefined, "function", undefined]]);
+  assert.equal(await connected(asked[0][1]), "ECONNREFUSED");
+  assert.equal(await connected(asked[2][1]), "ECONNREFUSED");
+  assert.deepEqual(dials, [["acme.test", "93.184.216.34", 443], ["www.acme.test", "93.184.216.34", 80]]);
   assert.equal(found.mock.calls.filter((call) => call.arguments[0] === "www.acme.test").length, 1);
   assert.equal(system.mock.callCount(), 0);
 });

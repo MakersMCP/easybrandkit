@@ -9,16 +9,17 @@
 // image hosts, re-checks every redirect, refuses addresses that are not on
 // the public internet and those MAKERSMCP_REFUSE_ADDRESSES names (see
 // address.js), looks each host up once a run, by the run's own lookup,
-// connects only to the addresses it judged, and caps each file at 15 MB.
+// connects only to the addresses it judged, through no proxy (see
+// dial.js), and caps each file at 15 MB.
 
 const fs = require("fs");
-const net = require("net");
 const https = require("https");
 const path = require("path");
 const zlib = require("zlib");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
 const { isPublicAddress, atRefused, guardFor } = require("./address");
+const { judgedRequest } = require("./dial");
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
@@ -95,10 +96,10 @@ function classify(raw) {
 // The address of a store's page or picture, refused unless it is a plain
 // HTTPS address on a listed host, at addresses that are all on the public
 // internet, none of them one the run's rule refuses (guard, see address.js),
-// with the addresses its host was found at (found), which its request
-// connects to (see get). The host is looked up by the run's own lookup,
-// which asks the DNS once a run for each name (guard.found): a name a page,
-// a listing's picture or a redirect names again is not looked up again.
+// with the addresses its host was found at, which its request connects to
+// (see get). The host is looked up by the run's own lookup, which asks the
+// DNS once a run for each name (guard.found): a name a page, a listing's
+// picture or a redirect names again is not looked up again.
 async function judgedFetch(raw, guard = null) {
   const url = new URL(raw);
   const host = url.hostname.toLowerCase();
@@ -113,7 +114,7 @@ async function judgedFetch(raw, guard = null) {
   if (!addresses.every((address) => isPublicAddress(address))) {
     throw new Error(`host does not resolve to a public address: ${host}`);
   }
-  return { url, found: addresses.map((address) => ({ address, family: net.isIP(address) })) };
+  return { url, addresses };
 }
 
 // The address alone, judged as above.
@@ -121,23 +122,13 @@ async function checkFetchUrl(raw, guard = null) {
   return (await judgedFetch(raw, guard)).url;
 }
 
-// The lookup a store's request connects with: it hands back the addresses
-// its host was found and judged at, and asks the DNS nothing again, so a
-// name whose next answer is another address still reaches none of those.
-function judgedLookup(found) {
-  return (hostname, options, callback) => {
-    const family = options && options.family;
-    const list = found.filter((record) => !family || record.family === family);
-    if (!list.length) return callback(Object.assign(new Error(`${hostname} has no address of the family asked for`), { code: "ENOTFOUND", hostname }));
-    if (options && options.all) callback(null, list);
-    else callback(null, list[0].address, list[0].family);
-  };
-}
-
-// The answer to a GET of url, connected through lookup.
-function answerOf(url, { headers, signal, lookup }) {
+// The answer to a GET of url, connected to one of the addresses its host
+// was found and judged at, and to no other: the DNS is asked nothing again,
+// so a name whose next answer is another address still reaches none of
+// those, and no proxy the environment names is used (see dial.js).
+function answerOf(url, { headers, signal, addresses }) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers, signal, lookup }, resolve);
+    const req = https.get(url, { headers, signal, ...judgedRequest(url, () => addresses, { signal }) }, resolve);
     req.on("error", reject);
   });
 }
@@ -170,13 +161,13 @@ async function bodyOf(res, host) {
 async function get(raw, { binary = false, accept = "*/*", guard = null } = {}) {
   let current = raw;
   for (let hop = 0; hop < 5; hop++) {
-    const { url, found } = await judgedFetch(current, guard);
+    const { url, addresses } = await judgedFetch(current, guard);
     const left = timeLeft();
     if (left < 2_000) throw new Error("out of time");
     const wait = Math.min(25_000, left - 1_000);
     const signal = AbortSignal.timeout(wait);
     try {
-      const res = await answerOf(url, { headers: { "user-agent": UA, accept, "accept-language": "en-US,en;q=0.8", "accept-encoding": "gzip, deflate, br" }, signal, lookup: judgedLookup(found) });
+      const res = await answerOf(url, { headers: { "user-agent": UA, accept, "accept-language": "en-US,en;q=0.8", "accept-encoding": "gzip, deflate, br" }, signal, addresses });
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.destroy();
         current = new URL(res.headers.location, url).href;

@@ -384,9 +384,9 @@ const LOOKUP_WAIT = 5_000;
 // inside(url): whether a host is not on the public internet, or cannot be
 // told to be, by the same lookup.
 //
-// lookupFor(raw): the lookup a request the kit makes itself connects with,
-// which hands back only the addresses route gives for raw, and none for one
-// the rule refuses or the URL parser cannot read.
+// addressesFor(raw): the addresses a request the kit makes itself to raw
+// connects to (see dial.js), those route gives; it fails for one the rule
+// refuses or the URL parser cannot read, and for a name not found.
 function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const given = givenRaw ? new URL(givenRaw) : null;
   const answers = new Map();
@@ -439,21 +439,12 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     const addresses = await found(bare(url));
     return !addresses.length || addresses.some((address) => !isPublicAddress(address));
   }
-  function lookupFor(raw) {
-    return (hostname, options, callback) => {
-      route(raw).then(
-        ({ why, addresses }) => {
-          const family = options && options.family;
-          const list = addresses.map((address) => ({ address, family: net.isIP(address) })).filter((one) => !family || one.family === family);
-          if (why || !list.length) return callback(Object.assign(new Error(`${hostname} ${why || UNRESOLVED}`), { code: why ? "ENOTPUBLIC" : "ENOTFOUND", hostname }));
-          if (options && options.all) callback(null, list);
-          else callback(null, list[0].address, list[0].family);
-        },
-        (err) => callback(err),
-      );
-    };
+  async function addressesFor(raw) {
+    const { why, addresses } = await route(raw);
+    if (why || !addresses.length) throw Object.assign(new Error(`${String(raw).slice(0, 300)} ${why || UNRESOLVED}`), { code: why ? "ENOTPUBLIC" : "ENOTFOUND" });
+    return addresses;
   }
-  return { given: given ? given.href : "", refused, judge, route, found, inside, lookupFor };
+  return { given: given ? given.href : "", refused, judge, route, found, inside, addressesFor };
 }
 
 module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, UNRESOLVED };

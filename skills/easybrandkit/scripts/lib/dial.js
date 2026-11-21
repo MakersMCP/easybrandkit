@@ -1,7 +1,8 @@
 "use strict";
 
-// How the kit's proxy connects to a host the browser asks for (see
-// proxy.js): to the addresses the run's rule took for that host (see
+// How a run connects to a host: the browser's requests through the kit's
+// proxy (see proxy.js) and the kit's own requests alike (see stores.js and
+// facts.js), each to the addresses the run's rule took for that host (see
 // address.js route) and to no other. A host with more than one address is
 // connected to as the browser connects to one: one attempt per address,
 // the families taking turns, the next started 250 ms after the one before,
@@ -15,10 +16,11 @@
 // this process was held a moment, where the browser by itself connects.
 
 const net = require("net");
+const tls = require("tls");
 
-// Where each connection to one address is made. name is the host the
-// connection is for, a name or the address itself. Tests put their own
-// servers in place of the addresses here.
+// Where each connection to one address is made: the one place a run makes
+// one. name is the host the connection is for, a name or the address
+// itself. Tests put their own servers in place of the addresses here.
 const wire = { dial: (address, port, name) => net.connect({ host: address, port, autoSelectFamily: false }) };
 
 // How long an attempt is waited for before the next one starts, as RFC 8305
@@ -119,4 +121,31 @@ function dialFirst(addresses, port, { name = "", hold = (socket) => socket, sign
   });
 }
 
-module.exports = { wire, dialFirst, ATTEMPT_DELAY };
+// The options of a request the kit makes itself to url, over http or https,
+// that connect it to one of the addresses addressesOf() resolves to, the
+// ones the rule took for url's host (see dialFirst). It is given no agent:
+// Node.js sends a request on its global agent through the proxy HTTP_PROXY
+// or HTTPS_PROXY names once NODE_USE_ENV_PROXY or --use-env-proxy is set,
+// without the lookup the request was given, and that proxy looks the name
+// up again for itself and connects wherever its answer points. Over https,
+// TLS starts on the connection for url's host.
+function judgedRequest(url, addressesOf, { signal = null } = {}) {
+  const secure = url.protocol === "https:";
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const port = Number(url.port || (secure ? 443 : 80));
+  return {
+    port,
+    defaultPort: secure ? 443 : 80,
+    createConnection: (options, made) => {
+      Promise.resolve()
+        .then(addressesOf)
+        .then((addresses) => dialFirst(addresses, port, { name: host, signal }))
+        .then(
+          (socket) => made(null, secure ? tls.connect({ socket, host, ...(net.isIP(host) ? {} : { servername: host }) }) : socket),
+          (err) => made(err),
+        );
+    },
+  };
+}
+
+module.exports = { wire, dialFirst, judgedRequest, ATTEMPT_DELAY };

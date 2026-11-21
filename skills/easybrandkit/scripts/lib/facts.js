@@ -23,6 +23,7 @@ const zlib = require("zlib");
 const { Worker } = require("worker_threads");
 const { navigate, inOwnWorld, takeMove } = require("./chrome");
 const { guardFor, sameHost, portOf, notPublicByForm } = require("./address");
+const { judgedRequest } = require("./dial");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
 const { findClaims, pageOf, textOf, lineOf, regionOf, tidy } = require("./claims");
@@ -369,12 +370,13 @@ async function firstBytes(res, limit) {
   return Buffer.concat(chunks).subarray(0, limit).toString("utf8");
 }
 
-// A GET of url that connects through lookup, the run's own (see address.js
-// lookupFor), when there is one.
-function getOf(url, { headers, lookup, signal }) {
+// A GET of url connected to one of the addresses addressesOf() resolves to,
+// those the run's rule took for its host (see address.js addressesFor), and
+// through no proxy the environment names (see dial.js).
+function getOf(url, { headers, addressesOf, signal }) {
   return new Promise((resolve, reject) => {
     const client = url.protocol === "https:" ? https : http;
-    const req = client.get(url, { headers, signal, ...(lookup ? { lookup } : {}) }, resolve);
+    const req = client.get(url, { headers, signal, ...judgedRequest(url, addressesOf, { signal }) }, resolve);
     req.on("error", reject);
   });
 }
@@ -396,7 +398,8 @@ async function readRobots(origin, guard = guardFor(`${origin}/`)) {
     for (let hop = 0; hop <= ROBOTS_HOPS; hop++) {
       const why = await guard.judge(url.href);
       if (why) return { error: hop ? `its robots.txt led to ${url.href}, which ${why}` : `its robots.txt ${why}` };
-      const res = await getOf(url, { headers, lookup: guard.lookupFor(url.href), signal });
+      const at = url.href;
+      const res = await getOf(url, { headers, addressesOf: () => guard.addressesFor(at), signal });
       const location = res.statusCode >= 300 && res.statusCode < 400 ? res.headers.location : null;
       if (!location) {
         if (res.statusCode >= 200 && res.statusCode < 300) return robotsRules(await firstBytes(res, 500_000));
