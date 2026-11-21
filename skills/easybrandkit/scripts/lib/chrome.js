@@ -3,15 +3,19 @@
 // The browser: a Chrome, Chromium, Edge or Brave already on this machine,
 // started headless with a throwaway profile and driven over the DevTools
 // protocol through a pipe of its own. It opens no port, so no other program
-// on the machine, another user's run among them, can reach it. Nothing is
-// downloaded.
+// on the machine, another user's run among them, can reach it. Every
+// request it makes goes through the kit's own proxy (see proxy.js), which
+// judges it by the run's rule. Nothing is downloaded.
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const dgram = require("dgram");
 const { spawn } = require("child_process");
 const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
 const { browserPlace, wrongWith, couldNotStart, endedEarly, closedEarly, systemWords, ownSandbox } = require("./program");
+const { startProxy, keyOf, OWN_NAME } = require("./proxy");
+const { UNRESOLVED } = require("./address");
 
 // The browser this run would start, or "" when none is found or what is
 // found cannot be started (browserPlace in program.js says why).
@@ -315,10 +319,10 @@ const LOW_WAIT = 3_000;
 // --use-mock-keychain and --password-store=basic keep Chrome on macOS from
 // asking for the login keychain, which it does for a fresh profile. The
 // profile is a temp folder; the user's own home and browser are untouched.
-// judge is the run's rule for the addresses its pages may open (see
-// address.js guardFor and holdDocuments below); a browser started without
-// one opens no web page.
-async function launch({ width, height }, { judge = null } = {}) {
+// guard is the run's rule for the addresses the browser may open and ask
+// for (see address.js guardFor, holdDocuments below and proxy.js); a
+// browser started without one opens no web page.
+async function launch({ width, height }, { guard = null } = {}) {
   // A browser that cannot be started is told before anything is made.
   const place = browserPlace();
   // The temp folder by its full path, which the browser is given as its
@@ -375,19 +379,23 @@ async function launch({ width, height }, { judge = null } = {}) {
   // the address of a page's frame or of a page's move before the kit had
   // judged that address, and the address refused there still got the
   // connection, with no request in it, and a page's speculation rules had it
-  // fetch an address ahead of the page's move there. Each tab the kit reads
-  // pages in asks it whether it took that (see noPreloading). It takes no
-  // signed exchange either (web_package.signed_exchange.enabled): with its
-  // default, a page, a frame or a prefetch that answered with one had the
-  // browser fetch the certificate the exchange names, at any https address
-  // and port the site wrote there, a request of its own that is no document
-  // and that the rule never sees, so a site reached any port of this machine
-  // or of its network. A browser that asks for them all the same is told by
-  // the first document it asks for (see holdDocuments).
+  // fetch an address ahead of the page's move there. The kit's proxy holds
+  // each of those requests to the rule now (see proxy.js), but a move served
+  // from such a copy is still no document the rule for pages holds, which
+  // tells where a page led: each tab the kit reads pages in asks the browser
+  // whether it took that (see noPreloading). It takes no signed exchange
+  // either (web_package.signed_exchange.enabled): with its default, a page,
+  // a frame or a prefetch that answered with one had the browser fetch the
+  // certificate the exchange names, at any https address and port the site
+  // wrote there, a request of its own that is no document, which the proxy
+  // holds to the rule now as well, and show what the exchange holds under
+  // another address than the one it came from. A browser that asks for them
+  // all the same is told by the first document it asks for (see
+  // holdDocuments).
   const preferences = path.join(profile, "Default", "Preferences");
   try {
     fs.mkdirSync(path.join(profile, "Default"));
-    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 }, web_package: { signed_exchange: { enabled: false } } }));
+    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 }, web_package: { signed_exchange: { enabled: false } }, webrtc: { ip_handling_policy: "disable_non_proxied_udp" } }));
   } catch (err) {
     // For anything but no room, the refusal still holds.
     if (NO_ROOM.has(err.code)) throw room(err, preferences);
@@ -437,6 +445,17 @@ async function launch({ width, height }, { judge = null } = {}) {
     const full = room(err, output);
     if (full) throw full;
     throw new Error(couldNotStart(place, err));
+  }
+  // The proxy every request of the browser goes through (see proxy.js),
+  // on a port of 127.0.0.1 the system picks, for as long as the browser
+  // runs.
+  let proxy;
+  try {
+    proxy = await startProxy(guard);
+  } catch (err) {
+    fs.closeSync(printing);
+    dropProfile();
+    throw new Error(`${place.name} was not started: easybrandkit could not start the proxy that every request of the browser goes through, on 127.0.0.1: ${systemWords(err)}.`);
   }
   // --remote-debugging-pipe: the browser takes the DevTools protocol on its
   // file descriptors 3 and 4, which only this process holds, and opens no
@@ -488,8 +507,32 @@ async function launch({ width, height }, { judge = null } = {}) {
         // past Chrome's own refusal of a public page's requests to this
         // machine, so a site sent a CORS preflight or a HEAD, with a path
         // of its choosing, to another program of this machine or of its
-        // network whose certificate the machine trusts.
-        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb,Reporting,WebPayments",
+        // network whose certificate the machine trusts. The kit's proxy
+        // holds those requests now as well.
+        //
+        // No media router either (MediaRouter): a page that asks whether a
+        // cast device is there (the Presentation API) had the browser search
+        // this machine's networks for one, over SSDP and mDNS multicast,
+        // which goes past any proxy.
+        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb,Reporting,WebPayments,MediaRouter",
+        // Every request through the kit's proxy, this machine's own
+        // addresses' too, which the browser otherwise sends past a proxy
+        // (<-loopback> takes them off its list of addresses that go past
+        // it). WebRTC sends UDP around a proxy, so it may send none that
+        // does not go through one, and this proxy takes none: the switch
+        // and the profile's webrtc.ip_handling_policy (see Preferences
+        // above) hold that, as the kit checks before any page is opened
+        // (see udpPastProxy), and its TURN over TCP goes through the proxy.
+        `--proxy-server=http://127.0.0.1:${proxy.port}`,
+        "--proxy-bypass-list=<-loopback>",
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+        // The browser's own push channel (GCM), which no page needs, checks
+        // in and then connects to mtalk.google.com on port 5228, which the
+        // proxy refuses: its addresses are the proxy's own name, which the
+        // proxy answers itself (see proxy.js).
+        `--gcm-checkin-url=https://${OWN_NAME}/checkin`,
+        `--gcm-mcs-endpoint=https://${OWN_NAME}/`,
+        `--gcm-registration-url=https://${OWN_NAME}/register`,
         // Chrome refuses to start as root without it (a container, a CI box).
         ...(process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
         "about:blank",
@@ -500,6 +543,7 @@ async function launch({ width, height }, { judge = null } = {}) {
     // A program the system will not start in a way Node does not hand back
     // as an event.
     fs.closeSync(printing);
+    proxy.close();
     room(err, output);
     throw new Error(couldNotStart(place, err));
   }
@@ -513,6 +557,7 @@ async function launch({ width, height }, { judge = null } = {}) {
   // error comes a moment later.
   if (!(child.stdio && child.stdio[3])) {
     const err = await new Promise((resolve) => child.once("error", resolve));
+    proxy.close();
     room(err, output);
     throw new Error(couldNotStart(place, err));
   }
@@ -529,7 +574,7 @@ async function launch({ width, height }, { judge = null } = {}) {
     notStarted = err;
     ended();
   });
-  const entry = { child, profile, temp, before };
+  const entry = { child, profile, temp, before, proxy };
   open.add(entry);
   // Whether the browser has answered on its pipe: one that never has is not
   // asked to quit.
@@ -560,6 +605,7 @@ async function launch({ width, height }, { judge = null } = {}) {
     if (!exited) child.kill("SIGKILL");
     for (let i = 0; i < 20 && !exited; i++) await sleep(100);
     pipe.end();
+    proxy.close();
     endAll(processes, profile);
     open.delete(entry);
     removeSingleton(profile, entry.singleton);
@@ -653,6 +699,24 @@ async function launch({ width, height }, { judge = null } = {}) {
         throw noKit(noAnswer("The browser did not answer the kit's request to refuse downloads", refusal));
       }
     }
+    // Every request goes through the kit's proxy, as the browser is started
+    // to: asked before any page is opened. A browser that sends one past it
+    // or elsewhere, or does not answer, ends the run.
+    const probing = browserWait();
+    let missed;
+    try {
+      missed = await throughProxy(pipe, proxy, probing);
+    } catch (err) {
+      await close({ hurry: Boolean(err.timedOut || err.noAnswer) });
+      if (err.timedOut || err.noAnswer) throw noKit(noAnswer("The browser did not answer the kit's check that it sends its requests through the kit's proxy", probing));
+      if (err.closed) throw noKit(browserSaid("The browser ended before it took the kit's check that it sends its requests through the kit's proxy"));
+      // The same browser refuses it again: another one is what helps.
+      throw new Error(`The browser refused the kit's check that it sends its requests through the kit's proxy (${plainWords(err.message)}), so no kit was made: point CHROME_PATH at another browser, such as Google Chrome.`);
+    }
+    if (missed) {
+      await close();
+      throw new Error(missedProxy(missed, proxy));
+    }
     // Every document the browser loads is judged by the run's rule before
     // it is asked for, also for the whole browser and before any page is
     // opened. A browser that does not take that, in the time the run has
@@ -661,7 +725,7 @@ async function launch({ width, height }, { judge = null } = {}) {
     const tabs = new Map();
     const holding = browserWait();
     try {
-      await holdDocuments(pipe, tabs, judge, holding);
+      await holdDocuments(pipe, tabs, guard ? guard.judge : null, holding);
     } catch (err) {
       await close({ hurry: Boolean(err.timedOut) });
       if (err.timedOut) throw noKit(noAnswer("The browser did not answer the kit's request to judge the pages it opens", holding));
@@ -671,8 +735,10 @@ async function launch({ width, height }, { judge = null } = {}) {
     }
     // sandboxed: a browser installed as a snap or a Flatpak, in whose
     // sandbox the stand-ins and the bus may not be the ones it finds. tabs:
-    // the tabs the kit reads pages in, by their ids (see openPage).
-    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms), sandboxed: ownSandbox(place.file), tabs };
+    // the tabs the kit reads pages in, by their ids (see openPage). proxy:
+    // the one its requests go through, with what it refused (see
+    // proxyNotes).
+    return { close, alive, newTab, closeTab, attach: (targetId, ms) => pipe.attach(targetId, ms), sandboxed: ownSandbox(place.file), tabs, proxy };
   }
   // A browser's pipe closes as it ends, and can close a moment before the
   // system tells that it has ended: one whose pipe has closed is given a
@@ -699,6 +765,109 @@ async function launch({ width, height }, { judge = null } = {}) {
   }
   if (notStarted) throw new Error(couldNotStart(place, notStarted));
   throw new Error(endedEarly(place, { output: printed, ...ending }));
+}
+
+// A text of the browser's own, on one line, cut to 200 characters.
+const plainWords = (text) => String(text || "").replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, 200);
+
+// The browser sends its requests through the kit's proxy, as it is started
+// to (see launch): asked before any page is opened, in a tab of its own,
+// with four addresses the proxy answers itself, by a word of its own in
+// their paths: a name under .invalid, which no DNS answers, and this
+// machine's 127.0.0.1, localhost and [::1] on the proxy's own port. Each
+// has to come to the proxy as a request for the whole address, as a
+// browser sends a proxy. One that comes to the proxy's port as an address
+// of its own came past the proxy, and one that does not come went
+// elsewhere: a Chrome policy (ProxyMode, ProxySettings, ProxyBypassList) or
+// a program that starts the browser with switches of its own can make it do
+// that. Then, in the same tab, the browser's WebRTC is to send no UDP (see
+// udpPastProxy). null when all of it holds, else the first that did not:
+// its number and what the browser said of it, or { udp }.
+async function throughProxy(pipe, proxy, ms) {
+  const addresses = [`http://${OWN_NAME}/${proxy.token}/1`, `http://127.0.0.1:${proxy.port}/${proxy.token}/2`, `http://localhost:${proxy.port}/${proxy.token}/3`, `http://[::1]:${proxy.port}/${proxy.token}/4`];
+  let targetId;
+  try {
+    ({ targetId } = await pipe.send("Target.createTarget", { url: "about:blank", background: true }, ms));
+  } catch (err) {
+    if (err.timedOut) throw Object.assign(err, { noAnswer: true });
+    throw err;
+  }
+  let cdp;
+  try {
+    cdp = await pipe.attach(targetId, ms);
+  } catch (err) {
+    pipe.send("Target.closeTarget", { targetId }, 5_000).catch(() => {});
+    throw err;
+  }
+  try {
+    for (const [at, address] of addresses.entries()) {
+      const n = at + 1;
+      const { errorText = "" } = await cdp.send("Page.navigate", { url: address }, ms);
+      if (!proxy.through.has(n)) return { n, errorText };
+    }
+    return (await udpPastProxy(cdp, ms)) ? { udp: true } : null;
+  } finally {
+    cdp.close();
+  }
+}
+
+// Whether the browser's WebRTC sends UDP, which goes around a proxy: asked
+// in the tab of throughProxy, with a STUN server of this machine that the
+// kit listens for itself, for as long as the browser gathers its ways to
+// reach a peer, 1.5 s at most, and a moment after. Started as the kit
+// starts it, the browser sends none, and gathers in a fraction of a second;
+// a Chrome policy (WebRtcIPHandling) or a program that starts it with
+// switches of its own can turn that back, and then its first STUN packet
+// comes at once, and it gathers until its STUN request runs out, as the
+// kit does not answer it. Where no socket can be had to listen with, or a
+// firewall keeps the packet from it, nothing is told.
+async function udpPastProxy(cdp, ms) {
+  const udp = dgram.createSocket("udp4");
+  let packets = 0;
+  udp.on("message", () => packets++);
+  try {
+    await new Promise((resolve, reject) => {
+      udp.once("error", reject);
+      udp.bind(0, "127.0.0.1", resolve);
+    });
+  } catch {
+    udp.close();
+    return false;
+  }
+  udp.on("error", () => {});
+  try {
+    const expression = `(async () => {
+      if (typeof RTCPeerConnection === "undefined") return "none";
+      const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:${udp.address().port}" }] });
+      peer.createDataChannel("easybrandkit");
+      await peer.setLocalDescription(await peer.createOffer());
+      await new Promise((done) => {
+        if (peer.iceGatheringState === "complete") return done();
+        peer.onicegatheringstatechange = () => peer.iceGatheringState === "complete" && done();
+        setTimeout(done, 1500);
+      });
+      peer.close();
+      return "asked";
+    })()`;
+    await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, ms);
+    if (!packets) await sleep(50);
+    return packets > 0;
+  } finally {
+    udp.close();
+  }
+}
+
+// The end of a run whose browser does not send a request of the kit's
+// check through the kit's proxy (see throughProxy).
+function missedProxy({ n, errorText, udp }, proxy) {
+  const helps = "Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
+  if (udp) return `The browser's WebRTC sends UDP past easybrandkit's proxy, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own makes it do, so no kit was made: a page could have it send UDP to an address easybrandkit does not open without easybrandkit judging that address. ${helps}`;
+  if (errorText === "net::ERR_PROXY_CONNECTION_FAILED") {
+    return `The browser could not connect to the proxy its requests go through (${errorText}), so no kit was made. easybrandkit gives it a proxy of its own at 127.0.0.1:${proxy.port}: let the browser connect to 127.0.0.1, which a firewall of this machine can keep it from, and if a Chrome policy or a program that starts it gives it another proxy, lift that policy or point CHROME_PATH at the browser's own program.`;
+  }
+  const risk = "so no kit was made: a page could have it reach an address easybrandkit does not open without easybrandkit judging that address.";
+  if (n === 1) return `The browser does not send its requests through easybrandkit's proxy, as a Chrome policy (ProxyMode, ProxySettings or ProxyBypassList) or a program that starts it with switches of its own makes it do, ${risk} ${helps}`;
+  return `The browser sends its requests for this machine's own addresses past easybrandkit's proxy, as a Chrome policy (ProxyMode, ProxySettings or ProxyBypassList) or a program that starts it with switches of its own makes it do, ${risk} ${helps}`;
 }
 
 // The first bytes of a file the browser printed into, as text: "" when it
@@ -773,6 +942,7 @@ function killBrowsers() {
   const ending = [...open];
   open.clear();
   for (const entry of ending) {
+    if (entry.proxy) entry.proxy.close();
     entry.processes = withCrashHandler(entry, processesOf(entry.child));
     try {
       entry.child.kill("SIGKILL");
@@ -998,8 +1168,8 @@ const LONG_ADDRESS = 300;
 // last, whose frame or window it was, as the kit reads in one tab at a time
 // and the card's tab asks for nothing (see navigate, takeMove and
 // refusedNotes). With no rule, no web page is opened. A page's pictures,
-// styles, scripts and data are no documents, and are left to the browser's
-// own rules.
+// styles, scripts and data are no documents: the kit's proxy judges them,
+// as every request of the browser (see proxy.js and proxyNotes).
 //
 // A document asked for with signed exchanges in its Accept header comes from
 // a browser that takes them though its profile asks it not to (see launch),
@@ -1037,7 +1207,7 @@ async function holdDocuments(pipe, tabs, judge, ms) {
 const asksSignedExchanges = (request) => Object.entries((request && request.headers) || {}).some(([name, value]) => name.toLowerCase() === "accept" && /application\/signed-exchange/i.test(String(value)));
 
 // The end of a run whose browser takes signed exchanges (see holdDocuments).
-const SIGNED_EXCHANGES = "The browser takes signed exchanges though its profile asks it not to, as a Chrome policy (SignedHTTPExchangeEnabled) or a program that starts it with a profile of its own makes it do, so no kit was made: a page could have it fetch the certificate a signed exchange names, at an address easybrandkit does not open, without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
+const SIGNED_EXCHANGES = "The browser takes signed exchanges though its profile asks it not to, as a Chrome policy (SignedHTTPExchangeEnabled) or a program that starts it with a profile of its own makes it do, so no kit was made: a page could have it show what a signed exchange holds under another address than the one it came from, past easybrandkit's rule for the pages it opens, which tells where a page led. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
 
 // The browser preloads nothing, as its profile asks (see launch): asked in
 // each tab the kit reads pages in, before it opens one there.
@@ -1055,7 +1225,7 @@ async function noPreloading(cdp) {
   let state = null;
   cdp.on("Preload.preloadEnabledStateUpdated", (said) => (state = state || said));
   const wait = browserWait();
-  const notUsed = (what, helps = "Point CHROME_PATH at another browser, such as Google Chrome.") => new Error(`The browser ${what}, so no kit was made: a page could have it open an address easybrandkit does not open before easybrandkit had judged that address. ${helps}`);
+  const notUsed = (what, helps = "Point CHROME_PATH at another browser, such as Google Chrome.") => new Error(`The browser ${what}, so no kit was made: a page could have it fetch a page ahead of the page's move there, past easybrandkit's rule for the pages it opens, which tells where a page led. ${helps}`);
   try {
     await cdp.send("Preload.enable", {}, wait);
   } catch (err) {
@@ -1124,6 +1294,9 @@ async function openPage(chrome, { width, height }) {
   // The documents the run's rule did not let this tab's pages open (see
   // holdDocuments), with the tab's page, by its id, the id of its page.
   cdp.refused = [];
+  // The proxy the browser's requests go through, which is told the page
+  // the tab reads (see navigate).
+  cdp.proxy = chrome.proxy || null;
   if (chrome.tabs) chrome.tabs.set(targetId, cdp);
   await noPreloading(cdp);
   await cdp.send("Page.enable");
@@ -1263,24 +1436,20 @@ function triedNotes(tried = [], { sandboxed = false, standIns = STAND_INS } = {}
 // the status the server last answered its document with and that address,
 // after any redirect, the address of a page the browser could not open and
 // shows its own error page for, and whether the page has moved on to
-// about:blank, as scripts that guard against DevTools make it do. Also where
-// the browser got the document: the address it connected to (ip) and the IP
-// address space Chrome gave that answer (space), which is Unknown when it
-// went through a proxy, whose address ip is then. And hop, the address a
-// redirect led the document to, the last one, which the browser tells as
-// the next request of the same document, as the redirect's answer gets no
-// event of its own. Frames inside the page do not count. The bodies of the
-// responses are not wanted, so little of them is kept.
+// about:blank, as scripts that guard against DevTools make it do. And hop,
+// the address a redirect led the document to, the last one, which the
+// browser tells as the next request of the same document, as the
+// redirect's answer gets no event of its own. Frames inside the page do not
+// count. The bodies of the responses are not wanted, so little of them is
+// kept. Where the browser got a document says nothing of the page: every
+// answer comes through the kit's proxy, which connected only to an address
+// the run's rule took (see proxy.js).
 async function watchAnswer(cdp) {
   const { frameTree } = await cdp.send("Page.getFrameTree");
   const main = frameTree.frame.id;
-  const answer = { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "", hop: "" };
-  // The main frame's document request, and the space of each answer to it,
-  // its redirects' first: each comes apart from the answer it belongs to,
-  // before it or after it.
+  const answer = { status: 0, url: "", unreachable: "", blank: false, leftTo: "", hop: "" };
+  // The main frame's document request.
   let request = "";
-  let spaces = [];
-  let answered = "";
   cdp.on("Network.requestWillBeSent", ({ requestId, type, frameId, request: asked, redirectResponse }) => {
     if (type !== "Document" || frameId !== main) return;
     if (requestId === request) {
@@ -1288,11 +1457,9 @@ async function watchAnswer(cdp) {
       return;
     }
     request = requestId;
-    spaces = [];
   });
-  cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode, headers, resourceIPAddressSpace }) => {
+  cdp.on("Network.responseReceivedExtraInfo", ({ requestId, statusCode, headers }) => {
     if (requestId !== request) return;
-    spaces.push({ status: statusCode, space: resourceIPAddressSpace || "" });
     // A redirect to an address that is not a web address, which the browser
     // hands to the system: the navigation ends there, with no answer of its
     // own.
@@ -1300,13 +1467,10 @@ async function watchAnswer(cdp) {
       const location = Object.entries(headers).find(([key]) => key.toLowerCase() === "location");
       if (location && /^[a-z][a-z0-9+.-]*:/i.test(String(location[1])) && !webAddress(String(location[1]).trim())) answer.leftTo = String(location[1]).trim().slice(0, 300);
     }
-    if (requestId === answered && statusCode === answer.status) answer.space = resourceIPAddressSpace || "";
   });
-  cdp.on("Network.responseReceived", ({ requestId, type, frameId, response }) => {
+  cdp.on("Network.responseReceived", ({ type, frameId, response }) => {
     if (type !== "Document" || frameId !== main || !response) return;
-    const known = requestId === request ? spaces.filter(({ status }) => status === response.status).pop() : null;
-    answered = requestId;
-    Object.assign(answer, { status: response.status, url: response.url, ip: String(response.remoteIPAddress || "").replace(/^\[|\]$/g, ""), space: known ? known.space : "" });
+    Object.assign(answer, { status: response.status, url: response.url });
   });
   cdp.on("Page.frameNavigated", ({ frame }) => {
     if (frame.parentId) return;
@@ -1317,15 +1481,53 @@ async function watchAnswer(cdp) {
   return answer;
 }
 
-// What the browser said of where it got the tab's document (cdp.answer), for
-// an address of that document: nothing for one of another origin, whose
-// document has not come yet or has gone.
-function seenOf(cdp, at) {
+// What Chrome says of a connection that cannot be made, by the system's
+// word for it, as it says it of one of its own: the kit's proxy makes the
+// browser's connections (see proxy.js), and the browser tells one the
+// proxy could not make only as an empty answer or a tunnel that failed.
+const NET_WORDS = {
+  ECONNREFUSED: "net::ERR_CONNECTION_REFUSED",
+  ECONNRESET: "net::ERR_CONNECTION_RESET",
+  ECONNABORTED: "net::ERR_CONNECTION_ABORTED",
+  ETIMEDOUT: "net::ERR_CONNECTION_TIMED_OUT",
+  EHOSTUNREACH: "net::ERR_ADDRESS_UNREACHABLE",
+  ENETUNREACH: "net::ERR_ADDRESS_UNREACHABLE",
+  EHOSTDOWN: "net::ERR_ADDRESS_UNREACHABLE",
+  EADDRNOTAVAIL: "net::ERR_ADDRESS_INVALID",
+  ENOTFOUND: "net::ERR_NAME_NOT_RESOLVED",
+};
+
+// What the browser says of a page the kit's proxy could not reach.
+const PROXY_SAID = new Set(["net::ERR_EMPTY_RESPONSE", "net::ERR_TUNNEL_CONNECTION_FAILED"]);
+
+// Chrome's word for the connection to at that the kit's proxy could not
+// make since it had failed made ones (cdp.proxy), "" when it made it.
+function proxyFailure(cdp, at, made) {
+  if (!cdp.proxy) return "";
+  let key;
   try {
-    return new URL(at).origin === new URL(cdp.answer.url).origin ? { space: cdp.answer.space || "", ip: cdp.answer.ip || "" } : {};
+    key = keyOf(new URL(at));
   } catch {
-    return {};
+    return "";
   }
+  const one = cdp.proxy.failed.filter((failed) => failed.n > made && failed.key === key).pop();
+  return one ? NET_WORDS[one.code] || "net::ERR_CONNECTION_FAILED" : "";
+}
+
+// The notes on the requests the kit's proxy refused while the kit read its
+// pages (proxy.refused, see proxy.js): each address once, the first three of
+// them, and how many more there were, at least that many when the proxy did
+// not keep them all (past). One refused because its name was not found is
+// left out: a browser of its own would not have reached it either, and the
+// browser's own requests, as for its updates, ask for names a machine with
+// no DNS cannot look up. So are those made before the kit had opened a page,
+// which are the browser's own.
+function proxyNotes(refused = [], past = false) {
+  const list = refused.filter(({ why, page }) => page && why !== UNRESOLVED);
+  const notes = list.slice(0, 3).map(({ page, what, why }) => `While easybrandkit read ${page}, the browser asked for ${what}, which ${why}: it was not reached.`);
+  const more = Math.max(0, list.length - 3) + (past ? 1 : 0);
+  if (more > 0) notes.push(`${past ? "At least " : ""}${more} more ${more === 1 ? "address the browser asked for was" : "addresses the browser asked for were"} not reached either.`);
+  return notes;
 }
 
 // What the browser says of a page to which it made no connection, or whose
@@ -1355,6 +1557,10 @@ async function navigate(cdp, url) {
   // What the guard cancelled in the page the tab leaves now.
   if (cdp.page) await triedSoFar(cdp);
   cdp.page = url;
+  // The page the kit reads, for what the proxy refuses while it does, and
+  // how many connections the proxy had failed to make.
+  const made = cdp.proxy ? cdp.proxy.failedCount : 0;
+  if (cdp.proxy) cdp.proxy.reading = url;
   const loaded = new Promise((resolve) => cdp.on("Page.loadEventFired", resolve));
   Object.assign(cdp.answer, { status: 0, url: "", unreachable: "", blank: false, space: "", ip: "", leftTo: "", hop: "" });
   // The documents the run's rule refuses from here on (see holdDocuments):
@@ -1382,6 +1588,9 @@ async function navigate(cdp, url) {
   // which it was not let ask for (see holdDocuments).
   if (cdp.signedExchanges) throw new Error(SIGNED_EXCHANGES);
   if (errorText) {
+    // A connection the kit's proxy could not make, to the address or to a
+    // hop of its redirects, told as Chrome tells one of its own.
+    if (PROXY_SAID.has(errorText)) errorText = proxyFailure(cdp, cdp.answer.hop || url, made) || errorText;
     // The address, or a hop of its redirects, that the run's rule refused,
     // which the browser then did not ask for: told by the address and why,
     // where the browser says only that the navigation was aborted.
@@ -1458,4 +1667,4 @@ async function inOwnWorld(cdp, use) {
   }
 }
 
-module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, refusedNotes, takeMove, holdDocuments, seenOf, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };
+module.exports = { findChrome, launch, killBrowsers, removeTemps, pipeOf, browserWait, openPage, navigate, triedSoFar, triedNotes, refusedNotes, proxyNotes, takeMove, holdDocuments, inOwnWorld, pageFailed, noKit, busPath, HANDLERS, STAND_INS };

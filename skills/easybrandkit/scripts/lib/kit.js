@@ -28,7 +28,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { launch, openPage, navigate, triedSoFar, triedNotes, refusedNotes, takeMove, seenOf, pageFailed, noKit } = require("./chrome");
+const { launch, openPage, navigate, triedSoFar, triedNotes, refusedNotes, proxyNotes, takeMove, pageFailed, noKit } = require("./chrome");
 const { metrics, walk, waitForContent, hideOverlays, resetPictureWait, capture } = require("./page");
 const { findLogos, captureLogos, readWords } = require("./logos");
 const { renderCard } = require("./card");
@@ -226,23 +226,6 @@ function refuseMove(cdp, url) {
   if (moved) throw pageFailed(`${url} led to ${moved.url}, which ${moved.why}, so no kit was made.`, `led to ${moved.url}, which ${moved.why}`);
 }
 
-// Throws when the tab shows a page the run's rule (guard, see address.js)
-// does not let it read. The browser asks for no document the rule refuses
-// (see chrome.js holdDocuments), so this is where the browser says it got
-// the page: a name that the kit's own lookup finds on the public internet,
-// and the browser's own lookup elsewhere, is told by where the browser
-// found it. Then the page opened, url, can be there itself, which it is
-// told as.
-async function refuseByRule(cdp, url, pageUrl, guard) {
-  refuseMove(cdp, url);
-  for (const at of new Set([pageUrl, cdp.answer.url].filter(Boolean))) {
-    const why = await guard.judge(at, seenOf(cdp, at));
-    if (!why) continue;
-    if (at.split("#")[0] === url.split("#")[0]) throw pageFailed(`${url} ${why}, so no kit was made.`, why);
-    throw pageFailed(`${url} led to ${at}, which ${why}, so no kit was made.`, `led to ${at}, which ${why}`);
-  }
-}
-
 // The https address read in the place of an http address on port 80 that
 // gave no answer (see readPage): the same host and path on port 443. "" for
 // any other address.
@@ -267,7 +250,7 @@ function httpsInPlace(raw) {
 // run's rule holds it to port 443 and the public internet, and one the rule
 // refuses is not tried. What it gives is told by both addresses (inPlace).
 async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper = false, guard = guardFor(url), browser = null } = {}) {
-  const chrome = browser || (await launch(SCREEN, { judge: guard.judge }));
+  const chrome = browser || (await launch(SCREEN, { guard }));
   // A browser that has just not answered is not waited for again as it is
   // asked to quit.
   let unanswered = false;
@@ -289,7 +272,7 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
       log(`Opening ${url}`);
       pageUrl = await navigate(cdp, url);
     }
-    await refuseByRule(cdp, url, pageUrl, guard);
+    refuseMove(cdp, url);
     // An error page is not waited for or walked. A bot check can come with
     // an error status too, and is read like any page: it may let the browser
     // through to the site.
@@ -322,7 +305,6 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     }
     // Also a page that has moved on to such a page since it loaded.
     refuseOtherPage(cdp, url, pageUrl, found.challenge);
-    await refuseByRule(cdp, url, pageUrl, guard);
     // The words first, while the page is as the snapshot saw it.
     const { headings, ctas, unread } = await readWords(cdp, found.wordTargets);
     const text = { title: found.title, description: found.description, headings, ctas };
@@ -339,7 +321,6 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     log("Taking the first screen");
     const screenshots = await captureFirstScreen(cdp, dir);
     refuseOtherPage(cdp, url, pageUrl, "");
-    await refuseByRule(cdp, url, pageUrl, guard);
     const name = brandName(found.siteName, found.title, pageUrl, { deeper, logo: (logos.find((logo) => logo.alt) || {}).alt });
     const colors = withLogoColor(found.brand.colors, logos);
     log("Drawing the card");
@@ -369,9 +350,12 @@ async function readPage(url, dir, log, { alsoNamed = "", facts = false, deeper =
     if (!(await chrome.alive())) throw new Error(BROWSER_GONE);
     // The addresses that are not web addresses the pages tried to open, and
     // whether the browser runs in a sandbox of its own (see triedNotes),
-    // and those the run's rule did not let them open (see refusedNotes).
+    // those the run's rule did not let them open (see refusedNotes), and
+    // the requests the kit's proxy refused while the kit read its pages
+    // (see proxyNotes).
     const tried = await triedSoFar(cdp);
-    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], refusedMore: Boolean(cdp.refusedMore), sandboxed: Boolean(chrome.sandboxed), inPlace: inPlace && { ...inPlace, read: url } };
+    const proxy = chrome.proxy || { refused: [], refusedMore: false };
+    return { pageUrl, found, name, colors, text, wordsUnread: unread, logos, screenshots, card, cardError: card ? "" : cardError, factPages, tried, refused: cdp.refused || [], refusedMore: Boolean(cdp.refusedMore), asked: [...proxy.refused], askedMore: Boolean(proxy.refusedMore), sandboxed: Boolean(chrome.sandboxed), inPlace: inPlace && { ...inPlace, read: url } };
   } catch (err) {
     // A page read in the place of the address asked for that fails is told
     // with what that address did. A tab that stopped answering is told as
@@ -565,7 +549,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     return one;
   };
   try {
-    browser = await launch(SCREEN, { judge: guard.judge });
+    browser = await launch(SCREEN, { guard });
     let given = null;
     let read = null;
     let page = "";
@@ -591,8 +575,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       try {
         // A page the kit chose that the run's rule refuses is not asked for:
         // the browser holds every document to the rule (see chrome.js
-        // holdDocuments), and where only the browser finds it elsewhere, it
-        // is refused once the browser says so (refuseByRule).
+        // holdDocuments), and its proxy every request (see proxy.js).
         read = await readPage(page, work, log, { alsoNamed: appName, facts, guard, browser: take() });
       } catch (err) {
         if (!err.pageFailed || page === asked || err.outOfTime) throw err;
@@ -622,7 +605,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
       notes.push(`${some} not read: ${read.wordsUnread === "time" ? "the run's time ran out. Give it more time with --timeout." : "the browser tab stopped answering."}`);
     }
     if (read && !read.card) notes.push(`The card could not be drawn: ${read.cardError.split(work).join(path.resolve(target)).replace(/[.\s]+$/, "")}.`);
-    if (read) notes.push(...triedNotes(read.tried, read), ...refusedNotes(read.refused, read.refusedMore));
+    if (read) notes.push(...triedNotes(read.tried, read), ...refusedNotes(read.refused, read.refusedMore), ...proxyNotes(read.asked, read.askedMore));
     if (facts && !read) notes.push(failed ? "No facts were read: the website it names could not be read." : "No facts were read: the listing names no website.");
     const others = stores && read ? await readSources(found.links, work, log, given ? [given.type] : [], guard) : [];
     const sources = [...(given ? [given] : []), ...others];

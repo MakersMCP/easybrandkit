@@ -671,14 +671,13 @@ test("a home page that has moved on since the kit read it is not read as the hom
   // tab is after.
   assert.deepEqual(await skippedOf(tab({ ...home, url: "http://127.0.0.1:9222/" })), [["home", url, "it led to http://127.0.0.1:9222/"]]);
   assert.deepEqual(await skippedOf(tab(home, (answer) => (answer.url = "https://other.test/inside"))), [["home", url, "it led to https://other.test/inside"]]);
-  // On the site's own name, found on a private network, when the address
-  // given is www's: what the kit's lookup finds, or where the browser says
-  // it got the page, though its name is found on the web.
+  // A move to the site's own name, found on a private network, when the
+  // address given is www's, which the browser did not open as the rule
+  // refused it (see chrome.js holdDocuments): told by where it led and why.
   const www = model("https://www.acme.test/", [el("h1", {}, "Acme")]);
-  assert.deepEqual(await skippedOf(tab(www, null, "https://acme.test/"), "https://www.acme.test/"), [["home", "https://www.acme.test/", "it led to https://acme.test/, which is at 10.0.0.5, an address not on the public internet"]]);
-  const bare = model("https://acme.test/", [el("h1", {}, "Acme")]);
-  const rebound = tab(bare, (answer) => Object.assign(answer, { url: "https://www.acme.test/x", space: "Loopback", ip: "127.0.0.1" }));
-  assert.deepEqual(await skippedOf(rebound), [["home", url, "it led to https://www.acme.test/x, which is at 127.0.0.1, an address not on the public internet"]]);
+  const moved = tab(www);
+  moved.refused = [{ page: "https://www.acme.test/", url: "https://acme.test/", why: "is at 10.0.0.5, an address not on the public internet", main: true }];
+  assert.deepEqual(await skippedOf(moved, "https://www.acme.test/"), [["home", "https://www.acme.test/", "it led to https://acme.test/, which is at 10.0.0.5, an address not on the public internet"]]);
   // A page that stays on the site is read, wherever on it.
   const shop = model("https://www.acme.test/shop", [el("h1", {}, "Acme")]);
   const stays = await readFactPages(tab(shop, null, "https://www.acme.test/shop"), "https://www.acme.test/", () => {}, { guard: guardFor("https://www.acme.test/") });
@@ -811,8 +810,11 @@ test("a menu page whose name is found on this machine or a private network is op
   // found on a private network, and www.acme.test is the site on the web.
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "dev.test" ? "127.0.1.1" : host === "acme.test" ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
   // A tab whose pages lead where redirects says, and move where moves says
-  // as their text is read, each page read as a page. read lists where each
-  // text read came from.
+  // as their text is read, each page read as a page; a redirect or a move
+  // to the site's bare name the browser does not open, as it holds every
+  // document to the rule (see chrome.js holdDocuments), keeping it in the
+  // tab's refused list. read lists where each text read came from.
+  const bareWhy = "is at 10.0.0.5, an address not on the public internet";
   const tabOn = (home, redirects = {}, moves = {}) => {
     let at = home.url;
     let loaded = () => {};
@@ -821,6 +823,7 @@ test("a menu page whose name is found on this machine or a private network is op
     const cdp = {
       opened,
       read,
+      refused: [],
       answer: { status: 200, url: home.url, unreachable: "", blank: false },
       closed: new Promise(() => {}),
       on: (method, listener) => {
@@ -830,7 +833,11 @@ test("a menu page whose name is found on this machine or a private network is op
         if (WORLD[method]) return WORLD[method];
         if (method === "Page.navigate") {
           opened.push(params.url);
-          at = redirects[params.url] || params.url;
+          if (redirects[params.url]) {
+            cdp.refused.push({ page: params.url, url: redirects[params.url], why: bareWhy, main: true });
+            return { errorText: "net::ERR_BLOCKED_BY_CLIENT" };
+          }
+          at = params.url;
           cdp.answer.url = at;
           loaded();
           return {};
@@ -839,7 +846,7 @@ test("a menu page whose name is found on this machine or a private network is op
         if (method === "Runtime.evaluate" && params.expression.includes("const SKIP")) {
           read.push(at);
           const value = at === home.url ? home : model(at, [el("h1", {}, "Page")]);
-          if (moves[at]) cdp.answer.url = at = moves[at];
+          if (moves[at]) cdp.refused.push({ page: at, url: moves[at], why: bareWhy, main: true });
           return { result: { value } };
         }
         if (method === "Runtime.evaluate") return { result: { value: "" } };
@@ -1246,7 +1253,7 @@ test("the page's text is read in a new world after a navigation, also a page's o
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
   setTimeLimit(100_000);
-  const chrome = await launch({ width: 1000, height: 700 }, { judge: guardFor(`http://127.0.0.1:${port}/`).judge });
+  const chrome = await launch({ width: 1000, height: 700 }, { guard: guardFor(`http://127.0.0.1:${port}/`) });
   let cdp;
   t.after(async () => {
     setTimeLimit(120_000);

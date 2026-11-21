@@ -363,20 +363,6 @@ test("route gives the addresses a connection may go to, every address the lookup
   assert.equal(asked.filter((host) => host === "www.acme.com").length, 1);
 });
 
-test("where the browser says it reached a page counts for an address the run was not given: a name found elsewhere by the browser is told by where it went", async (t) => {
-  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
-  const guard = guardFor("http://acme.com/");
-  assert.equal(await guard.judge("http://www.acme.com/", { space: "Loopback", ip: "127.0.0.1" }), "is at 127.0.0.1, an address not on the public internet");
-  assert.equal(await guard.judge("http://www.acme.com/", { space: "Local", ip: "198.18.0.11" }), "is at 198.18.0.11, an address not on the public internet");
-  assert.equal(await guard.judge("http://www.acme.com/", { space: "Public", ip: "2001:0:7f00:1::1" }), "is at 2001:0:7f00:1::1, an address not on the public internet");
-  assert.equal(await guard.judge("http://www.acme.com/", { space: "Public", ip: "93.184.216.34" }), "");
-  assert.equal(await guard.judge("http://www.acme.com/", { space: "Public", ip: "64:ff9b::8c52:7903" }), "");
-  // Through a proxy the browser says Unknown and gives the proxy's address.
-  assert.equal(await guard.judge("http://www.acme.com/", { space: "Unknown", ip: "127.0.0.1" }), "");
-  // The address given is the user's, wherever the browser found it.
-  assert.equal(await guard.judge("http://acme.com/x", { space: "Loopback", ip: "127.0.0.1" }), "");
-});
-
 test("MAKERSMCP_REFUSE_ADDRESSES is refused for every address a run opens, the one given and its own pages included, by the setting's name", async (t) => {
   t.mock.method(dns.promises, "lookup", async (host) => {
     if (host === "vm.acme.com") return [{ address: "185.137.215.163", family: 4 }];
@@ -407,10 +393,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for every address a run opens, the o
   // opened, as it cannot be checked.
   assert.equal(await guardFor("http://localhost:3000/", { refused }).judge("http://localhost:3000/"), refuses("127.0.0.1"));
   assert.equal(await guardFor("https://gone.acme.com/", { refused }).judge("https://gone.acme.com/"), "is on a host whose name could not be looked up");
-  // Where the browser says it went counts as well, for the address given too.
-  const open = guardFor("https://www.acme.com/", { refused });
-  assert.equal(await open.judge("https://www.acme.com/", { space: "Public", ip: "185.137.215.163" }), refuses("185.137.215.163"));
-  // With the setting empty, the address given is not looked up at all.
+  // With the setting empty, the address given is not looked up to judge it.
   assert.equal(await guardFor("https://gone.acme.com/").judge("https://gone.acme.com/"), "");
 });
 

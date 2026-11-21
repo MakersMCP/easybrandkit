@@ -57,10 +57,13 @@ window it opens and robots.txt with --facts, is opened only on port 80 or
 on the public internet: a name it cannot look up is not opened, nor an
 address it cannot read itself, as one whose host has a label of broken
 punycode (xn--a), which the browser reads.
-With --named-by, the site given is such an address too. A page the browser
-says it got from elsewhere is not read. MAKERSMCP_REFUSE_ADDRESSES, a comma
-list of IP addresses and ranges such as 10.0.0.0/8, refuses those for every
-address opened, the one given included.
+With --named-by, the site given is such an address too. Every request the
+browser makes, a page's pictures, scripts and data and the browser's own
+among them, goes through a proxy of the kit's own on 127.0.0.1, which holds
+it to the same rule, so the browser needs to connect to 127.0.0.1; a browser
+that sends one past it is not used. MAKERSMCP_REFUSE_ADDRESSES, a comma list
+of IP addresses and ranges such as 10.0.0.0/8, refuses those for every
+address opened and every request made, the one given included.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On

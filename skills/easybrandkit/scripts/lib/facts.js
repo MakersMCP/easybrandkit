@@ -21,7 +21,7 @@ const https = require("https");
 const path = require("path");
 const zlib = require("zlib");
 const { Worker } = require("worker_threads");
-const { navigate, seenOf, inOwnWorld, takeMove } = require("./chrome");
+const { navigate, inOwnWorld, takeMove } = require("./chrome");
 const { guardFor, sameHost, portOf, notPublicByForm } = require("./address");
 const { metrics, walk, waitForContent, hideOverlays } = require("./page");
 const { CHALLENGE_TITLE } = require("./logos");
@@ -444,7 +444,7 @@ async function readFactPages(cdp, home, log, { role = "home", guard = guardFor(h
   const homeUrl = new URL(home);
   // Whether the home page's host is not on the public internet, by what its
   // name is found at too: another port of it is another program.
-  const local = await guard.inside(homeUrl, seenOf(cdp, home));
+  const local = await guard.inside(homeUrl);
   // An address off the site that pickPages keeps to.
   const elsewhere = (raw) => {
     try {
@@ -465,19 +465,16 @@ async function readFactPages(cdp, home, log, { role = "home", guard = guardFor(h
       return "";
     }
   };
-  // Why the tab's page, at the addresses it gives, is not to be read: it is
-  // off the site, or where the run's rule does not let the kit read it, as
-  // the browser said where it got it. "" when it is neither. The page the
-  // kit opened (opened) is there itself, as when only the browser finds its
-  // name there; one the page went on to is where it led.
-  const away = async (addresses, opened = "") => {
+  // Why the tab's page, at the addresses it gives, is not to be read: it
+  // tried to move to an address the run's rule refuses, which the browser
+  // did not open (see chrome.js holdDocuments), or it is off the site. ""
+  // when it is neither. Every document the browser loaded was held to the
+  // rule before it was asked for, and its proxy connected only to an
+  // address the rule took (see proxy.js), so where the page is says no more.
+  const away = (addresses) => {
     const moved = takeMove(cdp);
     if (moved) return `it led to ${moved.url}, which ${moved.why}`;
-    for (const at of new Set(addresses.filter(Boolean))) {
-      if (elsewhere(at)) return `it led to ${at}`;
-      const why = await guard.judge(at, seenOf(cdp, at));
-      if (why) return at.split("#")[0] === opened.split("#")[0] ? `it ${why}` : `it led to ${at}, which ${why}`;
-    }
+    for (const at of new Set(addresses.filter(Boolean))) if (elsewhere(at)) return `it led to ${at}`;
     return "";
   };
   log("Reading the page's claims");
@@ -485,10 +482,10 @@ async function readFactPages(cdp, home, log, { role = "home", guard = guardFor(h
   // page: a page can move on by its own script once the kit has read it. So
   // where the tab is, and where the text read came from, are looked at before
   // and after its text is read.
-  const left = notThePage() || (await away([await tabAt(), cdp.answer.url], home));
+  const left = notThePage() || away([await tabAt(), cdp.answer.url]);
   if (left) return { pages, skipped: [{ role, url: home, reason: left }] };
   const model = await readModel(cdp).catch(() => null);
-  const notHome = notThePage() || (await away([model && model.url, await tabAt(), cdp.answer.url], home)) || (model && model.tree ? "" : "its text could not be read");
+  const notHome = notThePage() || away([model && model.url, await tabAt(), cdp.answer.url]) || (model && model.tree ? "" : "its text could not be read");
   if (notHome) return { pages, skipped: [{ role, url: home, reason: notHome }] };
   pages.push({ role, url: home, readAt: new Date().toISOString(), model });
   const picks = pickPages(model, home, { local });
@@ -539,7 +536,7 @@ async function readFactPages(cdp, home, log, { role = "home", guard = guardFor(h
     log(`Reading the ${pick.role} page`);
     try {
       const at = await navigate(cdp, pick.url);
-      const led = await away([at, cdp.answer.url], pick.url);
+      const led = away([at, cdp.answer.url]);
       if (led) {
         skipped.push({ ...pick, reason: led });
         continue;
@@ -562,7 +559,7 @@ async function readFactPages(cdp, home, log, { role = "home", guard = guardFor(h
       // A page that has moved itself off the site, or tried to move to an
       // address the run's rule refuses, since it loaded, also as its text
       // was read.
-      const moved = await away([read && read.url, await tabAt(), cdp.answer.url], pick.url);
+      const moved = away([read && read.url, await tabAt(), cdp.answer.url]);
       if (moved) {
         skipped.push({ ...pick, reason: moved });
         continue;

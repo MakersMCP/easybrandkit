@@ -26,6 +26,7 @@ const { noControls, plainText, noEndSlashes } = require("../skills/easybrandkit/
 const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
+const proxyLib = require("../skills/easybrandkit/scripts/lib/proxy");
 const { storeAnswers } = require("./store-answers");
 const { partedTemp, roomlessTemp } = require("./temp-skip");
 
@@ -34,7 +35,18 @@ const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit
 // Each test starts with the time a run has by default: a browser is waited
 // for as long as the run has left, and a test before it can have used that
 // up.
-test.beforeEach(() => setTimeLimit(120_000));
+// Each test starts with the settings for the browser this file started
+// with: a test whose cleanup failed part way, before it gave them back,
+// would leave its stand-in browser to every test after it.
+const BROWSER_SETTINGS = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG", "STAND_IN_LOCAL_STATE"];
+const STARTED_WITH = Object.fromEntries(BROWSER_SETTINGS.map((name) => [name, process.env[name]]));
+test.beforeEach(() => {
+  setTimeLimit(120_000);
+  for (const [name, value] of Object.entries(STARTED_WITH)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 const LIB = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
 const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp || roomlessTemp;
 
@@ -857,10 +869,15 @@ function ended(pid) {
 // ms, or a list of these for its calls in turn, the last of them for all
 // calls after; any other call is answered at once. STAND_IN_LOG names a file
 // each call's method is added to, with " session" after one sent to a tab.
+// A page it is told to open is asked for through the proxy its arguments
+// name, as a browser asks for it, and the call answered once that is done.
 const ANSWERER = `"use strict";
 const fs = require("fs");
+const http = require("http");
 const rules = JSON.parse(process.env.STAND_IN_ANSWERS || "{}");
 const log = process.env.STAND_IN_LOG;
+const proxied = process.argv.find((arg) => arg.startsWith("--proxy-server="));
+const proxy = proxied ? new URL(proxied.slice("--proxy-server=".length)) : null;
 const results = { "Browser.getVersion": { product: "StandIn/1", userAgent: "StandIn/1" }, "Target.createTarget": { targetId: "x" }, "Target.attachToTarget": { sessionId: "s" } };
 const out = fs.createWriteStream(null, { fd: 4 });
 const asked = {};
@@ -869,7 +886,7 @@ fs.createReadStream(null, { fd: 3 }).on("data", (chunk) => {
   const parts = (rest + chunk).split("\\0");
   rest = parts.pop();
   for (const part of parts) {
-    const { id, method, sessionId } = JSON.parse(part);
+    const { id, method, sessionId, params } = JSON.parse(part);
     if (log) fs.appendFileSync(log, method + (sessionId ? " session" : "") + "\\n");
     const rule = [].concat(method in rules ? rules[method] : 0);
     asked[method] = (asked[method] || 0) + 1;
@@ -877,7 +894,17 @@ fs.createReadStream(null, { fd: 3 }).on("data", (chunk) => {
     if (now === "never") continue;
     // It preloads no page, as a browser started with the kit's profile does.
     if (method === "Preload.enable" && now !== "error") out.write(JSON.stringify({ method: "Preload.preloadEnabledStateUpdated", sessionId, params: { disabledByPreference: true } }) + "\\0");
-    const answer = () => out.write(JSON.stringify(now === "error" ? { id, error: { code: -32000, message: "Not allowed" } } : { id, result: results[method] || {} }) + "\\0", () => now === "exit" && process.exit(0));
+    const reply = () => out.write(JSON.stringify(now === "error" ? { id, error: { code: -32000, message: "Not allowed" } } : { id, result: results[method] || {} }) + "\\0", () => now === "exit" && process.exit(0));
+    const opens = method === "Page.navigate" && proxy && params && /^https?:/.test(String(params.url || ""));
+    const answer = !opens ? reply : () => {
+      const req = http.request({ host: proxy.hostname.replace(/^\\[|\\]$/g, ""), port: proxy.port, path: params.url, headers: { host: new URL(params.url).host }, agent: false }, (res) => {
+        res.resume();
+        res.on("end", reply);
+        res.on("error", reply);
+      });
+      req.on("error", reply);
+      req.end();
+    };
     if (typeof now === "number" && now > 0) setTimeout(answer, now);
     else answer();
   }
@@ -1310,7 +1337,9 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   // The browser's end of its pipe, as slow as each case needs, by the rules
   // in STAND_IN_ANSWERS, which a browser takes as it starts; unless a case
   // says otherwise, it ends once it has said that it heard the kit ask it to
-  // quit. The calls it was asked are counted in a log of its own.
+  // quit. The calls it was asked are counted in a log of its own. Its first
+  // tab and the kit's connection to it are the kit's check that it sends its
+  // requests through the kit's proxy, which it answers at once.
   useAnswerer(t, parent);
   const log = path.join(parent, "calls.log");
   process.env.STAND_IN_LOG = log;
@@ -1348,7 +1377,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   const slow = path.join(parent, "chrome");
   fs.writeFileSync(slow, `#!/bin/sh\nexec ${ANSWER}\n`, { mode: 0o755 });
   process.env.CHROME_PATH = slow;
-  answers({ "Target.createTarget": "never" });
+  answers({ "Target.createTarget": [0, "never"] });
   setTimeLimit(120_000);
   let browser = await launch({ width: 800, height: 600 });
   setTimeLimit(2_500);
@@ -1360,7 +1389,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   end = await ended(renderCard(browser, {}, parent), 2_500);
   assert.equal(end.message, `The browser did not open a tab ${late}`);
   await browser.close();
-  answers({ "Target.createTarget": 11_000, "Target.attachToTarget": "never" });
+  answers({ "Target.createTarget": [0, 11_000], "Target.attachToTarget": [0, "never"] });
   setTimeLimit(120_000);
   browser = await launch({ width: 800, height: 600 });
   setTimeLimit(14_000);
@@ -1369,24 +1398,26 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   await browser.close();
   // The card's connection is waited for 30 s at most, however much time the
   // run has left, and its tab is closed again.
-  answers({ "Target.attachToTarget": "never" });
+  answers({ "Target.attachToTarget": [0, "never"] });
   setTimeLimit(120_000);
   browser = await launch({ width: 800, height: 600 });
+  let closed = calls("Target.closeTarget");
   end = await ended(renderCard(browser, {}, parent), 30_000);
   assert.equal(end.message, "The browser did not answer the kit's connection to its tab in 30 s");
-  assert.equal(calls("Target.closeTarget"), 1, "the card's tab is closed");
+  assert.equal(calls("Target.closeTarget"), closed + 1, "the card's tab is closed");
   await browser.close();
   // A connection to its tab that the browser refuses is told in words, and
   // the tab is closed all the same.
-  answers({ "Target.attachToTarget": "error" });
+  answers({ "Target.attachToTarget": [0, "error"] });
   browser = await launch({ width: 800, height: 600 });
+  closed = calls("Target.closeTarget");
   end = await ended(renderCard(browser, {}, parent), 0, 5_000);
   assert.equal(end.message, "The browser refused the kit's connection to its tab");
-  assert.equal(calls("Target.closeTarget"), 2, "the card's tab is closed");
+  assert.equal(calls("Target.closeTarget"), closed + 1, "the card's tab is closed");
   // Under a time limit longer than any timer can be, as a program that calls
   // makeKit can give it, a tab that comes is taken.
   await browser.close();
-  answers({ "Target.createTarget": 300 });
+  answers({ "Target.createTarget": [0, 300] });
   browser = await launch({ width: 800, height: 600 });
   setTimeLimit(2 ** 40);
   assert.equal(await browser.newTab(browserWait()), "x");
@@ -1417,7 +1448,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   // still runs, and asking it to quit, which it hears and does not do, takes
   // a second: the run ends a moment after its limit. Browser.getVersion is
   // asked for only as the browser starts.
-  answers({ "Target.createTarget": "never", "Browser.close": 0 });
+  answers({ "Target.createTarget": [0, "never"], "Browser.close": 0 });
   fs.rmSync(log, { force: true });
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -1432,7 +1463,7 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.deepEqual(filesOf(dir), before);
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
   // One whose tab's connection the browser refuses keeps it too.
-  answers({ "Target.attachToTarget": "error", "Browser.close": "never" });
+  answers({ "Target.attachToTarget": [0, "error"], "Browser.close": "never" });
   end = await ended(makeKit("https://acme.example/", { dir, stores: false, timeLimit: 30_000 }), 0, 15_000);
   assert.equal(end.message, "The browser refused the kit's connection to its tab, so no kit was made. Try again.");
   assert.equal(end.earlierKit, dir);
@@ -2217,48 +2248,38 @@ test("a deeper address whose home page fails is read as given and says so, and i
   assert.deepEqual(filesOf(dir), before);
 });
 
-// An HTTP proxy on this machine, as a local one for a VPN or a firewall
-// is, that takes every page from this machine's port its address names,
-// whatever its name; a page on port 80, as a site on the web is, from the
-// port that web (a port of this machine) says. Through it the browser says
-// only that a page came through a proxy, so the kit's own lookup says where
-// the page is. hosts lists the hosts it was asked for, and the host and
-// port of each tunnel it was asked for, as an https address asks one. A host
-// in drop gets its connection closed with no answer, as one that cannot be
-// opened, and a host and port in it, as closed.test:443, its tunnel. A
-// tunnel to port 443 leads to this machine's port tls, a server over TLS,
-// when one is given, and else is refused.
-async function proxyOf(t, web = 80, drop = [], tls = 0) {
-  const hosts = [];
-  const proxy = await serve((req, res) => {
-    const url = new URL(req.url);
-    hosts.push(url.host);
-    if (drop.includes(url.hostname)) return req.socket.destroy();
-    const upstream = http.request({ host: "127.0.0.1", port: url.port || web, path: url.pathname + url.search, method: req.method, headers: req.headers }, (answer) => {
-      res.writeHead(answer.statusCode, answer.headers);
-      answer.pipe(res);
-    });
-    upstream.on("error", () => res.writeHead(502).end());
-    req.pipe(upstream);
+// Every connection the kit's proxy makes goes to the addresses the kit's own
+// lookup judged (see lib/proxy.js), which the lookups these tests mock put on
+// the public internet. Here a name of the test's own (names, every name under
+// .test by default) stands for a server of the test's own on this machine:
+// each connection to one goes to 127.0.0.1, on the port at gives for its name
+// and port, the port asked by default, as a browser with
+// --host-resolver-rules=MAP *.test 127.0.0.1 went; "close" for a server that
+// takes the connection and closes it with no answer, as a site down on that
+// port, and 9 where nothing listens. This machine's own names, as
+// localhost, go to 127.0.0.1 on the port asked, as their lookup hands that
+// over first; any other name, as the hosts of the browser's own maker it
+// asks for its updates, goes to port 9, so that none reaches a server of the
+// test's. An IP address is connected to as it is. dials keeps each
+// connection as host:port, and the addresses the proxy's lookup handed over
+// for it.
+async function dialHere(t, at = () => null, names = /(^|\.)test$/) {
+  const net = require("node:net");
+  const closing = net.createServer((socket) => socket.destroy());
+  closing.listen(0, "127.0.0.1");
+  await once(closing, "listening");
+  t.after(() => closing.close());
+  const dials = [];
+  t.mock.method(proxyLib.wire, "dial", (options) => {
+    const handed = [];
+    if (options.lookup) options.lookup(options.host, { all: true }, (err, list) => handed.push(...(err ? [] : list.map((one) => one.address))));
+    dials.push({ to: `${options.host}:${options.port}`, handed });
+    if (net.isIP(options.host)) return net.connect({ host: options.host, port: options.port });
+    if (/(^|\.)localhost$/i.test(options.host)) return net.connect({ host: "127.0.0.1", port: options.port });
+    const to = names.test(options.host) ? at(options.host, options.port) || options.port : 9;
+    return net.connect({ host: "127.0.0.1", port: to === "close" ? closing.address().port : to });
   });
-  // A tunnel's socket is the test's own once it is asked for, its errors
-  // too: the browser can reset one it has given up, as a refused tunnel.
-  proxy.server.on("connect", (req, socket, head) => {
-    socket.on("error", () => {});
-    hosts.push(req.url);
-    if (drop.includes(req.url)) return socket.destroy();
-    if (!tls || !String(req.url).endsWith(":443")) return socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
-    const upstream = require("node:net").connect(tls, "127.0.0.1", () => {
-      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      upstream.write(head);
-      upstream.pipe(socket);
-      socket.pipe(upstream);
-    });
-    upstream.on("error", () => socket.destroy());
-    socket.on("close", () => upstream.destroy());
-  });
-  t.after(() => proxy.server.close());
-  return Object.assign(proxy, { hosts });
+  return Object.assign(dials, { to: () => dials.map((one) => one.to) });
 }
 
 test("a store listing whose website fails keeps what the listing gave and says so", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
@@ -2267,11 +2288,11 @@ test("a store listing whose website fails keeps what the listing gave and says s
   let answers = (req, res) => res.writeHead(403, { "content-type": "text/html" }).end("<!doctype html><title>Forbidden</title><h1>Forbidden</h1>");
   const site = await serve((req, res) => answers(req, res));
   // The website by a name of its own on port 80, which the lookup below
-  // puts on a public address, as a listing's website is, reached through a
-  // proxy: one on another port, on this machine or on a private network is
-  // not opened. The proxy closes closed.test's connection unanswered, and
-  // refuses a tunnel to it, so its https address, tried in its place, is
-  // not opened either.
+  // puts on a public address, as a listing's website is, and the kit's
+  // proxy reaches here (dialHere): one on another port, on this machine or
+  // on a private network is not opened. closed.test closes its connection
+  // unanswered, and nothing answers on its port 443, so its https address,
+  // tried in its place, is not opened either.
   const named = "http://site.test";
   const closedNamed = "http://closed.test";
   const png = Buffer.alloc(33);
@@ -2296,8 +2317,8 @@ test("a store listing whose website fails keeps what the listing gave and says s
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  const proxy = await proxyOf(t, new URL(site.origin).port, ["closed.test"]);
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  const web = Number(new URL(site.origin).port);
+  await dialHere(t, (host, port) => (host === "closed.test" ? (port === 443 ? 9 : "close") : port === 80 ? web : null));
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   const noteOf = (what) => `${listing} is a store listing, and the website it names, ${seller}, ${what}, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. For those, give an address of the product's site that opens.`;
   const fromListing = ["BRAND.md", "_brand.yml", "appstore-icon.png", "appstore-shot-01.png", "brand.json"];
@@ -2305,7 +2326,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   const blank = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`${brandPage("rgb(255,0,0)")}<script>setTimeout(() => location.replace("about:blank"), 300)</script>`);
   const cases = [
     ["a 403", answers, `${named}/app`, "answered 403"],
-    ["a site that cannot be opened", answers, `${closedNamed}/`, "could not be opened (net::ERR_EMPTY_RESPONSE), and https://closed.test/, tried in its place, could not be opened (net::ERR_TUNNEL_CONNECTION_FAILED)"],
+    ["a site that cannot be opened", answers, `${closedNamed}/`, "could not be opened (net::ERR_EMPTY_RESPONSE), and https://closed.test/, tried in its place, could not be opened (net::ERR_CONNECTION_REFUSED)"],
     ["a bot check", bot, `${named}/`, `answered with a bot check ("Human Verification")`],
     ["a blank page", blank, `${named}/`, "moved on to a blank page"],
     ["another port", bot, `${site.origin.replace("127.0.0.1", "site.test")}/`, `is on port ${new URL(site.origin).port}, not 80 or 443`],
@@ -2403,13 +2424,8 @@ test("a store listing whose website fails keeps what the listing gave and says s
   const gone = path.join(parent, "gone");
   await assert.rejects(makeKit(listing, { dir: gone, stores: false, log: (line) => line === "Reading the page" && killBrowsers() }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again.");
   assert.equal(fs.existsSync(gone), false);
-  const chrome = process.env.CHROME_PATH;
-  process.env.CHROME_PATH = path.join(parent, "no-chrome");
-  try {
-    await assert.rejects(makeKit(listing, { dir: gone, stores: false }), /^Error: No Chrome, Chromium, Edge or Brave found/);
-  } finally {
-    process.env.CHROME_PATH = chrome;
-  }
+  setEnv(t, { CHROME_PATH: path.join(parent, "no-chrome") });
+  await assert.rejects(makeKit(listing, { dir: gone, stores: false }), /^Error: No Chrome, Chromium, Edge or Brave found/);
   assert.equal(fs.existsSync(gone), false);
 });
 
@@ -2427,9 +2443,10 @@ async function counting(t) {
 }
 
 test("an address a site leads to is opened only on port 80 or 443 and on the public internet, judged at each hop before the browser asks for it, and the pages on the host and port given are read", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
-  // The brand's site by a name of its own, which the browser finds on this
-  // machine and the lookup below puts on a public address. What it leads to
-  // on another port is another program, which counts what reaches it.
+  // The brand's site by a name of its own, which the lookup below puts on a
+  // public address, and the kit's proxy reaches here (dialHere). What it
+  // leads to on another port is another program, which counts what reaches
+  // it.
   let lead = "redirect";
   let port = "";
   const other = await counting(t);
@@ -2468,7 +2485,7 @@ test("an address a site leads to is opened only on port 80 or 443 and on the pub
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  await dialHere(t);
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -2535,7 +2552,7 @@ test("a frame of a page at an address the run was not given is held to the same 
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  await dialHere(t);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const given = `http://brand.test:${new URL(site.origin).port}/`;
   const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
@@ -2558,7 +2575,7 @@ test("past the first 50 addresses a page's frames tried to open that the rule re
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
+  await dialHere(t);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const given = `http://brand.test:${new URL(site.origin).port}/`;
   const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
@@ -2635,7 +2652,7 @@ test("an http address given is asked for over http as it is written, a name unde
     fs.rmSync(parent, { recursive: true, force: true });
   });
   const port = new URL(site.origin).port;
-  useRelay(t, parent, {}, [`--host-resolver-rules=MAP app.example.com:80 127.0.0.1:${port}, MAP app.example.com:443 127.0.0.1:9`]);
+  await dialHere(t, (host, at) => (at === 80 ? Number(port) : 9), /^app\.example\.com$/);
   let at = "";
   t.mock.method(dns.promises, "lookup", async () => [{ address: at, family: 4 }]);
   for (const where of ["10.0.0.5", "198.18.0.5", "93.184.216.34"]) {
@@ -2707,7 +2724,7 @@ async function dnsOverHttps(t, dir, records) {
   return { origin: `https://127.0.0.1:${server.address().port}`, asked };
 }
 
-test("an http address given is asked for over http also when its name's DNS gives an HTTPS record, as every name behind Cloudflare does", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test DNS server's certificate") }, async (t) => {
+test("an http address given is asked for over http also when its name's DNS gives an HTTPS record, as every name behind Cloudflare does: the browser asks no DNS for a name, as the kit's proxy looks each up", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test DNS server's certificate") }, async (t) => {
   const net = require("node:net");
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
@@ -2740,17 +2757,18 @@ test("an http address given is asked for over http also when its name's DNS give
   // name of its port (_<port>._https), as a browser that uses them asks.
   const record = Buffer.concat([Buffer.from([0, 1]), dnsName("svcb.test")]);
   const dns = await dnsOverHttps(t, parent, { "svcb.test": [[1, Buffer.from([127, 0, 0, 1])], [65, record]], [`_${port}._https.svcb.test`]: [[65, record]] });
-  // The browser asks that server alone, and takes its certificate.
+  // The browser would ask that server alone, and takes its certificate.
+  // The kit's own lookup finds the name where that server's record does.
   useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
   process.env.STAND_IN_LOCAL_STATE = JSON.stringify({ dns_over_https: { mode: "secure", templates: `${dns.origin}/dns-query{?dns}` } });
+  t.mock.method(require("node:dns").promises, "lookup", async () => [{ address: "127.0.0.1", family: 4 }]);
   const given = `http://svcb.test:${port}/`;
-  const run = await makeKit(given, { dir: path.join(parent, "kit"), stores: false }).then((made) => ({ made }), (err) => ({ err }));
-  if (!dns.asked.includes("svcb.test 1")) return t.skip("the browser asks no DNS server of the test's own, so what it does with a name's HTTPS record is not seen");
-  assert.ok(run.made, run.err && run.err.message);
-  assert.equal(run.made.kit.url, given);
-  assert.deepEqual(run.made.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
+  assert.equal(kit.url, given);
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.ok(asked.includes("http /"), asked.join(" "));
   assert.ok(!asked.includes("tls"), "the browser asked the site nothing over https");
+  assert.deepEqual(dns.asked.filter((one) => one.includes("svcb.test")), [], "the browser asked the DNS nothing of the site's name");
 });
 
 test("an http address given on a name the browser takes only over https, as every .dev name, is read over https on its own port, as the address given", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
@@ -2771,8 +2789,9 @@ test("an http address given on a name the browser takes only over https, as ever
   t.after(() => server.close());
   const port = server.address().port;
   // The browser takes the certificate as a machine that trusts it would.
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP myapp.dev 127.0.0.1", "--ignore-certificate-errors"]);
-  t.mock.method(dns.promises, "lookup", async () => [{ address: "127.0.0.1", family: 4 }]);
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
+  await dialHere(t, () => null, /^myapp\.dev$/);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "myapp.dev" ? "127.0.0.1" : "93.184.216.34", family: 4 }]);
   const given = `http://myapp.dev:${port}/`;
   const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
   assert.equal(kit.url, `https://myapp.dev:${port}/`);
@@ -2784,12 +2803,11 @@ test("an http address on port 80 that gives no answer or no connection, as a sit
   const https = require("node:https");
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
-  // The site over TLS, as a site that serves only https, reached through
-  // the proxy, which closes every http connection to these names with no
-  // answer, as nothing answers on their port 80, and the tunnel to
-  // closed.test too. The browser takes the certificate as a machine that
-  // trusts it would, and through the proxy says nothing of where a page
-  // came from, so the kit's own lookup says where each name is.
+  // The site over TLS, as a site that serves only https, which the kit's
+  // proxy reaches here (dialHere): every http connection to these names is
+  // closed with no answer, as nothing answers on their port 80, and nothing
+  // answers on closed.test's port 443. The browser takes the certificate as
+  // a machine that trusts it would.
   const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=brand.test", "-addext", "subjectAltName=DNS:brand.test,DNS:www.brand.test,DNS:closed.test,DNS:intranet.test"], { cwd: parent, encoding: "utf8" });
   assert.equal(made.status, 0, made.stderr);
   const asked = [];
@@ -2800,8 +2818,9 @@ test("an http address on port 80 that gives no answer or no connection, as a sit
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   t.after(() => server.close());
-  const proxy = await proxyOf(t, 9, ["brand.test", "www.brand.test", "closed.test", "closed.test:443", "intranet.test"], server.address().port);
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors"]);
+  const tls = server.address().port;
+  const dials = await dialHere(t, (host, port) => (port === 443 ? (host === "closed.test" ? 9 : tls) : "close"));
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
   const { kit } = await makeKit("http://brand.test/", { dir: path.join(parent, "kit"), stores: false });
   assert.equal(kit.url, "https://brand.test/");
@@ -2816,12 +2835,12 @@ test("an http address on port 80 that gives no answer or no connection, as a sit
   const dir = path.join(parent, "earlier");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
-  await assert.rejects(makeKit("http://closed.test/", { dir, stores: false }), (err) => err.message === "http://closed.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and https://closed.test/, tried in its place, could not be opened (net::ERR_EMPTY_RESPONSE), so no kit was made." && err.earlierKit === dir);
+  await assert.rejects(makeKit("http://closed.test/", { dir, stores: false }), (err) => err.message === "http://closed.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and https://closed.test/, tried in its place, could not be opened (net::ERR_CONNECTION_REFUSED), so no kit was made." && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before);
   // A name on a private network is read only as given: its https address,
-  // which the run was not given, is not tried, nor asked of the proxy.
+  // which the run was not given, is not tried, nor reached by the proxy.
   await assert.rejects(makeKit("http://intranet.test/", { dir, stores: false }), (err) => err.message === "Could not open http://intranet.test/: net::ERR_EMPTY_RESPONSE" && err.earlierKit === dir);
-  assert.ok(!proxy.hosts.includes("intranet.test:443"), proxy.hosts.join(" "));
+  assert.ok(dials.to().includes("intranet.test:80") && !dials.to().includes("intranet.test:443"), dials.to().join(" "));
   // Nor is an address on another port than 80, as Chrome's own move to
   // https never was.
   await assert.rejects(makeKit("http://brand.test:8080/", { dir, stores: false }), (err) => err.message === "Could not open http://brand.test:8080/: net::ERR_EMPTY_RESPONSE" && err.earlierKit === dir);
@@ -2833,8 +2852,9 @@ test("an http address on port 80 that answers with a redirect to an address that
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // a.test answers on port 80 with a redirect to b.test, which takes the
-  // connection and closes it with no answer, through the proxy; a.test
-  // also serves a page over https, which is not the address given.
+  // connection and closes it with no answer, as the kit's proxy reaches
+  // them here (dialHere); a.test also serves a page over https, which is
+  // not the address given.
   const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=a.test", "-addext", "subjectAltName=DNS:a.test,DNS:b.test"], { cwd: parent, encoding: "utf8" });
   assert.equal(made.status, 0, made.stderr);
   const asked = [];
@@ -2847,18 +2867,18 @@ test("an http address on port 80 that answers with a redirect to an address that
   t.after(() => server.close());
   const web = await serve((req, res) => res.writeHead(302, { location: "http://b.test/" }).end());
   t.after(() => web.server.close());
-  const proxy = await proxyOf(t, new URL(web.origin).port, ["b.test"], server.address().port);
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors"]);
+  const dials = await dialHere(t, (host, port) => (host === "b.test" ? "close" : port === 443 ? server.address().port : Number(new URL(web.origin).port)));
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
   await assert.rejects(makeKit("http://a.test/", { dir, stores: false }), (err) => err.message === "http://a.test/ led to http://b.test/, which could not be opened (net::ERR_EMPTY_RESPONSE), so no kit was made." && err.earlierKit === dir);
   // The browser's own requests to its maker's hosts come through the
-  // proxy's tunnel as well.
+  // proxy as well, and reach the same server here.
   assert.deepEqual(asked.filter((one) => one.startsWith("a.test")), [], "no https address was read");
-  assert.ok(proxy.hosts.includes("b.test"), proxy.hosts.join(" "));
-  assert.ok(!proxy.hosts.includes("a.test:443"), proxy.hosts.join(" "));
+  assert.ok(dials.to().includes("b.test:80"), dials.to().join(" "));
+  assert.ok(!dials.to().includes("a.test:443"), dials.to().join(" "));
   assert.deepEqual(filesOf(dir), before);
 });
 
@@ -2866,8 +2886,9 @@ test("an https address read in the place of an http one that fails is told with 
   const https = require("node:https");
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
-  // Both sites serve only https, through the proxy, which closes their http
-  // connections with no answer; slow.test never answers over https either.
+  // Both sites serve only https: the kit's proxy reaches them here
+  // (dialHere), where their http connections are closed with no answer;
+  // slow.test never answers over https either.
   const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=brand.test", "-addext", "subjectAltName=DNS:brand.test,DNS:slow.test"], { cwd: parent, encoding: "utf8" });
   assert.equal(made.status, 0, made.stderr);
   const held = [];
@@ -2881,8 +2902,8 @@ test("an https address read in the place of an http one that fails is told with 
     for (const res of held) res.destroy();
     server.close();
   });
-  const proxy = await proxyOf(t, 9, ["brand.test", "slow.test"], server.address().port);
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>", "--ignore-certificate-errors"]);
+  await dialHere(t, (host, port) => (port === 443 ? server.address().port : "close"));
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
@@ -3052,7 +3073,7 @@ test("a browser that takes signed exchanges though the kit's profile asks it not
   const own = path.join(parent, "its-own");
   writeFiles(own, { "Default/Preferences": JSON.stringify({ net: { network_prediction_options: 2 } }) });
   useRelay(t, parent, {}, [`--user-data-dir=${own}`]);
-  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser takes signed exchanges though its profile asks it not to, as a Chrome policy (SignedHTTPExchangeEnabled) or a program that starts it with a profile of its own makes it do, so no kit was made: a page could have it fetch the certificate a signed exchange names, at an address easybrandkit does not open, without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser." && err.earlierKit === dir);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser takes signed exchanges though its profile asks it not to, as a Chrome policy (SignedHTTPExchangeEnabled) or a program that starts it with a profile of its own makes it do, so no kit was made: a page could have it show what a signed exchange holds under another address than the one it came from, past easybrandkit's rule for the pages it opens, which tells where a page led. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser." && err.earlierKit === dir);
   assert.equal(asked, 0, "the site was not opened");
   assert.deepEqual(filesOf(dir), before);
 });
@@ -3071,7 +3092,7 @@ test("a browser that preloads pages though the kit's profile asks it not to, or 
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
-  const risk = "so no kit was made: a page could have it open an address easybrandkit does not open before easybrandkit had judged that address.";
+  const risk = "so no kit was made: a page could have it fetch a page ahead of the page's move there, past easybrandkit's rule for the pages it opens, which tells where a page led.";
   // Started with a profile of its own, as a program that starts the browser
   // can start it, where preloading is on as it is by default.
   useRelay(t, parent, {}, [`--user-data-dir=${path.join(parent, "its-own")}`]);
@@ -3096,7 +3117,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the bro
   const reached = [];
   site.server.on("connection", () => reached.push(Date.now()));
   const port = new URL(site.origin).port;
-  const proxy = await proxyOf(t, port);
+  const dials = await dialHere(t, (host, at) => (at === 80 ? Number(port) : null));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = ownTemp(t);
   const tmpdir = process.env.TMPDIR;
@@ -3129,36 +3150,45 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the bro
   assert.equal(reached.length, 0, "the site was not opened");
   assert.deepEqual(filesOf(dir), before);
   if (temp) assert.deepEqual(fs.readdirSync(temp), [], "no browser was started");
-  // A site on the web, through a proxy: one it leads to at a refused
-  // address is refused at that hop, and never reaches the proxy.
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  // A site on the web: one it leads to at a refused address is refused at
+  // that hop, and never reached.
   lead = "http://vm.test/inside";
   await assert.rejects(makeKit("http://brand.test/", { dir, stores: false }), (err) => err.message === "http://brand.test/ led to http://vm.test/inside, which is at 185.137.215.163, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made." && err.earlierKit === dir);
-  assert.ok(!proxy.hosts.includes("vm.test"), proxy.hosts.join(" "));
+  assert.ok(!dials.to().some((one) => one.startsWith("vm.test")), dials.to().join(" "));
   assert.deepEqual(filesOf(dir), before);
   lead = "";
   const { kit } = await makeKit("http://brand.test/", { dir: path.join(parent, "web"), stores: false });
   assert.equal(kit.url, "http://brand.test/");
 });
 
-test("MAKERSMCP_REFUSE_ADDRESSES counts where the browser says it reached the address given, as a name found elsewhere by its own lookup", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+test("MAKERSMCP_REFUSE_ADDRESSES holds where the kit's own lookup finds the address given, and the browser's own lookup, which finds it elsewhere, is never used", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const trap = await counting(t);
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  // The kit's own lookup finds the name on the web; the browser's on this
-  // machine, which the setting refuses.
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1"]);
-  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "127.0.0.0/8" });
+  // The kit's own lookup finds the name on the web, which the kit's proxy
+  // reaches here (dialHere); the browser's would find it on this machine,
+  // on the port of a program that counts what reaches it.
+  useRelay(t, parent, {}, [`--host-resolver-rules=MAP *.test 127.0.0.1:${trap.port}`]);
+  await dialHere(t);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const given = `http://brand.test:${new URL(site.origin).port}/`;
+  // Refused there, the site is not opened.
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "93.184.216.0/24" });
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
-  await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} is at 127.0.0.1, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.` && err.earlierKit === dir);
+  await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${given} is at 93.184.216.34, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.` && !err.earlierKit);
   assert.deepEqual(filesOf(dir), before);
+  // Refusing this machine, the site is read from where the kit's lookup
+  // found it, and nothing reaches this machine's program.
+  process.env.MAKERSMCP_REFUSE_ADDRESSES = "127.0.0.0/8";
+  const { kit } = await makeKit(given, { dir: path.join(parent, "web"), stores: false });
+  assert.equal(kit.url, given);
+  assert.equal(trap.connections, 0, "the browser's own lookup was never used");
 });
 
 test("MAKERSMCP_REFUSE_ADDRESSES refuses a store listing given, and one a page links, whose store is at an address it names, in its words, and that store is asked nothing", { skip: noBrowser }, async (t) => {
@@ -3170,6 +3200,7 @@ test("MAKERSMCP_REFUSE_ADDRESSES refuses a store listing given, and one a page l
     fs.rmSync(parent, { recursive: true, force: true });
   });
   setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "17.253.144.0/24" });
+  await dialHere(t);
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: /(^|\.)apple\.com$/.test(host) ? "17.253.144.10" : "93.184.216.34", family: 4 }]);
   // The store would name the site as the listing's website.
   const asked = storeAnswers(t, () => ({ body: JSON.stringify({ results: [{ trackName: "Acme", sellerUrl: `${site.origin}/` }] }) }));
@@ -3218,12 +3249,11 @@ test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any 
 
 test("a site another source named, given with namedBy or --named-by, is read as a page the kit chose: only on port 80 or 443 and on the public internet, refused before anything is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await counting(t);
-  const proxy = await proxyOf(t, site.port);
+  const dials = await dialHere(t, (host, at) => (at === 80 ? Number(site.port) : null));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const listing = "https://apps.apple.com/us/app/acme/id1234567890";
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
   const dir = path.join(parent, "kit");
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
@@ -3241,7 +3271,7 @@ test("a site another source named, given with namedBy or --named-by, is read as 
   const local = `${site.origin}/listing`;
   await assert.rejects(makeKit(`${site.origin}/`, { dir, stores: false, namedBy: local }), (err) => err.message === `${site.origin}/, named by ${local}, is on port ${site.port}, not 80 or 443, so no kit was made.`);
   assert.equal(site.connections, 0, "nothing was opened");
-  assert.deepEqual(proxy.hosts, []);
+  assert.deepEqual(dials.to(), []);
   assert.deepEqual(filesOf(dir), before);
   // Given by the user, the same site on this machine is read.
   const mine = await makeKit(`${site.origin}/`, { dir: path.join(parent, "mine"), stores: false });
@@ -3262,8 +3292,9 @@ test("a site another source named, given with namedBy or --named-by, is read as 
 });
 
 test("a site another source named that leads to the source's own scheme, host and port is refused at that hop, as the run has no address of its own", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
-  // The site by a name of its own on port 80, through a proxy, sends its
-  // visitors on to this machine, on the port of the source.
+  // The site by a name of its own on port 80, which the kit's proxy reaches
+  // here (dialHere), sends its visitors on to this machine, on the port of
+  // the source.
   const asked = [];
   const site = await serve((req, res) => {
     asked.push(`${req.headers.host}${req.url}`);
@@ -3271,18 +3302,17 @@ test("a site another source named that leads to the source's own scheme, host an
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(0,128,0)"));
   });
   const port = new URL(site.origin).port;
-  const proxy = await proxyOf(t, port);
+  const dials = await dialHere(t, (host, at) => (at === 80 ? Number(port) : null));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
   const source = `${site.origin}/listing`;
   await assert.rejects(makeKit("http://acme.test/", { dir: path.join(parent, "kit"), stores: false, namedBy: source }), (err) => err.message === `http://acme.test/ led to ${site.origin}/inside, which is on port ${port}, not 80 or 443, so no kit was made.`);
   assert.ok(!asked.some((one) => one.endsWith("/inside")), asked.join(" "));
-  assert.ok(!proxy.hosts.includes(`127.0.0.1:${port}`), proxy.hosts.join(" "));
+  assert.ok(!dials.to().includes(`127.0.0.1:${port}`), dials.to().join(" "));
 });
 
 // kit.js loaded afresh, for what the test has mocked of the modules it takes
@@ -3478,35 +3508,442 @@ test("a kit's folder removed while a run makes its kit is told as that, not as a
   assert.deepEqual(filesOf(dir), before);
 });
 
-test("through a proxy, which the browser does not tell past, the kit's own lookup says where a page is", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+test("every page comes through the kit's proxy, which connects only where the kit's own lookup found the name, and the browser looks no name up itself", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let lead = "";
   const site = await serve((req, res) => {
     if (String(req.headers.host || "").startsWith("brand.test") && req.url === "/") return res.writeHead(302, { location: lead }).end();
     res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   });
   const port = new URL(site.origin).port;
-  const proxy = await proxyOf(t, port);
+  // Where the browser's own lookup would find each name: a program of this
+  // machine, which counts what reaches it.
+  const trap = await counting(t);
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => {
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  useRelay(t, parent, {}, [`--proxy-server=${proxy.origin}`, "--proxy-bypass-list=<-loopback>"]);
+  // Only the test's own names: a rule for every host would map the proxy's
+  // own address too.
+  useRelay(t, parent, {}, [`--host-resolver-rules=MAP *.test 127.0.0.1:${trap.port}`]);
+  const dials = await dialHere(t, (host, at) => (at === 80 ? Number(port) : null));
   t.mock.method(dns.promises, "lookup", async (host) => [{ address: host.startsWith("intranet.") ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
   const given = `http://brand.test:${port}/`;
-  // Every page comes from the proxy's address, on this machine. A page on a
-  // name found on the web is read through it,
+  // A page on a name found on the web is read, from where the kit's lookup
+  // found it,
   lead = "http://www.brand.test/";
   const { kit } = await makeKit(given, { dir: path.join(parent, "www"), stores: false });
   assert.equal(kit.url, lead);
-  assert.ok(proxy.hosts.includes("www.brand.test"), proxy.hosts.join(" "));
+  const www = dials.find((one) => one.to === "www.brand.test:80");
+  assert.deepEqual(www && www.handed, ["93.184.216.34"]);
   // and one on a name found on a private network, or at such an address, is
-  // not, nor asked of the proxy.
+  // not, nor reached by the proxy.
   for (const [to, why] of [["http://intranet.test/inside", "is at 10.0.0.5, an address not on the public internet"], ["http://127.0.0.1/inside", "is not on the public internet"]]) {
     lead = to;
     await assert.rejects(makeKit(given, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `${given} led to ${to}, which ${why}, so no kit was made.`, to);
-    assert.ok(!proxy.hosts.includes(new URL(to).host), proxy.hosts.join(" "));
+    assert.ok(!dials.to().includes(new URL(to).host), dials.to().join(" "));
   }
+  assert.equal(trap.connections, 0, "the browser's own lookup was never used");
+});
+
+// A program of this machine that counts each connection to it over TCP,
+// and each UDP packet to the same port, as an address the run must not
+// reach would.
+async function countingBoth(t) {
+  const net = require("node:net");
+  const dgram = require("node:dgram");
+  const program = { connections: 0, packets: 0 };
+  // UDP first, on a port the system picks, then TCP on that same port, with
+  // another port when another program holds that one for TCP: a bind of
+  // either that fails is told, not waited for.
+  for (let tries = 1; ; tries++) {
+    const udp = dgram.createSocket("udp4");
+    const unbound = await new Promise((resolve) => {
+      udp.once("error", resolve);
+      udp.bind(0, "127.0.0.1", () => resolve(null));
+    });
+    if (unbound) throw unbound;
+    const port = udp.address().port;
+    const tcp = net.createServer((socket) => {
+      program.connections++;
+      socket.on("error", () => {});
+      socket.destroy();
+    });
+    const unheard = await new Promise((resolve) => {
+      tcp.once("error", resolve);
+      tcp.listen(port, "127.0.0.1", () => resolve(null));
+    });
+    if (unheard) {
+      udp.close();
+      if (unheard.code === "EADDRINUSE" && tries < 20) continue;
+      throw unheard;
+    }
+    udp.on("message", () => program.packets++);
+    udp.on("error", () => {});
+    t.after(() => {
+      tcp.close();
+      udp.close();
+    });
+    return Object.assign(program, { port });
+  }
+}
+
+// Waits until has() holds, a few seconds at most.
+async function until(has, ms = 20_000) {
+  for (const end = Date.now() + ms; !has() && Date.now() < end; ) await new Promise((resolve) => setTimeout(resolve, 100));
+}
+
+test("every request the browser makes, whatever makes it, goes through the kit's proxy: a page's picture, style, font, data, beacon, WebSocket and service worker's fetch on another port or address reach nothing, and the kit's notes name them", { skip: noBrowser }, async (t) => {
+  const other = await countingBoth(t);
+  const at = `127.0.0.1:${other.port}`;
+  const site = await serve((req, res) => {
+    if (req.url === "/sw.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(`fetch("http://${at}/from-worker").catch(() => {});`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://${at}/pic.png"><link rel="stylesheet" href="http://${at}/s.css"><script>
+      new FontFace("x", "url(http://${at}/f.woff2)").load().catch(() => {});
+      fetch("http://far.test/data").catch(() => {});
+      navigator.sendBeacon("http://${at}/beacon", "x");
+      new WebSocket("ws://${at}/socket").onerror = () => {};
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    </script></body>`));
+  });
+  t.after(() => site.server.close());
+  await dialHere(t);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "far.test" ? "10.0.0.5" : "93.184.216.34", family: 4 }]);
+  const given = `${site.origin}/`;
+  const chrome = await launch({ width: 1000, height: 700 }, { guard: guardFor(given) });
+  t.after(() => chrome.close());
+  const cdp = await openPage(chrome, { width: 1000, height: 700 });
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  await navigate(cdp, given);
+  const wanted = [`http://${at}/pic.png`, `http://${at}/s.css`, `http://${at}/f.woff2`, "http://far.test/data", `http://${at}/beacon`, at, `http://${at}/from-worker`];
+  await until(() => wanted.every((what) => chrome.proxy.refused.some((one) => one.what === what)));
+  const why = `is on port ${other.port}, not 80 or 443`;
+  for (const what of wanted) {
+    const one = chrome.proxy.refused.find((kept) => kept.what === what);
+    assert.ok(one, `${what} was asked of the proxy: ${JSON.stringify(chrome.proxy.refused)}`);
+    assert.equal(one.why, what === "http://far.test/data" ? "is at 10.0.0.5, an address not on the public internet" : why, what);
+    assert.equal(one.page, given, what);
+  }
+  assert.equal(other.connections, 0, "nothing reached the other program");
+  // The kit's notes name the first three, and count the rest.
+  const { proxyNotes } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const notes = proxyNotes(chrome.proxy.refused, chrome.proxy.refusedMore);
+  assert.equal(notes.length, 4, notes.join("\n"));
+  for (const note of notes.slice(0, 3)) assert.match(note, new RegExp(`^While easybrandkit read ${given.replace(/[.]/g, "\\.")}, the browser asked for \\S+, which (is on port ${other.port}, not 80 or 443|is at 10\\.0\\.0\\.5, an address not on the public internet): it was not reached\\.$`), note);
+  assert.equal(notes[3], `${chrome.proxy.refused.length - 3} more addresses the browser asked for were not reached either.`);
+});
+
+test("a run's notes name what the kit's proxy refused while it read the page, and a run that reaches what it may is read as before", { skip: noBrowser }, async (t) => {
+  const other = await countingBoth(t);
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://127.0.0.1:${other.port}/pic.png"></body>`)));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const given = `${site.origin}/`;
+  const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.deepEqual(kit.notes, [`While easybrandkit read ${given}, the browser asked for http://127.0.0.1:${other.port}/pic.png, which is on port ${other.port}, not 80 or 443: it was not reached.`]);
+  assert.ok(fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8").includes(`- ${kit.notes[0]}\n`));
+  assert.equal(other.connections, 0);
+});
+
+test("a page's WebRTC and WebTransport send no UDP past the kit's proxy, and WebRTC's TURN over TCP goes through the proxy, which refuses it", { skip: noBrowser }, async (t) => {
+  const other = await countingBoth(t);
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:${other.port}" }, { urls: "turn:127.0.0.1:${other.port}?transport=tcp", username: "u", credential: "p" }] });
+    peer.createDataChannel("x");
+    peer.createOffer().then((offer) => peer.setLocalDescription(offer));
+    try { new WebTransport("https://127.0.0.1:${other.port}/").ready.catch(() => {}); } catch {}
+  </script></body>`)));
+  t.after(() => site.server.close());
+  const given = `${site.origin}/`;
+  const chrome = await launch({ width: 1000, height: 700 }, { guard: guardFor(given) });
+  t.after(() => chrome.close());
+  const cdp = await openPage(chrome, { width: 1000, height: 700 });
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  await navigate(cdp, given);
+  await until(() => chrome.proxy.refused.some((one) => one.what === `127.0.0.1:${other.port}`));
+  // STUN goes out at once; a moment more for one that would come.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  assert.ok(chrome.proxy.refused.some((one) => one.what === `127.0.0.1:${other.port}`), JSON.stringify(chrome.proxy.refused));
+  assert.equal(other.packets, 0, "no UDP reached this machine's port");
+  assert.equal(other.connections, 0);
+});
+
+test("a page that looks for cast devices has the browser send nothing on this machine's networks, which no proxy holds", { skip: noBrowser || (process.platform !== "linux" && "multicast is listened for on Linux only") }, async (t) => {
+  const dgram = require("node:dgram");
+  // What this machine itself sends to the groups a search for cast devices
+  // asks on, SSDP and mDNS, as the browser's media router did.
+  const own = new Set(Object.values(os.networkInterfaces()).flat().filter((one) => one && one.family === "IPv4").map((one) => one.address));
+  const heard = [];
+  const groups = [];
+  for (const [port, group] of [[1900, "239.255.255.250"], [5353, "224.0.0.251"]]) {
+    const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+    socket.on("error", () => {});
+    socket.on("message", (message, from) => own.has(from.address) && heard.push(`${port} ${message.toString("latin1")}`));
+    const joined = await new Promise((resolve) => {
+      socket.once("error", () => resolve(false));
+      socket.bind(port, () => {
+        try {
+          socket.addMembership(group);
+          resolve(true);
+        } catch {
+          resolve(false);
+        }
+      });
+    });
+    t.after(() => socket.close());
+    if (joined) groups.push([port, group, socket]);
+  }
+  if (groups.length < 2) return t.skip("the test cannot listen to the groups a search for cast devices asks on");
+  // A search of the test's own, to show that what this machine sends there
+  // comes back to the test, with a word of this run's own, as another run
+  // of the suite on this machine sends one too.
+  const word = `easybrandkit-test-${crypto.randomBytes(6).toString("hex")}`;
+  groups[0][2].setMulticastLoopback(true);
+  groups[0][2].send(`M-SEARCH * HTTP/1.1\r\nST: ${word}\r\n\r\n`, 1900, "239.255.255.250");
+  await until(() => heard.some((one) => one.includes(word)), 3_000);
+  if (!heard.some((one) => one.includes(word))) return t.skip("what this machine sends to a multicast group does not come back to it here");
+  heard.length = 0;
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>try { new PresentationRequest(["https://cast.example/receiver"]).getAvailability().catch(() => {}); } catch {}</script></body>`)));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  // A browser's search for cast devices: DIAL's over SSDP, and Cast's own
+  // over mDNS. The tests' own searches, this run's and another's, are not.
+  const searches = heard.filter((one) => !one.includes("ST: easybrandkit-test") && ((/M-SEARCH/.test(one) && /urn:dial-multiscreen-org:service:dial:1/i.test(one)) || /_googlecast/i.test(one)));
+  assert.deepEqual(searches, [], "the browser searched for no cast device");
+});
+
+test("the fetch of a site certificate's issuer, from the address the certificate names on a port of this machine, reaches nothing but the kit's proxy, which refuses it", { skip: noBrowser || (!openssl && "no openssl to make the test site's certificates") }, async (t) => {
+  const https = require("node:https");
+  const other = await countingBoth(t);
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  // The browser ends before its folder goes, as one still at work writes
+  // into it.
+  let chrome = null;
+  t.after(async () => {
+    if (chrome) await chrome.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // A site whose certificate an issuer of its own signed, which it does not
+  // send, so the browser fetches it from the address the certificate names.
+  fs.writeFileSync(path.join(parent, "ext.cnf"), `[inter]\nbasicConstraints = critical,CA:true\nkeyUsage = critical,keyCertSign,cRLSign\n[leaf]\nbasicConstraints = CA:false\nkeyUsage = critical,digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = IP:127.0.0.1\nauthorityInfoAccess = caIssuers;URI:http://127.0.0.1:${other.port}/issuer.crt\n`);
+  const run = (...args) => {
+    const made = spawnSync("openssl", args, { cwd: parent, encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+  };
+  const key = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
+  run("req", "-x509", ...key, "-keyout", "root-key.pem", "-out", "root.pem", "-days", "2", "-subj", "/CN=Root");
+  run("req", ...key, "-keyout", "inter-key.pem", "-out", "inter.csr", "-subj", "/CN=Issuer");
+  run("x509", "-req", "-in", "inter.csr", "-CA", "root.pem", "-CAkey", "root-key.pem", "-CAcreateserial", "-out", "inter.pem", "-days", "2", "-extfile", "ext.cnf", "-extensions", "inter");
+  run("req", ...key, "-keyout", "leaf-key.pem", "-out", "leaf.csr", "-subj", "/CN=127.0.0.1");
+  run("x509", "-req", "-in", "leaf.csr", "-CA", "inter.pem", "-CAkey", "inter-key.pem", "-CAcreateserial", "-out", "leaf.pem", "-days", "2", "-extfile", "ext.cnf", "-extensions", "leaf");
+  const site = https.createServer({ key: fs.readFileSync(path.join(parent, "leaf-key.pem")), cert: fs.readFileSync(path.join(parent, "leaf.pem")) }, (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  site.listen(0, "127.0.0.1");
+  await once(site, "listening");
+  t.after(() => site.close());
+  const given = `https://127.0.0.1:${site.address().port}/`;
+  chrome = await launch({ width: 1000, height: 700 }, { guard: guardFor(given) });
+  const cdp = await openPage(chrome, { width: 1000, height: 700 });
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  await assert.rejects(navigate(cdp, given), (err) => err.message === `Could not open ${given}: net::ERR_CERT_AUTHORITY_INVALID`);
+  assert.deepEqual(chrome.proxy.refused.map(({ what, why }) => [what, why]), [[`http://127.0.0.1:${other.port}/issuer.crt`, `is on port ${other.port}, not 80 or 443`]]);
+  assert.equal(other.connections, 0, "nothing reached the program the certificate's address names");
+});
+
+test("a page's WebAuthn check of another name, which the browser asks for at its well-known address, goes through the kit's proxy, which refuses a name that answers 127.0.0.1", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
+  const https = require("node:https");
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  // The browser ends before its folder goes, as one still at work writes
+  // into it.
+  let chrome = null;
+  t.after(async () => {
+    if (chrome) await chrome.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=site.test", "-addext", "subjectAltName=DNS:site.test"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const site = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>navigator.credentials.get({ publicKey: { challenge: new Uint8Array(16), rpId: "rp.test", timeout: 5000 } }).catch(() => {});</script></body>`)));
+  site.listen(0, "127.0.0.1");
+  await once(site, "listening");
+  t.after(() => site.close());
+  // The site on the web, which the kit's proxy reaches here; rp.test is
+  // found at this machine's address. The browser takes the site's
+  // certificate as a machine that trusts it would.
+  useRelay(t, parent, {}, ["--ignore-certificate-errors"]);
+  await dialHere(t);
+  t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "rp.test" ? "127.0.0.1" : "93.184.216.34", family: 4 }]);
+  const given = `https://site.test:${site.address().port}/`;
+  chrome = await launch({ width: 1000, height: 700 }, { guard: guardFor(given) });
+  const cdp = await openPage(chrome, { width: 1000, height: 700 });
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  await navigate(cdp, given);
+  await until(() => chrome.proxy.refused.some((one) => one.what === "rp.test:443"));
+  assert.deepEqual(chrome.proxy.refused.filter((one) => one.what === "rp.test:443").map(({ why }) => why), ["is at 127.0.0.1, an address not on the public internet"]);
+});
+
+test("a page's speculation rules reach nothing but the kit's proxy's refusal, also in a browser that preloads pages", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (!openssl && "no openssl to make the test site's certificate") }, async (t) => {
+  const https = require("node:https");
+  const other = await countingBoth(t);
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  // The browser ends before its folder goes, as one still at work writes
+  // into it.
+  let chrome = null;
+  t.after(async () => {
+    if (chrome) await chrome.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=site.test", "-addext", "subjectAltName=DNS:site.test"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  // Another port of the site's own name, which the browser preloads as a
+  // page of the same site.
+  const away = `https://site.test:${other.port}`;
+  const rules = JSON.stringify({ prefetch: [{ source: "list", urls: [`${away}/x`] }], prerender: [{ source: "list", urls: [`${away}/y`] }] });
+  const site = https.createServer({ key: fs.readFileSync(path.join(parent, "key.pem")), cert: fs.readFileSync(path.join(parent, "cert.pem")) }, (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script type="speculationrules">${rules}</script></body>`)));
+  site.listen(0, "127.0.0.1");
+  await once(site, "listening");
+  t.after(() => site.close());
+  // A profile of its own, where preloading is on as it is by default, and
+  // signed exchanges off, as the kit asks; the tab is not asked whether it
+  // preloads, as the kit's own tabs ask. The browser takes the site's
+  // certificate as a machine that trusts it would, and the kit's proxy
+  // reaches the site here (dialHere).
+  const own = path.join(parent, "its-own");
+  writeFiles(own, { "Default/Preferences": JSON.stringify({ web_package: { signed_exchange: { enabled: false } } }) });
+  useRelay(t, parent, {}, [`--user-data-dir=${own}`, "--ignore-certificate-errors"]);
+  await dialHere(t);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const given = `https://site.test:${site.address().port}/`;
+  chrome = await launch({ width: 1000, height: 700 }, { guard: guardFor(given) });
+  const targetId = await chrome.newTab(30_000);
+  const cdp = await chrome.attach(targetId, 30_000);
+  await cdp.send("Page.enable");
+  chrome.proxy.reading = given;
+  await cdp.send("Page.navigate", { url: given });
+  await until(() => chrome.proxy.refused.some((one) => one.what === `site.test:${other.port}`), 20_000);
+  assert.deepEqual(chrome.proxy.refused.filter((one) => one.what === `site.test:${other.port}`).map(({ why }) => why), [`is on port ${other.port}, not 80 or 443`]);
+  assert.equal(other.connections, 0, "nothing reached the other program");
+});
+
+test("a name whose DNS answer changes between two lookups is looked up once: every connection goes to the first answer, which the rule judged, and the browser's own lookup is never used", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  // The name's first answer is on the web, where a server of the test's
+  // own stands for it (dialHere); its later answers would be this machine,
+  // as would the browser's own lookup, where a program counts what reaches
+  // it.
+  const trap = await counting(t);
+  const web = await serve((req, res) => res.writeHead(200, { "content-type": req.url.endsWith(".png") ? "image/png" : "text/html" }).end(req.url.endsWith(".png") ? pngOf(4, 4, () => [0, 0, 255]) : "<!doctype html><p>frame</p>"));
+  t.after(() => web.server.close());
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://rebind.test/a.png"><iframe src="http://rebind.test/frame"></iframe><img src="http://rebind.test/b.png"></body>`)));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  useRelay(t, parent, {}, [`--host-resolver-rules=MAP rebind.test 127.0.0.1:${trap.port}`]);
+  const dials = await dialHere(t, (host) => (host === "rebind.test" ? Number(new URL(web.origin).port) : null));
+  let answers = 0;
+  const found = t.mock.method(dns.promises, "lookup", async (host) => [{ address: host === "rebind.test" && answers++ ? "127.0.0.1" : "93.184.216.34", family: 4 }]);
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  const rebound = dials.filter((one) => one.to === "rebind.test:80");
+  assert.ok(rebound.length >= 1, dials.to().join(" "));
+  for (const one of rebound) assert.deepEqual(one.handed, ["93.184.216.34"]);
+  assert.equal(found.mock.calls.filter((call) => call.arguments[0] === "rebind.test").length, 1);
+  assert.equal(trap.connections, 0, "the browser's own lookup was never used");
+});
+
+test("a local site under development given as http://localhost:<port> is read through the kit's proxy with its own pictures, scripts and WebSocket, and so is the same site at 127.0.0.1", { skip: noBrowser }, async (t) => {
+  const asked = [];
+  const net = require("node:net");
+  const site = await serve((req, res) => {
+    asked.push(`${req.headers.host} ${req.url}`);
+    if (req.url === "/app.js") return res.writeHead(200, { "content-type": "text/javascript" }).end(`new WebSocket("ws://" + location.host + "/hot").onopen = () => fetch("/opened");`);
+    if (req.url === "/opened") return res.writeHead(204).end();
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<img src="/pic.png"><script src="/app.js"></script></body>`));
+  });
+  // A WebSocket that opens, as a dev server's for its reloads.
+  site.server.on("upgrade", (req, socket) => {
+    asked.push(`${req.headers.host} upgrade ${req.url}`);
+    const accept = crypto.createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    socket.on("error", () => {});
+  });
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const port = new URL(site.origin).port;
+  for (const host of ["localhost", "127.0.0.1"]) {
+    asked.length = 0;
+    const { kit } = await makeKit(`http://${host}:${port}/`, { dir: path.join(parent, host), stores: false });
+    assert.equal(kit.url, `http://${host}:${port}/`);
+    assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], host);
+    assert.deepEqual(kit.notes, [], host);
+    for (const want of [`${host}:${port} /pic.png`, `${host}:${port} /app.js`, `${host}:${port} upgrade /hot`, `${host}:${port} /opened`]) assert.ok(asked.includes(want), `${want}: ${asked.join(", ")}`);
+  }
+  assert.ok(net.isIP("127.0.0.1"));
+});
+
+test("the name of the address given is looked up by the kit's proxy, as every name: one not found is told as the browser tells it, and a site that takes no connection on either scheme as well", { skip: noBrowser }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (host === "gone.test") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.test"), { code: "ENOTFOUND" });
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  // closed.test takes no connection on either port.
+  await dialHere(t, () => 9);
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  for (const url of ["https://gone.test/", "http://gone.test:8080/"]) {
+    await assert.rejects(makeKit(url, { dir, stores: false }), (err) => err.message === `Could not open ${url}: net::ERR_NAME_NOT_RESOLVED` && err.earlierKit === dir, url);
+  }
+  await assert.rejects(makeKit("https://closed.test/", { dir, stores: false }), (err) => err.message === "Could not open https://closed.test/: net::ERR_CONNECTION_REFUSED" && err.earlierKit === dir);
+  await assert.rejects(makeKit("http://closed.test:8080/", { dir, stores: false }), (err) => err.message === "Could not open http://closed.test:8080/: net::ERR_CONNECTION_REFUSED" && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+});
+
+test("a browser that does not send every request through the kit's proxy, as one a program starts with switches of its own, is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const risk = "so no kit was made: a page could have it reach an address easybrandkit does not open without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
+  const policy = "as a Chrome policy (ProxyMode, ProxySettings or ProxyBypassList) or a program that starts it with switches of its own makes it do";
+  // No proxy at all.
+  useRelay(t, parent, {}, ["--no-proxy-server"]);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === `The browser does not send its requests through easybrandkit's proxy, ${policy}, ${risk}` && err.earlierKit === dir);
+  // This machine's own addresses past it, as Chrome sends them unless it is
+  // told otherwise.
+  process.env.STAND_IN_ARGS = JSON.stringify(["--proxy-bypass-list=*.example"]);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === `The browser sends its requests for this machine's own addresses past easybrandkit's proxy, ${policy}, ${risk}` && err.earlierKit === dir);
+  // A proxy it cannot reach.
+  process.env.STAND_IN_ARGS = JSON.stringify(["--proxy-server=http://127.0.0.1:9"]);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => /^The browser could not connect to the proxy its requests go through \(net::ERR_PROXY_CONNECTION_FAILED\), so no kit was made\. easybrandkit gives it a proxy of its own at 127\.0\.0\.1:\d+: /.test(err.message) && err.earlierKit === dir);
+  // WebRTC's UDP, which goes around a proxy, turned back on.
+  process.env.STAND_IN_ARGS = JSON.stringify(["--webrtc-ip-handling-policy=default"]);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser's WebRTC sends UDP past easybrandkit's proxy, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own makes it do, so no kit was made: a page could have it send UDP to an address easybrandkit does not open without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser." && err.earlierKit === dir);
+  assert.equal(asked, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
 });
 
 // A site whose page tries to save a file every 25 ms for as long as it is
@@ -3652,13 +4089,15 @@ test("the refusal of downloads is said once, to the whole browser, before any ta
   const { kit } = await makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   const calls = fs.readFileSync(log, "utf8").trim().split("\n");
-  // Then the rule for the documents of the whole browser, and the page's
-  // tab, which asks whether the browser preloads pages before it opens one,
-  // and the card's.
-  assert.deepEqual(calls.slice(0, 6), ["Browser.getVersion", "Browser.setDownloadBehavior", "Fetch.enable", "Target.createTarget", "Target.attachToTarget", "Preload.enable session"]);
+  // Then the check that the browser sends its requests through the kit's
+  // proxy, in a tab of its own with four addresses, the rule for the
+  // documents of the whole browser, and the page's tab, which asks whether
+  // the browser preloads pages before it opens one, and the card's.
+  const check = ["Target.createTarget", "Target.attachToTarget", ...Array(4).fill("Page.navigate session"), "Runtime.evaluate session", "Target.closeTarget"];
+  assert.deepEqual(calls.slice(0, 14), ["Browser.getVersion", "Browser.setDownloadBehavior", ...check, "Fetch.enable", "Target.createTarget", "Target.attachToTarget", "Preload.enable session"]);
   assert.equal(calls.filter((call) => call.startsWith("Browser.setDownloadBehavior")).length, 1);
   assert.equal(calls.filter((call) => call === "Preload.enable session").length, 1);
-  assert.equal(calls.filter((call) => call === "Target.createTarget").length, 2);
+  assert.equal(calls.filter((call) => call === "Target.createTarget").length, 3);
   assert.equal(calls[calls.length - 1], "Browser.close");
 });
 
@@ -3778,7 +4217,7 @@ test("a browser started with no rule for the addresses its pages open opens no w
   const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
   await assert.rejects(navigate(cdp, `${site.origin}/`), (err) => err.message === `${site.origin}/ is not opened by a browser the kit gave no rule for the addresses it opens, so no kit was made.`);
   // A rule that fails as it judges an address opens nothing either.
-  const failing = await launch({ width: 800, height: 600 }, { judge: async () => { throw new Error("no answer"); } });
+  const failing = await launch({ width: 800, height: 600 }, { guard: { judge: async () => { throw new Error("no answer"); }, route: async () => { throw new Error("no answer"); } } });
   t.after(() => failing.close());
   const tab = await openPage(failing, { width: 800, height: 600 });
   await assert.rejects(navigate(tab, `${site.origin}/`), (err) => err.message === `${site.origin}/ could not be judged, so no kit was made.`);
@@ -4217,10 +4656,19 @@ test("a browser the kit starts listens on no port, has HTTP/3 off, moves no http
     // first (HTTPS-Upgrades, and HTTPS-First on Chrome 157), nor for a name
     // whose DNS gives an HTTPS record, as every name behind Cloudflare does
     // (UseDnsHttpsSvcb). The test sites are on names the browser asks no
-    // DNS for, so this is told by its switch. The Reporting API and Web
-    // Payments are off too (see the test of a page's reports below).
+    // DNS for, so this is told by its switch. The Reporting API, Web
+    // Payments and the search for cast devices are off too (see the tests
+    // of a page's reports and of its cast devices below).
     const off = /(?:^|[\0 ])--disable-features=([^\0 ]*)/.exec(started);
-    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "Reporting", "UseDnsHttpsSvcb", "WebPayments"], String(started));
+    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "MediaRouter", "Reporting", "UseDnsHttpsSvcb", "WebPayments"], String(started));
+    // Every request goes through the kit's proxy, this machine's own too,
+    // WebRTC's UDP is limited to a proxy's, and the push channel is pointed
+    // at the proxy's own name.
+    const value = (arg) => (new RegExp(`(?:^|[\\0 ])${arg}=([^\\0 ]*)`).exec(started) || [])[1];
+    assert.match(String(value("--proxy-server")), /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal(value("--proxy-bypass-list"), "<-loopback>");
+    assert.equal(value("--webrtc-ip-handling-policy"), "disable_non_proxied_udp");
+    for (const arg of ["--gcm-checkin-url", "--gcm-mcs-endpoint", "--gcm-registration-url"]) assert.match(String(value(arg)), /^https:\/\/easybrandkit-proxy\.invalid\//, arg);
     // It answers all the same.
     assert.equal(await browser.alive(), true);
     const cdp = await openPage(browser, { width: 800, height: 600 });
@@ -4497,10 +4945,12 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   const dropped = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(dropped.kit.notes, ["The card could not be drawn: the kit's connection to its tab closed."]);
   // And so is a tab for the card that the browser does not open in time: the
-  // second tab of a run is the card's, which is given a second here, not 30.
+  // second tab of a run is the card's, which is given a second here, not 30,
+  // and the third the browser is asked for, past the one of the kit's check
+  // that it sends its requests through the kit's proxy.
   if (process.platform === "win32") return;
   t.mock.restoreAll();
-  useRelay(t, parent, { "Target.createTarget": ["pass", "drop"] });
+  useRelay(t, parent, { "Target.createTarget": ["pass", "pass", "drop"] });
   const chrome = require("../skills/easybrandkit/scripts/lib/chrome");
   const realLaunch = chrome.launch;
   let tabs = 0;
@@ -4827,7 +5277,7 @@ test("a page's own move to an address that is not a web address is cancelled in 
     "/framed": `<iframe src="/inner"></iframe>`,
   };
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Acme</title><h1>Acme</h1>${ways[req.url] || ""}`));
-  const chrome = await launch({ width: 800, height: 600 }, { judge: guardFor(`${site.origin}/`).judge });
+  const chrome = await launch({ width: 800, height: 600 }, { guard: guardFor(`${site.origin}/`) });
   t.after(async () => {
     await chrome.close();
     site.server.close();
@@ -5092,10 +5542,8 @@ test("a browser installed as a snap or a Flatpak is not said to have opened noth
 });
 
 test("a page the kit chose on another port than 80 or 443 is not opened, a menu page and the home page of a deeper address alike, and the program there is not asked", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
-  // Every name under .test is on the web for the kit's own lookup. The
-  // browser reaches www.brand.test and blog.brand.test through a proxy,
-  // which says nothing of where they are, and brand.test itself at this
-  // machine's address.
+  // Every name under .test is on the web for the kit's own lookup, and the
+  // kit's proxy reaches it here (dialHere).
   const asked = [];
   const other = await serve((req, res) => {
     asked.push(`${req.headers.host} ${req.url}`);
@@ -5113,8 +5561,7 @@ test("a page the kit chose on another port than 80 or 443 is not opened, a menu 
     other.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  const proxy = await proxyOf(t);
-  useRelay(t, parent, {}, ["--host-resolver-rules=MAP *.test 127.0.0.1", `--proxy-server=${proxy.origin}`, "--proxy-bypass-list=brand.test"]);
+  await dialHere(t);
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   // The kit's own robots.txt request: none, as the site has none.
   t.mock.method(http, "get", (url, options, done) => {

@@ -11,11 +11,12 @@
 // port 80 or 443 and only on the public internet: no document the browser
 // loads and no request the kit makes itself goes to another program of this
 // machine or of a private network, to another port of a public host, or to
-// a router's page or a cloud server's metadata. What a page asks for itself
-// is left to the browser's own rules, and the requests the browser makes by
-// itself, as the fetch of a certificate's issuer from the address the
-// certificate names, a page's WebAuthn check of another name or a page's
-// WebRTC, are held by no rule here (see the README's Limits).
+// a router's page or a cloud server's metadata. The same rule holds for
+// every request the browser makes, whatever makes it: a page's pictures,
+// scripts and data, its WebSockets, a service worker's fetch, a prefetch,
+// the fetch of a certificate's issuer and a page's WebAuthn check all go
+// through the kit's own proxy (see proxy.js), which judges each by it and
+// connects only to an address it took.
 //
 // MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and CIDR ranges,
 // names more addresses that the host the kit runs on refuses, as a server's
@@ -23,9 +24,8 @@
 // for every address a run opens, the one given included.
 //
 // A host name is judged by every address it is found at here, looked up once
-// a run, and the kit's own requests connect only to one of those. The
-// browser looks the name up again as it opens the page; where it says which
-// address it reached, that is judged too (see guardFor).
+// a run, and a connection, the browser's through the proxy and the kit's
+// own, goes only to one of those (see guardFor).
 
 const net = require("net");
 const dns = require("dns");
@@ -347,21 +347,17 @@ const LOOKUP_WAIT = 5_000;
 // web address, whose scheme, host and port are the run's own; null for a
 // run that has none, as one reading a site another source named, see
 // makeKit), with the addresses refused (refused, from refusedAddresses).
-// Each name is looked up once a run, and every request the kit makes
-// itself connects only to an address that lookup found and the rule took,
-// so the kit asks the DNS for no name twice and uses no later answer.
+// Each name is looked up once a run, and every connection the run makes,
+// the browser's through the kit's proxy (see proxy.js) and the kit's own,
+// goes only to an address that lookup found and the rule took, so no name
+// is looked up twice and no later answer is ever used.
 //
-// judge(raw, seen) resolves to "" for an address the run may open, and else
-// to why not, to follow "it" or "which". What is not a web address is not
+// judge(raw) resolves to "" for an address the run may open, and else to
+// why not, to follow "it" or "which". What is not a web address is not
 // judged here: a page that leads to one fails or is cancelled on its own
 // (see chrome.js). One written with http: or https: that the URL parser
 // here cannot read is not opened: the browser can read it, and go where
-// its host leads. seen is what the browser said of where it got the page,
-// once it has: the IP address space Chrome gave the response (space) and
-// the address it connected to (ip). Chrome gives a space of its own only
-// when it reached the server itself, so then ip is the server's, and is
-// judged as the lookup's addresses are; through a proxy it says Unknown and
-// gives the proxy's address, which says nothing of the page.
+// its host leads.
 //
 // route(raw): { why, addresses }, why as judge gives it, and the addresses
 // a connection to it may go to, for one the run may open: every address
@@ -373,8 +369,8 @@ const LOOKUP_WAIT = 5_000;
 // address is at itself, and this machine's own names are on its loopback.
 // [] for a name not found.
 //
-// inside(url, seen): whether a host is not on the public internet, or
-// cannot be told to be, by the same lookup.
+// inside(url): whether a host is not on the public internet, or cannot be
+// told to be, by the same lookup.
 //
 // lookupFor(raw): the lookup a request the kit makes itself connects with,
 // which hands back only the addresses route gives for raw, and none for one
@@ -407,12 +403,10 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   // from https down to http there is not the address given, nor https on
   // port 443 of a host given on port 80, which is another program.
   const own = (url) => Boolean(given) && sameHost(url, given) && (url.protocol === given.protocol || (given.protocol === "http:" && url.protocol === "https:"));
-  // What the browser says it reached, when it reached the server itself.
-  const reached = ({ space = "", ip = "" } = {}) => (space && space !== "Unknown" && net.isIP(plainIp(ip)) ? plainIp(ip) : "");
   // The rule for one address. resolve: whether the addresses of one the run
   // may open are wanted, as for a connection; without it, the address given
   // is looked up only to check it against the refused addresses.
-  async function rule(raw, resolve, seen = {}) {
+  async function rule(raw, resolve) {
     const url = readUrl(raw);
     if (!url) return { why: webScheme(raw) ? UNREADABLE : "", addresses: [] };
     if (!/^https?:$/.test(url.protocol)) return { why: "", addresses: [] };
@@ -420,23 +414,16 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     if (!mine && !WEB_PORTS.has(portOf(url))) return { why: onPort(portOf(url)), addresses: [] };
     const host = bare(url);
     if (!mine && (localName(host) || (net.isIP(host) && !isPublicAddress(host)))) return { why: NOT_PUBLIC, addresses: [] };
-    let addresses = [];
-    if (!mine || refused.size || resolve) {
-      addresses = await found(host);
-      if (!addresses.length && (!mine || refused.size)) return { why: UNRESOLVED, addresses: [] };
-      if (!mine) for (const address of addresses) if (!isPublicAddress(address)) return { why: atNotPublic(plainIp(address)), addresses: [] };
-      for (const address of addresses) if (refused.match(address)) return { why: atRefused(refused.match(address)), addresses: [] };
-    }
-    const ip = reached(seen);
-    if (ip && !mine && !isPublicAddress(ip)) return { why: atNotPublic(ip), addresses: [] };
-    if (ip && refused.match(ip)) return { why: atRefused(refused.match(ip)), addresses: [] };
+    if (mine && !refused.size && !resolve) return { why: "", addresses: [] };
+    const addresses = await found(host);
+    if (!addresses.length) return { why: mine && !refused.size ? "" : UNRESOLVED, addresses: [] };
+    if (!mine) for (const address of addresses) if (!isPublicAddress(address)) return { why: atNotPublic(plainIp(address)), addresses: [] };
+    for (const address of addresses) if (refused.match(address)) return { why: atRefused(refused.match(address)), addresses: [] };
     return { why: "", addresses: addresses.map(plainIp) };
   }
-  const judge = async (raw, seen = {}) => (await rule(raw, false, seen)).why;
+  const judge = async (raw) => (await rule(raw, false)).why;
   const route = (raw) => rule(raw, true);
-  async function inside(url, seen = {}) {
-    const ip = reached(seen);
-    if (ip && !isPublicAddress(ip)) return true;
+  async function inside(url) {
     const addresses = await found(bare(url));
     return !addresses.length || addresses.some((address) => !isPublicAddress(address));
   }
