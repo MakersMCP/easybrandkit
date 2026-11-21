@@ -5151,6 +5151,70 @@ test("a run stopped by SIGINT, SIGQUIT, SIGTERM or SIGHUP leaves the earlier kit
   assert.deepEqual(tempLeft(), [], "nothing left in the temp folder after a late stop");
 });
 
+const namespaces =
+  (process.platform !== "linux" && "the namespaces of Linux") ||
+  (spawnSync("unshare", ["-rmn", "sh", "-c", 'ip link set lo up && mount --bind "$0" "$0"', __filename]).status !== 0 && "no user, mount and network namespace here, or no ip command");
+
+test("names whose DNS gives no answer do not hold up the lookup of another name past its 5 s", { skip: namespaces }, (t) => {
+  // In namespaces of its own: a network of its loopback alone, whose DNS
+  // server, the test's, takes every question and answers none, as for a name
+  // whose servers are gone, and an /etc/hosts that holds the site's name.
+  // With MAKERSMCP_REFUSE_ADDRESSES set, the kit looks the site's name up
+  // before it starts the browser, here one that is not there; three names a
+  // page asked for are being looked up as it does, by the system's lookup,
+  // as the kit's proxy looks them up.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-dns-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const resolv = path.join(parent, "resolv.conf");
+  const hosts = path.join(parent, "hosts");
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  fs.writeFileSync(resolv, "nameserver 127.0.0.1\noptions timeout:8 attempts:1\n");
+  fs.writeFileSync(hosts, "127.0.0.1 localhost\n93.184.216.34 site.example\n");
+  fs.writeFileSync(
+    start,
+    [
+      `const dgram = require("dgram");`,
+      `const dns = require("dns");`,
+      `const fs = require("fs");`,
+      `const lookup = dns.promises.lookup;`,
+      `let first = null;`,
+      `dns.promises.lookup = (host, options) => {`,
+      `  if (!first) {`,
+      `    first = new Promise((resolve) => dgram.createSocket("udp4").on("message", () => {}).bind(53, "127.0.0.1", resolve)).then(() => {`,
+      `      for (const name of ["a.nowhere.test", "b.nowhere.test", "c.nowhere.test"]) dns.lookup(name, { all: true }, (err) => fs.appendFileSync(${JSON.stringify(asked)}, name + " " + (err ? err.code : "found") + "\\n"));`,
+      `    });`,
+      `  }`,
+      `  return first.then(() => {`,
+      `    const at = Date.now();`,
+      `    return lookup(host, options).then((found) => {`,
+      `      fs.appendFileSync(${JSON.stringify(asked)}, host + " " + found.map((one) => one.address).join(",") + " " + (Date.now() - at) + "\\n");`,
+      `      return found;`,
+      `    });`,
+      `  });`,
+      `};`,
+      ``,
+    ].join("\n"),
+  );
+  const script = `ip link set lo up && mount --bind "$1" /etc/resolv.conf && mount --bind "$2" /etc/hosts && exec "$3" --require "$4" "$5" https://site.example/ --no-stores --out "$6"`;
+  const cli = spawnSync("unshare", ["-rmn", "sh", "-c", script, "sh", resolv, hosts, process.execPath, start, CLI, path.join(parent, "kit")], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env, MAKERSMCP_REFUSE_ADDRESSES: "192.0.2.1", CHROME_PATH: path.join(parent, "no-chrome"), TMPDIR: parent },
+  });
+  // The site's name was found at once, and the run went on to the browser;
+  // the three names had no answer yet. The process ended only once the
+  // system gave up on them, 8 s here, as Node waits for its threads.
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.doesNotMatch(cli.stderr, /could not be looked up/);
+  assert.match(cli.stderr, /CHROME_PATH/);
+  const lines = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n");
+  assert.equal(lines.length, 1, lines.join("\n"));
+  const [host, found, ms] = lines[0].split(" ");
+  assert.deepEqual([host, found], ["site.example", "93.184.216.34"]);
+  assert.ok(Number(ms) < 1_000, `the site's name was found in ${ms} ms`);
+});
+
 // What a program of the machine would be started for, recorded: stand-ins
 // of the test's own, first on PATH, as a backstop for the kit's own, so that
 // no real mail program starts here even where the kit has none, with no

@@ -1,6 +1,17 @@
 #!/usr/bin/env node
 "use strict";
 
+// The kit looks names up with the system's lookup (see lib/address.js), on
+// libuv's threads, at most half of them at once, and its proxy looks up the
+// name of every request the browser makes. A name whose DNS gives no answer
+// holds a thread for as long as the system waits, 10 s with glibc's own
+// settings: with the 4 threads Node starts with, two such names on a page
+// held up every name asked after them past its 5 s, and the requests for
+// those were refused as names that could not be looked up. 32 threads look
+// up 16 names at once. Set before any of them starts; a number the caller
+// set is kept.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = "32";
+
 const fs = require("fs");
 const os = require("os");
 const { makeKit, normalizeUrl } = require("./lib/kit");
