@@ -211,18 +211,33 @@ test("a program for another machine, or one whose loader or library is missing, 
 
 test("a run with no file left to open to start the browser says so, and to raise the limit", { skip }, (t) => {
   const parent = place(t);
-  // Each limit low enough for the browser's start, and not for Node's own:
-  // one of them leaves the kit's start short of files, and none ends in a
-  // crash or leaves anything.
+  const env = { ...process.env, TMPDIR: path.join(parent, "temp"), CHROME_PATH: "/bin/true" };
+  const limited = (limit, ...args) => spawnSync("sh", ["-c", `ulimit -n ${limit} && exec "$0" "$@"`, process.execPath, CLI, ...args], { encoding: "utf8", timeout: 60_000, env });
+  // Below some limit Node.js itself runs out of files before the kit runs,
+  // as it reads its own files and the kit's: 20 for Node.js 22 here and 22
+  // for Node.js 24, and more on a busy machine. Such a run ends in Node's
+  // own words, from its loader, or by a signal with no word of the kit's,
+  // and is no run of the kit's.
+  const nodeOwn = (cli) => !cli.stderr.includes("easybrandkit:") && (Boolean(cli.signal) || /\(node:internal\/modules\/|Cannot load externalized builtin/.test(cli.stderr));
+  // Each limit that is low enough for the browser's start, and not for
+  // Node's own: one of them leaves the kit's start short of files, and none
+  // ends in a crash or leaves anything, in the temp folder or as a part
+  // folder beside the kit's folder.
   const said = "true did not start: easybrandkit could not start /bin/true, as this process has as many files open as it may (too many open files). Raise that limit, as ulimit -n does, and run it again.";
   let told = 0;
+  let ran = 0;
   for (let limit = 16; limit <= 40; limit++) {
-    const cli = spawnSync("sh", ["-c", `ulimit -n ${limit} && exec "$0" "$1" http://127.0.0.1:9/ --no-stores --out "$2"`, process.execPath, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 60_000, env: { ...process.env, TMPDIR: path.join(parent, "temp"), CHROME_PATH: "/bin/true" } });
-    assert.doesNotMatch(cli.stderr, /Unhandled|TypeError|at .*\.js:\d+/, `limit ${limit}`);
-    assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), [], `limit ${limit}`);
-    assert.equal(fs.existsSync(path.join(parent, "kit")), false, `limit ${limit}`);
-    if (cli.stderr === `easybrandkit: ${said}\n`) told++;
+    for (let run = 1; run <= 3; run++) {
+      const cli = limited(limit, "http://127.0.0.1:9/", "--no-stores", "--out", path.join(parent, "kit"));
+      assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), [], `limit ${limit}`);
+      assert.deepEqual(fs.readdirSync(parent).filter((name) => name !== "temp"), [], `limit ${limit}, run ${run}`);
+      if (nodeOwn(cli)) continue;
+      ran++;
+      assert.doesNotMatch(cli.stderr, /Unhandled|TypeError|at .*\.js:\d+/, `limit ${limit}`);
+      if (cli.stderr === `easybrandkit: ${said}\n`) told++;
+    }
   }
+  assert.ok(ran > 0, "Node.js ran the kit at no limit");
   assert.ok(told > 0, "no limit left the browser's start short of files");
 });
 

@@ -28,6 +28,7 @@
 
 const net = require("net");
 const dns = require("dns");
+const { domainToASCII, domainToUnicode } = require("url");
 
 // The ranges that are not on the public internet, as MakersMCP's worker
 // counts them: this machine, private and shared networks, link-local, and
@@ -162,6 +163,35 @@ function isPublicAddress(raw) {
 // localhost, and any name under it.
 const localName = (host) => /(^|\.)localhost$/i.test(host);
 
+// Whether a host has a label of broken punycode: one that starts with xn--
+// and does not decode to a name that is written back as that label, as
+// xn--a, xn--, xn--zz, or xn--a-, which decodes to a. The URL parser of
+// Node.js 22.22 refuses such a host, that of Node.js 22.23 reads xn--a- as
+// a host, and that of Node.js 24 keeps each as it is written, and the
+// browser reads them all the same: the kit reads each as no address, so its
+// rule is the same whatever Node.js it runs on. A label that decodes, as
+// xn--bcher-kva, is the name it stands for.
+const brokenPunycode = (host) =>
+  String(host)
+    .split(".")
+    .some((label) => {
+      if (!/^xn--/i.test(label)) return false;
+      const name = domainToUnicode(label);
+      return !name || /^xn--/i.test(name) || domainToASCII(name) !== label.toLowerCase();
+    });
+
+// A web address as the URL parser here reads it, or null for one it cannot
+// read: one whose host has a label of broken punycode is not read either.
+function readUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw));
+  } catch {
+    return null;
+  }
+  return brokenPunycode(url.hostname) ? null : url;
+}
+
 // An address's host as it is judged: in small letters, without the brackets
 // of an IPv6 address and without its last dots, as 127.0.0.1.. is still
 // 127.0.0.1 to the browser.
@@ -285,8 +315,8 @@ function refusedAddresses(value = process.env[SETTING]) {
 const NOT_PUBLIC = "is not on the public internet";
 const UNRESOLVED = "is on a host whose name could not be looked up";
 // An http or https address that the URL parser here cannot read, as one
-// whose host has a label of broken punycode (xn--a), which the browser
-// reads all the same: where it leads cannot be judged.
+// whose host has a label of broken punycode (xn--a, see readUrl), which the
+// browser reads all the same: where it leads cannot be judged.
 const UNREADABLE = "is not an address easybrandkit can read";
 const onPort = (port) => `is on port ${port}, not 80 or 443`;
 const atNotPublic = (address) => `is at ${address}, an address not on the public internet`;
@@ -354,17 +384,10 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   // from https down to http there is not the address given, nor https on
   // port 443 of a host given on port 80, which is another program.
   const own = (url) => Boolean(given) && sameHost(url, given) && (url.protocol === given.protocol || (given.protocol === "http:" && url.protocol === "https:"));
-  const parse = (raw) => {
-    try {
-      return new URL(String(raw));
-    } catch {
-      return null;
-    }
-  };
   // What the browser says it reached, when it reached the server itself.
   const reached = ({ space = "", ip = "" } = {}) => (space && space !== "Unknown" && net.isIP(plainIp(ip)) ? plainIp(ip) : "");
   async function judge(raw, seen = {}) {
-    const url = parse(raw);
+    const url = readUrl(raw);
     if (!url) return webScheme(raw) ? UNREADABLE : "";
     if (!/^https?:$/.test(url.protocol)) return "";
     const mine = own(url);
@@ -390,7 +413,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     return !addresses.length || addresses.some((address) => !isPublicAddress(address));
   }
   function lookupFor(raw) {
-    const url = parse(raw);
+    const url = readUrl(raw);
     if (!url) return (hostname, options, callback) => callback(Object.assign(new Error(`${hostname} ${UNREADABLE}`), { code: "ENOTPUBLIC", hostname }));
     const mine = own(url);
     if (mine && !refused.size) return undefined;
@@ -407,4 +430,4 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   return { given: given ? given.href : "", refused, judge, inside, lookupFor };
 }
 
-module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, atRefused };
+module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused };

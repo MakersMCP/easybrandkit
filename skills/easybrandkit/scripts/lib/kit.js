@@ -38,7 +38,7 @@ const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
 const { SaveError, toldPlainly, removedFrom, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
-const { guardFor, refusedAddresses } = require("./address");
+const { guardFor, refusedAddresses, readUrl } = require("./address");
 const { plainText } = require("./text");
 const version = require("./version");
 
@@ -53,17 +53,14 @@ const MAX_SOURCES = 6;
 const SOURCE_ORDER = ["appstore", "googleplay", "x", "youtube", "linkedin", "threads", "pinterest"];
 
 // "acme.com", "www.acme.com/pricing" and "https://acme.com" all mean a web
-// address; anything that is not http(s) is refused.
+// address; anything that is not http(s) is refused, and so is one the URL
+// parser here cannot read, as one whose host has a label of broken punycode
+// (see address.js readUrl).
 function normalizeUrl(raw) {
   const text = String(raw || "").trim();
   if (!text) throw new Error("Give a website address, for example: easybrandkit acme.com");
-  let url;
-  try {
-    url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`);
-  } catch {
-    throw new Error(`Not a web address: ${text}`);
-  }
-  if (!/^https?:$/.test(url.protocol) || !url.hostname) throw new Error(`Not a web address: ${text}`);
+  const url = readUrl(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`);
+  if (!url || !/^https?:$/.test(url.protocol) || !url.hostname) throw new Error(`Not a web address: ${text}`);
   return url.href;
 }
 

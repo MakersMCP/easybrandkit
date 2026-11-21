@@ -273,22 +273,16 @@ test("an address written with http: or https: that the URL parser here cannot re
   const why = "is not an address easybrandkit can read";
   // Labels of broken punycode, which the browser keeps as they are written,
   // under localhost, which is this machine to it, and under names whose DNS
-  // gives any address; and an IPv6 address with a wide digit. Node 22.22 and
-  // 22.23 read some of them differently, so each counts where this Node
-  // cannot read it, xn--a on every version.
+  // gives any address; and an IPv6 address with a wide digit. The URL parser
+  // of Node.js 22.22 refuses each of them, that of Node.js 22.23 reads
+  // xn--a- as a host, and that of Node.js 24 reads all but the wide digit as
+  // hosts with those labels, which the kit reads as no address all the
+  // same, whatever Node.js it runs on.
   const unreadable = [
     "http://xn--a.localhost:9222/json/list", "http://XN--A.localhost:9222/", "http://xn--a-.localhost:9222/", "http://a.xn--.localhost:9222/", "http://xn---.localhost:9222/",
     "https://xn--zz.localhost/", "http://xn--a.127.0.0.1.nip.io:9222/", "http://xn--a.169.254.169.254.nip.io/latest/meta-data/", "http://[::１]/",
-    " HTTP://xn--a.localhost/", "ht\ttp://xn--a.localhost/", "http:xn--a.localhost:9222/",
-  ].filter((raw) => {
-    try {
-      new URL(raw);
-      return false;
-    } catch {
-      return true;
-    }
-  });
-  assert.ok(unreadable.includes("http://xn--a.localhost:9222/json/list") && unreadable.length >= 8, unreadable.join(" "));
+    " HTTP://xn--a.localhost/", "ht\ttp://xn--a.localhost/", "http:xn--a.localhost:9222/", "http://xn--a.localhost..:9222/", "http://xn--a.xn--bcher-kva.example/",
+  ];
   const refused = refusedAddresses("127.0.0.0/8,185.137.215.163");
   for (const guard of [guardFor("https://acme.com/"), guardFor(null), guardFor("http://localhost:9222/"), guardFor("https://acme.com/", { refused })]) {
     for (const raw of unreadable) assert.equal(await guard.judge(raw), why, JSON.stringify(raw));
@@ -301,6 +295,18 @@ test("an address written with http: or https: that the URL parser here cannot re
   const err = await new Promise((resolve) => lookup("xn--a.localhost", {}, (failed) => resolve(failed)));
   assert.equal(err.code, "ENOTPUBLIC");
   assert.equal(err.message, `xn--a.localhost ${why}`);
+  // A label that decodes is the name it stands for, and is judged.
+  for (const raw of ["https://xn--bcher-kva.example/", "https://xn--80ak6aa92e.com/", "https://www.xn--zca.example/"]) assert.equal(await guardFor("https://acme.com/").judge(raw), "", raw);
+  assert.equal(await guardFor("http://localhost:9222/").judge("http://xn--bcher-kva.localhost:9222/"), "");
+});
+
+test("an address given whose host has a label of broken punycode is no web address, whatever Node.js reads it, and one whose labels decode is read", () => {
+  const { normalizeUrl } = require("../skills/easybrandkit/scripts/lib/kit");
+  for (const raw of ["http://xn--a.localhost:9222/json/list", "xn--a.localhost:9222", "https://XN--ZZ.example/", "http://a.xn--.localhost/", "http://xn--a-.localhost:9222/"]) {
+    assert.throws(() => normalizeUrl(raw), (err) => err.message === `Not a web address: ${raw}`, raw);
+  }
+  assert.equal(normalizeUrl("xn--bcher-kva.example"), "https://xn--bcher-kva.example/");
+  assert.equal(normalizeUrl("http://b\u00fccher.example/"), "http://xn--bcher-kva.example/");
 });
 
 test("where the browser says it reached a page counts for an address the run was not given: a name found elsewhere by the browser is told by where it went", async (t) => {

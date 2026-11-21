@@ -1002,12 +1002,18 @@ test("a browser that ends takes its helpers with it and leaves nothing of its ow
 // name the profile, and a helper names it as Chrome's helpers do, in a
 // command line rewritten with its arguments apart by spaces. A handler
 // already running can be named instead of a new one.
+//
+// Each handler is a node run by the name of a link to it, which names its
+// own process after that link, as a program's process is named after its
+// file: Node.js 24 names its main thread MainThread, which would hide what
+// the process is.
+const NAMED_AFTER_LINK = 'require("fs").writeFileSync("/proc/self/comm", require("path").basename(process.argv0).slice(0, 15)); setTimeout(() => {}, 30000)';
 const WITH_CRASH_HANDLER = `#!/bin/sh
 for arg in "$@"; do
   case "$arg" in --user-data-dir=*) profile="\${arg#--user-data-dir=}" ;; esac
 done
 if [ -z "$HANDLER_GIVEN" ]; then
-  ( "$HANDLER_BIN" -e 'setTimeout(() => {}, 30000)' & echo $! > "$HANDLER_PID" )
+  ( "$HANDLER_BIN" -e '${NAMED_AFTER_LINK}' & echo $! > "$HANDLER_PID" )
 else
   echo "$HANDLER_GIVEN" > "$HANDLER_PID"
 fi
@@ -1070,7 +1076,7 @@ test("a browser's crash handler goes with it, also once its helpers have ended, 
   }
   // A process that is no crash handler, or one that ran before the browser,
   // as the user's own browser's handler does, is not the browser's to end.
-  const before = spawn(handlerBin, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+  const before = spawn(handlerBin, ["-e", NAMED_AFTER_LINK], { stdio: "ignore" });
   started.push(before.pid);
   await new Promise((resolve) => setTimeout(resolve, 100));
   for (const [bin, given] of [[path.join(parent, "something_else"), ""], [handlerBin, String(before.pid)]]) {
