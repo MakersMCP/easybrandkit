@@ -171,6 +171,7 @@ const UNREADABLE = "is not an address easybrandkit can read";
 //                their paths: a request for /<token>/<n> that comes to it
 //                as a proxy request it answers itself, and keeps n in
 //                through
+//   accepted     how many connections it has taken
 //   reading      the page the kit reads, which the kit sets as it opens one
 //   refused      what it refused: { what, why, page }, each address once,
 //                the first 50, refusedMore saying that there were more
@@ -182,7 +183,7 @@ const UNREADABLE = "is not an address easybrandkit can read";
 function startProxy(guard) {
   const token = crypto.randomBytes(12).toString("hex");
   const sockets = new Set();
-  const proxy = { port: 0, token, through: new Set(), reading: "", refused: [], refusedMore: false, failed: [], failedCount: 0, closed: false };
+  const proxy = { port: 0, token, through: new Set(), accepted: 0, reading: "", refused: [], refusedMore: false, failed: [], failedCount: 0, closed: false };
   const hold = (socket) => {
     sockets.add(socket);
     socket.easybrandkitPorts = { remote: socket.remotePort, local: socket.localPort };
@@ -399,7 +400,10 @@ function startProxy(guard) {
   };
 
   const server = http.createServer({ maxHeaderSize: HEADER_MOST });
-  server.on("connection", hold);
+  server.on("connection", (socket) => {
+    proxy.accepted++;
+    hold(socket);
+  });
   server.on("clientError", (err, socket) => socket.destroy());
   // What fails on the way ends that connection, and nothing else.
   server.on("request", (req, res) => answer(req, res).catch(() => req.socket.destroy()));

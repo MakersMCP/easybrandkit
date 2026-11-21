@@ -815,16 +815,36 @@ async function throughProxy(pipe, proxy, ms) {
     throw err;
   }
   try {
+    // A browser whose connection to the proxy gets no answer, as behind a
+    // firewall that drops it, waits for as long as the system tries, two
+    // minutes and more on Linux: once it has asked for the first address,
+    // a proxy that has taken no connection at all in 15 s is one it cannot
+    // reach.
+    let asked = null;
+    const askedFirst = new Promise((resolve) => (asked = resolve));
+    cdp.on("Network.requestWillBeSent", ({ request }) => request && request.url === addresses[0] && asked());
+    await cdp.send("Network.enable", { maxTotalBufferSize: 0, maxResourceBufferSize: 0 }, ms);
     for (const [at, address] of addresses.entries()) {
       const n = at + 1;
-      const { errorText = "" } = await cdp.send("Page.navigate", { url: address }, ms);
-      if (!proxy.through.has(n)) return { n, errorText };
+      const navigating = cdp.send("Page.navigate", { url: address }, ms);
+      let timer;
+      const unreached = n === 1 ? askedFirst.then(() => new Promise((resolve) => (timer = setTimeout(() => resolve(!proxy.accepted), PROXY_CONNECT_WAIT)))) : new Promise(() => {});
+      const told = await Promise.race([navigating.then((answer) => ({ answer })), unreached.then((none) => (none ? { none } : navigating.then((answer) => ({ answer }))))]).finally(() => clearTimeout(timer));
+      if (told.none) {
+        navigating.catch(() => {});
+        return { n, errorText: "", unanswered: PROXY_CONNECT_WAIT };
+      }
+      if (!proxy.through.has(n)) return { n, errorText: told.answer.errorText || "" };
     }
     return (await udpPastProxy(cdp, ms)) ? { udp: true } : null;
   } finally {
     cdp.close();
   }
 }
+
+// How long the browser is given to make its first connection to the proxy,
+// once it has asked for the first address of the kit's check.
+const PROXY_CONNECT_WAIT = 15_000;
 
 // Whether the browser's WebRTC sends UDP, which goes around a proxy: asked
 // in the tab of throughProxy, with a STUN server of this machine that the
@@ -874,11 +894,15 @@ async function udpPastProxy(cdp, ms) {
 
 // The end of a run whose browser does not send a request of the kit's
 // check through the kit's proxy (see throughProxy).
-function missedProxy({ n, errorText, udp }, proxy) {
+function missedProxy({ n, errorText, udp, unanswered }, proxy) {
   const helps = "Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
   if (udp) return `The browser's WebRTC sends UDP past easybrandkit's proxy, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own makes it do, so no kit was made: a page could have it send UDP to an address easybrandkit does not open without easybrandkit judging that address. ${helps}`;
-  if (errorText === "net::ERR_PROXY_CONNECTION_FAILED") {
-    return `The browser could not connect to the proxy its requests go through (${errorText}), so no kit was made. easybrandkit gives it a proxy of its own at 127.0.0.1:${proxy.port}: let the browser connect to 127.0.0.1, which a firewall of this machine can keep it from, and if a Chrome policy or a program that starts it gives it another proxy, lift that policy or point CHROME_PATH at the browser's own program.`;
+  // One that gave up on its connection to the proxy, as a browser can on
+  // one that gets no answer, before any reached the proxy, could not
+  // connect to it either.
+  if (errorText === "net::ERR_PROXY_CONNECTION_FAILED" || unanswered || (!proxy.accepted && (errorText === "net::ERR_TIMED_OUT" || errorText === "net::ERR_CONNECTION_TIMED_OUT"))) {
+    const why = unanswered ? `its connection to 127.0.0.1:${proxy.port} got no answer in ${Math.round(unanswered / 1_000)} s` : errorText;
+    return `The browser could not connect to the proxy its requests go through (${why}), so no kit was made. easybrandkit gives it a proxy of its own at 127.0.0.1:${proxy.port}: let the browser connect to 127.0.0.1, which a firewall of this machine can keep it from, and if a Chrome policy or a program that starts it gives it another proxy, lift that policy or point CHROME_PATH at the browser's own program.`;
   }
   const risk = "so no kit was made: a page could have it reach an address easybrandkit does not open without easybrandkit judging that address.";
   if (n === 1) return `The browser does not send its requests through easybrandkit's proxy, as a Chrome policy (ProxyMode, ProxySettings or ProxyBypassList) or a program that starts it with switches of its own makes it do, ${risk} ${helps}`;

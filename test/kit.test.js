@@ -4027,6 +4027,43 @@ test("a browser that does not send every request through the kit's proxy, as one
   assert.deepEqual(filesOf(dir), before);
 });
 
+// A port of this machine whose connections get no answer, as behind a
+// firewall that drops them: a listener whose queue of connections is full,
+// held by a process that takes none, so the system drops the next one.
+async function noAnswerPort(t) {
+  const net = require("node:net");
+  const hold = `const s = require("net").createServer(); s.listen({ port: 0, host: "127.0.0.1", backlog: 1 }, () => { process.stdout.write(s.address().port + "\\n"); setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000), 50); });`;
+  const child = spawn(process.execPath, ["-e", hold], { stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => child.kill("SIGKILL"));
+  const [line] = await once(child.stdout, "data");
+  const port = Number(String(line).trim());
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const queued = [];
+  t.after(() => queued.forEach((one) => one.destroy()));
+  for (let i = 0; i < 4; i++) queued.push(net.connect(port, "127.0.0.1").on("error", () => {}));
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  return port;
+}
+
+test("a browser whose connection to the kit's proxy gets no answer, as behind a firewall that drops it, ends the run within seconds of its first request, in the words for a proxy it cannot connect to", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (process.platform !== "linux" && "a full queue of connections is dropped on Linux") }, async (t) => {
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const port = await noAnswerPort(t);
+  useRelay(t, parent, {}, [`--proxy-server=http://127.0.0.1:${port}`]);
+  const started = Date.now();
+  await assert.rejects(makeKit(site.origin, { dir: path.join(parent, "kit"), stores: false, timeLimit: 90_000 }), (err) => /^The browser could not connect to the proxy its requests go through \((net::ERR_TIMED_OUT|its connection to 127\.0\.0\.1:\d+ got no answer in 15 s)\), so no kit was made\. easybrandkit gives it a proxy of its own at 127\.0\.0\.1:\d+: let the browser connect to 127\.0\.0\.1, which a firewall of this machine can keep it from/.test(err.message));
+  assert.ok(Date.now() - started < 60_000, `${Date.now() - started} ms`);
+  assert.equal(asked, 0, "the site was not opened");
+});
+
 // A site whose page tries to save a file every 25 ms for as long as it is
 // open, and a HOME of the test's own, whose Downloads folder a browser saves
 // into on Linux.
@@ -4174,8 +4211,8 @@ test("the refusal of downloads is said once, to the whole browser, before any ta
   // proxy, in a tab of its own with four addresses, the rule for the
   // documents of the whole browser, and the page's tab, which asks whether
   // the browser preloads pages before it opens one, and the card's.
-  const check = ["Target.createTarget", "Target.attachToTarget", ...Array(4).fill("Page.navigate session"), "Runtime.evaluate session", "Target.closeTarget"];
-  assert.deepEqual(calls.slice(0, 14), ["Browser.getVersion", "Browser.setDownloadBehavior", ...check, "Fetch.enable", "Target.createTarget", "Target.attachToTarget", "Preload.enable session"]);
+  const check = ["Target.createTarget", "Target.attachToTarget", "Network.enable session", ...Array(4).fill("Page.navigate session"), "Runtime.evaluate session", "Target.closeTarget"];
+  assert.deepEqual(calls.slice(0, 15), ["Browser.getVersion", "Browser.setDownloadBehavior", ...check, "Fetch.enable", "Target.createTarget", "Target.attachToTarget", "Preload.enable session"]);
   assert.equal(calls.filter((call) => call.startsWith("Browser.setDownloadBehavior")).length, 1);
   assert.equal(calls.filter((call) => call === "Preload.enable session").length, 1);
   assert.equal(calls.filter((call) => call === "Target.createTarget").length, 3);
@@ -5308,6 +5345,24 @@ test("names whose DNS gives no answer do not hold up the lookup of another name 
   const [host, found, ms] = lines[0].split(" ");
   assert.deepEqual([host, found], ["site.example", "93.184.216.34"]);
   assert.ok(Number(ms) < 1_000, `the site's name was found in ${ms} ms`);
+});
+
+// Namespaces whose network can be given a firewall of the test's own.
+const firewalled = ownNamespaces || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "nft add table inet t"]).status !== 0 && "no nft to give the namespace's network a firewall");
+
+test("a browser behind a firewall that drops every connection on this machine's loopback, the one to the kit's proxy too, ends the run 15 s after its first request, in the words for a proxy it cannot connect to", { skip: noBrowser || firewalled }, (t) => {
+  // In namespaces of its own, a network of its loopback alone, where every
+  // new TCP connection is dropped, as a firewall can drop them: a browser
+  // waits for one as long as the system tries, two minutes and more.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-drop-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const script = `ip link set lo up && nft add table inet t && nft add chain inet t out "{ type filter hook output priority 0; }" && nft add rule inet t out oif lo tcp flags "&" "(syn|ack)" == syn drop && exec "$1" "$2" http://127.0.0.1:8000/ --no-stores --out "$3" --timeout 60`;
+  const started = Date.now();
+  const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", process.execPath, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.match(cli.stderr.trim().split("\n").pop(), /^easybrandkit: The browser could not connect to the proxy its requests go through \(its connection to 127\.0\.0\.1:\d+ got no answer in 15 s\), so no kit was made\. /);
+  assert.ok(Date.now() - started < 50_000, `${Date.now() - started} ms`);
+  assert.equal(fs.existsSync(path.join(parent, "kit")), false);
 });
 
 test("the browser asks no DNS over HTTPS server of its own past the kit's proxy, where the system's resolver is one Chrome takes as such a provider", { skip: noBrowser || ownNamespaces }, (t) => {
