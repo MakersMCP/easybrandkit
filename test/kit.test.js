@@ -1472,6 +1472,40 @@ test("a browser slow to start, to open a tab or to answer the connection to it i
   assert.deepEqual(fs.readdirSync(temp), [], "nothing is left in the temp folder");
 });
 
+test("a profile whose Local State cannot be written, which turns the browser's own DNS over HTTPS off, stops the run before the browser starts: with no room, told as the temp folder's, and in any other way, in words that name it", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  // A browser that keeps it was started, and then waits.
+  const started = path.join(parent, "started");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${sh(started)}\nexec sleep 60\n`, { mode: 0o755 });
+  setEnv(t, { TMPDIR: temp, CHROME_PATH: chrome });
+  t.after(() => {
+    killBrowsers();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  let failing = null;
+  const write = fs.writeFileSync;
+  t.mock.method(fs, "writeFileSync", function (file, ...rest) {
+    if (failing && path.basename(String(file)) === "Local State" && String(file).startsWith(temp)) throw failing;
+    return write.call(this, file, ...rest);
+  });
+  for (const [err, said] of [
+    [Object.assign(new Error("EIO: i/o error, write"), { code: "EIO", errno: -5, syscall: "write" }), `chrome was not started: easybrandkit could not write the browser's Local State, which turns its own DNS over HTTPS off, in ${temp}: i/o error (EIO).`],
+    [Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", errno: -28, syscall: "write" }), `The disk that holds the temp folder, ${temp}, is full (ENOSPC). Free some space on it, or set TMPDIR to a folder on another disk.`],
+  ]) {
+    failing = err;
+    await assert.rejects(makeKit("https://acme.example/", { dir, stores: false }), (got) => got.message === said && got.earlierKit === dir, err.code);
+    assert.equal(fs.existsSync(started), false, `${err.code}: the browser was not started`);
+    assert.deepEqual(fs.readdirSync(temp), [], `${err.code}: the profile is removed`);
+    assert.deepEqual(filesOf(dir), before);
+  }
+});
+
 test("a browser that does not answer is told within seconds when the temp folder has no room, and is waited for as long as the run has left otherwise", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");

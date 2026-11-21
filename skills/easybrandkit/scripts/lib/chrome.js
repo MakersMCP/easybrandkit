@@ -410,11 +410,17 @@ async function launch({ width, height }, { guard = null } = {}) {
   // itself, as Chrome sends what it asks such a server past any proxy, the
   // kit's too. No page chooses that server. A Chrome policy
   // (DnsOverHttpsMode) can turn it on again, which the kit cannot tell.
+  // Nothing else turns it off, and no check of the kit's tells it, so a
+  // browser whose Local State could not be written is not started: one
+  // that failed in another way than for room, as on a failing disk, started
+  // the browser with Chrome's default.
   const localState = path.join(profile, "Local State");
   try {
     fs.writeFileSync(localState, JSON.stringify({ dns_over_https: { mode: "off" } }));
   } catch (err) {
-    if (NO_ROOM.has(err.code)) throw room(err, localState);
+    const full = room(err, localState);
+    if (full) throw full;
+    throw new Error(`${place.name} was not started: easybrandkit could not write the browser's Local State, which turns its own DNS over HTTPS off, in ${temp}: ${systemWords(err)}.`);
   }
   // Chrome on Linux has its crash handler write the reports of its processes
   // into the user's own browser's folder (~/.config/google-chrome/Crash
