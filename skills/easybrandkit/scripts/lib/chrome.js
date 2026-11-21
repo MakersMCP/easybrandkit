@@ -1516,7 +1516,10 @@ const NET_WORDS = {
 const PROXY_SAID = new Set(["net::ERR_EMPTY_RESPONSE", "net::ERR_TUNNEL_CONNECTION_FAILED"]);
 
 // Chrome's word for the connection to at that the kit's proxy could not
-// make since it had failed made ones (cdp.proxy), "" when it made it.
+// make since it had failed made ones (cdp.proxy), "" when it made it. An
+// answer that is not HTTP as the proxy reads one (an error of Node's
+// parser, HPE_...), which the browser was told nothing of, is told as
+// Chrome tells such an answer of its own: the server answered.
 function proxyFailure(cdp, at, made) {
   if (!cdp.proxy) return "";
   let key;
@@ -1526,7 +1529,8 @@ function proxyFailure(cdp, at, made) {
     return "";
   }
   const one = cdp.proxy.failed.filter((failed) => failed.n > made && failed.key === key).pop();
-  return one ? NET_WORDS[one.code] || "net::ERR_CONNECTION_FAILED" : "";
+  if (!one) return "";
+  return NET_WORDS[one.code] || (/^HPE_/.test(one.code) ? "net::ERR_INVALID_HTTP_RESPONSE" : "net::ERR_CONNECTION_FAILED");
 }
 
 // The notes on the requests the kit's proxy refused while the kit read its

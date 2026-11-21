@@ -45,7 +45,7 @@ function dialHere(t, ports = {}) {
 // its first line. Resolves to { status, headers, body }.
 function viaProxy(proxy, url, { method = "GET", headers = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port: proxy.port, method, path: url, headers: { host: new URL(url).host, ...headers }, agent: false }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port: proxy.port, method, path: url, headers: { host: new URL(url).host, ...headers }, agent: false, maxHeaderSize: 256 * 1024 }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => (body += chunk));
@@ -227,4 +227,157 @@ test("the proxy keeps 50 refused addresses, each once, and says there were more"
   for (let i = 0; i < 52; i++) await viaProxy(proxy, `http://10.0.0.${i}/`);
   assert.equal(proxy.refused.length, 50);
   assert.equal(proxy.refusedMore, true);
+});
+
+// A server of the test's own that reads each request a connection carries,
+// up to its blank line, and answers it with what answers gives for its
+// number on that connection and its number in all, written as it is.
+// Resolves to { port, connections, heard }: heard keeps each request's
+// first lines.
+async function rawServer(t, answers) {
+  const heard = [];
+  let all = 0;
+  const server = net.createServer((socket) => {
+    server.connections++;
+    server.open++;
+    socket.on("close", () => server.open--);
+    let held = "";
+    let on = 0;
+    socket.on("error", () => {});
+    socket.on("data", (chunk) => {
+      held += chunk.toString("latin1");
+      for (let end = held.indexOf("\r\n\r\n"); end !== -1; end = held.indexOf("\r\n\r\n")) {
+        heard.push(held.slice(0, end));
+        held = held.slice(end + 4);
+        answers(socket, ++on, ++all);
+      }
+    });
+  });
+  server.connections = 0;
+  server.open = 0;
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  return { port: server.address().port, heard, get connections() { return server.connections; }, get open() { return server.open; } };
+}
+
+test("an answer the browser reads though Node's strict reading does not is passed on, framed afresh, and one not HTTP even so is kept as that and gets no answer", async (t) => {
+  const shapes = {
+    "lines ended by a line feed alone": "HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 5\n\nhello",
+    "a folded header": "HTTP/1.1 200 OK\r\nX-Folded: a\r\n b\r\nContent-Length: 5\r\n\r\nhello",
+    "a length and chunks both": "HTTP/1.1 200 OK\r\nContent-Length: 50\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    "a control character in a header": "HTTP/1.1 200 OK\r\nX-Odd: a\u0001b\r\nX-Kept: yes\r\nContent-Length: 5\r\n\r\nhello",
+    "a status with no reason": "HTTP/1.1 200\r\nContent-Length: 5\r\n\r\nhello",
+    "HTTP/1.0 with no length": "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nhello",
+  };
+  const hostOf = (name) => `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.test`;
+  const ports = {};
+  for (const [name, raw] of Object.entries(shapes)) {
+    const site = await rawServer(t, (socket) => (raw.startsWith("HTTP/1.0") ? socket.end(raw, "latin1") : socket.write(raw, "latin1")));
+    ports[`${hostOf(name)}:80`] = site.port;
+  }
+  const bad = await rawServer(t, (socket) => socket.write("HTTP/1.1 200 OK\r\nX-Bad : v\r\nContent-Length: 5\r\n\r\nhello", "latin1"));
+  ports["bad.test:80"] = bad.port;
+  dialHere(t, ports);
+  const proxy = await startProxy(ruleOf(() => ["93.184.216.34"]));
+  t.after(() => proxy.close());
+  for (const name of Object.keys(shapes)) {
+    const answer = await viaProxy(proxy, `http://${hostOf(name)}/`);
+    assert.equal(answer.status, 200, name);
+    assert.equal(answer.body, "hello", name);
+    assert.equal(answer.headers["content-length"], undefined, `${name}: the proxy frames the answer itself`);
+    if (name === "a control character in a header") {
+      assert.equal(answer.headers["x-odd"], undefined, "a header Node does not write is left out");
+      assert.equal(answer.headers["x-kept"], "yes");
+    }
+  }
+  assert.deepEqual(proxy.failed, []);
+  // A header name with a space in it, which the browser takes, is not HTTP
+  // to Node even so: the connection ends unanswered, and that is kept.
+  await assert.rejects(viaProxy(proxy, "http://bad.test/"), (err) => err.code === "ECONNRESET" || /socket hang up/.test(err.message));
+  assert.equal(proxy.failed.length, 1);
+  assert.equal(proxy.failed[0].key, "bad.test:80");
+  assert.match(proxy.failed[0].code, /^HPE_/);
+});
+
+test("an answer framed in two ways is framed afresh for the browser, so the next answer on the browser's connection is its own", async (t) => {
+  const site = await rawServer(t, (socket, on) => socket.write(`HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nanswer\r\n1\r\n${on}\r\n0\r\n\r\n`, "latin1"));
+  dialHere(t, { "acme.test:80": site.port });
+  const proxy = await startProxy(ruleOf(() => ["93.184.216.34"]));
+  t.after(() => proxy.close());
+  // One connection to the proxy for both, as the browser keeps one.
+  const kept = new http.Agent({ keepAlive: true, maxSockets: 1 });
+  t.after(() => kept.destroy());
+  const get = (at) => new Promise((resolve, reject) => {
+    http.get({ host: "127.0.0.1", port: proxy.port, path: at, headers: { host: new URL(at).host }, agent: kept }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => resolve(body));
+    }).on("error", reject);
+  });
+  assert.equal(await get("http://acme.test/a"), "answer1");
+  assert.equal(await get("http://acme.test/b"), "answer2");
+});
+
+test("an answer's headers of 40 KB, and a request's, pass the proxy, as the browser takes such headers", async (t) => {
+  let cookie = "";
+  // A server that takes such a request itself, past Node's own 16 KB.
+  const server = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
+    cookie = req.headers.cookie || "";
+    res.writeHead(200, { "set-cookie": Array.from({ length: 10 }, (_, i) => `c${i}=${"x".repeat(4_000)}`) }).end("ok");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const port = server.address().port;
+  dialHere(t, { "acme.test:80": port });
+  const proxy = await startProxy(ruleOf(() => ["93.184.216.34"]));
+  t.after(() => proxy.close());
+  const answer = await viaProxy(proxy, "http://acme.test/", { headers: { cookie: `big=${"y".repeat(40_000)}` } });
+  assert.equal(answer.status, 200);
+  assert.equal(answer.body, "ok");
+  assert.equal(answer.headers["set-cookie"].length, 10);
+  assert.equal(cookie.length, 40_004);
+});
+
+test("a server that resets the connection before it answers is kept as that, as the browser would tell it", async (t) => {
+  const site = await rawServer(t, (socket) => socket.resetAndDestroy());
+  dialHere(t, { "acme.test:80": site.port });
+  const proxy = await startProxy(ruleOf(() => ["93.184.216.34"]));
+  t.after(() => proxy.close());
+  await assert.rejects(viaProxy(proxy, "http://acme.test/"), (err) => err.code === "ECONNRESET" || /socket hang up/.test(err.message));
+  assert.deepEqual(proxy.failed.map(({ key, code }) => [key, code]), [["acme.test:80", "ECONNRESET"]]);
+});
+
+test("requests with no body to one host and port go on one connection the proxy keeps open, one with a body on a connection of its own, and one on a kept connection the site has closed is sent again", async (t) => {
+  const site = await rawServer(t, (socket, on, all) => {
+    // The fifth request in all is the first on a connection the site has
+    // given up: it closes that connection unanswered.
+    if (all === 5) return socket.destroy();
+    socket.write(`HTTP/1.1 200 OK\r\nContent-Length: ${String(all).length}\r\n\r\n${all}`, "latin1");
+  });
+  const dials = dialHere(t, { "acme.test:80": site.port });
+  const proxy = await startProxy(ruleOf(() => ["93.184.216.34"]));
+  t.after(() => proxy.close());
+  for (let i = 1; i <= 4; i++) assert.equal((await viaProxy(proxy, `http://acme.test/${i}`)).body, String(i));
+  assert.equal(site.connections, 1, "four requests on one connection");
+  assert.equal((await viaProxy(proxy, "http://acme.test/again")).body, "6", "sent again on a connection of its own");
+  assert.equal(site.connections, 2);
+  const posted = await viaProxy(proxy, "http://acme.test/form", { method: "POST", headers: { "content-length": "0" } });
+  assert.equal(posted.body, "7");
+  assert.equal(site.connections, 3, "a request with a body on a connection of its own");
+  assert.match(site.heard[site.heard.length - 1], /\r\nConnection: close(\r\n|$)/i);
+  assert.ok(dials.every((one) => one.host === "acme.test" && one.port === 80 && one.handed.join() === "93.184.216.34"), JSON.stringify(dials));
+  assert.deepEqual(proxy.failed, []);
+  // A connection kept open goes with the proxy, once those closed after
+  // their request have gone.
+  assert.equal((await viaProxy(proxy, "http://acme.test/last")).body, "8");
+  const settled = async (count) => {
+    for (let waited = 0; site.open !== count && waited < 2_000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+    return site.open;
+  };
+  assert.equal(await settled(1), 1);
+  proxy.close();
+  assert.equal(await settled(0), 0);
 });

@@ -56,6 +56,32 @@ function passedOn(raw) {
 // KB would refuse a site's large cookies or policies that the browser takes.
 const HEADER_MOST = 256 * 1024;
 
+// The headers of a site's answer that are passed on to the browser: those
+// passedOn keeps that Node can write, and no Content-Length, as the proxy
+// gives each answer its own framing (see answer). A site's answer is read
+// the way the browser reads one (insecureHTTPParser), which takes headers
+// Node does not write, as one with a control character in its value; such
+// a header is left out, where it ended the whole answer.
+function answerHeaders(raw) {
+  const kept = passedOn(raw);
+  const out = [];
+  for (let i = 0; i < kept.length; i += 2) {
+    if (/^content-length$/i.test(kept[i])) continue;
+    try {
+      http.validateHeaderName(kept[i]);
+      http.validateHeaderValue(kept[i], kept[i + 1]);
+    } catch {
+      continue;
+    }
+    out.push(kept[i], kept[i + 1]);
+  }
+  return out;
+}
+
+// A reason phrase Node can write, else none, for which it writes the one it
+// knows for the status.
+const reasonOf = (text) => (/^[\t\x20-\x7e\x80-\xff]*$/.test(String(text)) ? text : undefined);
+
 // How many refused addresses are kept, each once, and how many failed
 // connections.
 const KEEP_REFUSED = 50;
@@ -142,6 +168,7 @@ function startProxy(guard) {
   const failed = (url, err) => {
     proxy.failed.push({ n: ++proxy.failedCount, key: keyOf(url), code: String((err && err.code) || "") });
     if (proxy.failed.length > KEEP_FAILED) proxy.failed.shift();
+    if (err) err.kept = true;
   };
   // A connection to url's host and port at one of addresses, the ones the
   // rule took for it: the socket, once connected.
@@ -178,6 +205,25 @@ function startProxy(guard) {
     return true;
   };
 
+  // The connections of plain http requests with no body, kept open between
+  // requests to the same host and port, as the browser keeps its own: a
+  // page of a site under development that loads its modules one request
+  // each, a few hundred of them, loaded half as fast with a connection of
+  // its own for each. Agent keeps them by the host as the request names it,
+  // a name or an IP address, and its port, and makes each by connect, so to
+  // an address the rule took for that host and held (see hold), which close
+  // ends; one idle for 5 s is closed.
+  const agent = new http.Agent({ keepAlive: true, timeout: 5_000 });
+  agent.createConnection = (options, made) => {
+    connect(options.easybrandkitUrl, options.easybrandkitAddresses).then(
+      (socket) => made(null, socket),
+      (err) => {
+        failed(options.easybrandkitUrl, err);
+        made(err);
+      },
+    );
+  };
+
   // A plain http request, the whole address in its first line.
   const answer = async (req, res) => {
     res.sendDate = false;
@@ -201,50 +247,65 @@ function startProxy(guard) {
       refuse(url.href.slice(0, 300), why);
       return res.writeHead(403, { "content-length": "0" }).end();
     }
-    let upstream;
-    try {
-      upstream = await connect(url, addresses);
-    } catch (err) {
-      // As a server that gave no answer: the browser tells that as an
-      // empty answer, and the kit tells it by the failure kept here (see
-      // chrome.js navigate).
-      failed(url, err);
-      return req.socket.destroy();
-    }
-    if (req.socket.destroyed) return upstream.destroy();
+    if (req.socket.destroyed) return;
     // The request as the browser sent it, for the address's own host, which
     // the connection already reaches.
     const headers = ["Host", url.host];
     const kept = passedOn(req.rawHeaders);
     for (let i = 0; i < kept.length; i += 2) if (!/^host$/i.test(kept[i])) headers.push(kept[i], kept[i + 1]);
-    const asked = http.request({ createConnection: () => upstream, method: req.method, path: `${url.pathname}${url.search}`, headers, setHost: false, maxHeaderSize: HEADER_MOST });
+    // A request with a body goes on a connection of its own, which is
+    // closed after it: one kept open that the site has closed meanwhile
+    // fails it, and its body cannot be sent again.
+    const bodiless = req.headers["content-length"] === undefined && req.headers["transfer-encoding"] === undefined;
+    const options = { method: req.method, path: `${url.pathname}${url.search}`, headers, setHost: false, maxHeaderSize: HEADER_MOST, insecureHTTPParser: true, host: plainHost(url), port: Number(portOf(url)), easybrandkitUrl: url, easybrandkitAddresses: addresses };
     let answered = false;
     let gone = false;
-    asked.on("response", (answer) => {
-      answered = true;
-      try {
-        res.writeHead(answer.statusCode, answer.statusMessage, passedOn(answer.rawHeaders));
-      } catch {
-        upstream.destroy();
-        return res.destroy();
-      }
-      answer.pipe(res);
-      answer.on("error", () => res.destroy());
-    });
-    // A server that closes the connection before it answers is told by
-    // the browser as an empty answer, as it would be told without the
-    // proxy; one that resets it, a system error, is kept as that.
-    asked.on("error", (err) => {
-      if (answered || gone) return res.destroy();
-      if (err && err.syscall) failed(url, err);
-      req.socket.destroy();
-    });
+    let asked;
+    // A connection that was kept open can have been closed by the site just
+    // as the request went out on it: the request is sent once more, on a
+    // connection of its own. A request with no agent connects only through
+    // createConnection; agent: false would have Node make one of its own,
+    // which looks the name up again.
+    const send = (again) => {
+      const one = http.request(bodiless && !again ? { ...options, agent } : { ...options, headers: [...headers, "Connection", "close"], createConnection: (opts, made) => agent.createConnection(opts, made) });
+      asked = one;
+      one.on("response", (answer) => {
+        answered = true;
+        try {
+          res.writeHead(answer.statusCode, reasonOf(answer.statusMessage), answerHeaders(answer.rawHeaders));
+        } catch {
+          // A status Node does not write, as one under 100.
+          failed(url, { code: "HPE_INVALID_STATUS" });
+          one.destroy();
+          return req.socket.destroy();
+        }
+        answer.pipe(res);
+        // An answer cut short by the site is cut short for the browser too.
+        answer.on("error", () => res.destroy());
+        answer.on("close", () => !answer.complete && res.destroy());
+      });
+      // A server that closes the connection before it answers is told by
+      // the browser as an empty answer, as it would be told without the
+      // proxy; one that resets it, a system error, is kept as that, and so
+      // is an answer that is not HTTP as the browser reads it, which the
+      // browser is told nothing of (see chrome.js navigate). A request that
+      // was sent again has the say from then on.
+      one.on("error", (err) => {
+        if (one !== asked) return;
+        if (answered || gone) return res.destroy();
+        if (bodiless && !again && one.reusedSocket && !err.kept) return send(true);
+        if (err && !err.kept && (err.syscall || /^HPE_/.test(String(err.code)))) failed(url, err);
+        req.socket.destroy();
+      });
+      if (bodiless) one.end();
+      else req.pipe(one);
+    };
+    send(false);
     // The browser that gives the request up ends its connection too.
     res.on("close", () => {
       gone = true;
-      upstream.destroy();
+      if (!res.writableFinished) asked.destroy();
     });
-    req.pipe(asked);
   };
   // A CONNECT tunnel to the host and port it names.
   const tunnel = async (req, socket, head) => {

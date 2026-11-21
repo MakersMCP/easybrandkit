@@ -2949,6 +2949,21 @@ test("a page that gives no answer in its time, or to which the browser makes no 
     await assert.rejects(navigate(tab(() => ({ errorText })), "http://acme.test/"), (err) => !err.silent && err.message === `Could not open http://acme.test/: ${errorText}`, errorText);
     await assert.rejects(navigate(tab(() => ({ errorText }), hop), "http://acme.test/"), (err) => !err.silent && err.message === `http://acme.test/ led to ${hop}, which could not be opened (${errorText}), so no kit was made.`, `${errorText} after a redirect`);
   }
+  // A connection the kit's proxy could not make to the page's host and
+  // port, or an answer there that it could not read as HTTP, is told by
+  // what the proxy kept of it while the page was asked for; one kept
+  // before, as for a picture of an earlier page, says nothing of this one.
+  const proxied = (kept, during) => {
+    const one = tab(() => {
+      if (during) one.proxy.failed.push({ n: ++one.proxy.failedCount, key: "acme.test:80", code: during });
+      return { errorText: "net::ERR_EMPTY_RESPONSE" };
+    });
+    one.proxy = { failed: kept.map((code, i) => ({ n: i + 1, key: "acme.test:80", code })), failedCount: kept.length, reading: "" };
+    return one;
+  };
+  await assert.rejects(navigate(proxied([], "ECONNREFUSED"), "http://acme.test/"), (err) => err.silent && err.message === "Could not open http://acme.test/: net::ERR_CONNECTION_REFUSED");
+  await assert.rejects(navigate(proxied([], "HPE_INVALID_HEADER_TOKEN"), "http://acme.test/"), (err) => !err.silent && err.message === "Could not open http://acme.test/: net::ERR_INVALID_HTTP_RESPONSE");
+  await assert.rejects(navigate(proxied(["ECONNREFUSED"]), "http://acme.test/"), (err) => err.silent && err.message === "Could not open http://acme.test/: net::ERR_EMPTY_RESPONSE", "a failure kept before the page was asked for");
   // Out of the run's time, it is told as that, which more time helps.
   setTimeLimit(1);
   await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3937,6 +3952,46 @@ test("the name of the address given is looked up by the kit's proxy, as every na
   await assert.rejects(makeKit("https://closed.test/", { dir, stores: false }), (err) => err.message === "Could not open https://closed.test/: net::ERR_CONNECTION_REFUSED" && err.earlierKit === dir);
   await assert.rejects(makeKit("http://closed.test:8080/", { dir, stores: false }), (err) => err.message === "Could not open http://closed.test:8080/: net::ERR_CONNECTION_REFUSED" && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before);
+});
+
+test("a plain http site whose answers the browser takes though Node's strict reading does not is read through the kit's proxy, and one whose answer is not HTTP even so is told as that, with no https tried in its place", { skip: noBrowser }, async (t) => {
+  const net = require("node:net");
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // A server that answers each request with the page, its lines ended by a
+  // line feed alone and a header folded, with a header name holding a
+  // space when bad is set, as hand written servers and devices do.
+  const page = brandPage("rgb(255,0,0)");
+  const rawSite = async (bad) => {
+    const server = net.createServer((socket) => {
+      let held = "";
+      socket.on("error", () => {});
+      socket.on("data", (chunk) => {
+        held += chunk.toString("latin1");
+        for (let end = held.indexOf("\r\n\r\n"); end !== -1; end = held.indexOf("\r\n\r\n")) {
+          const first = held.slice(0, held.indexOf("\r\n"));
+          held = held.slice(end + 4);
+          const body = / \/ /.test(first) ? page : "";
+          socket.write(`HTTP/1.1 ${body ? 200 : 404} OK\nContent-Type: text/html\nX-Folded: a\n b\n${bad ? "X-Bad : v\n" : ""}Content-Length: ${Buffer.byteLength(body)}\n\n${body}`, "latin1");
+        }
+      });
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    t.after(() => server.close());
+    return server.address().port;
+  };
+  const plain = await rawSite(false);
+  const { kit } = await makeKit(`http://127.0.0.1:${plain}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  // A public site on port 80 whose answer holds a header name with a space:
+  // it answered, so its https address is not tried in its place.
+  const bad = await rawSite(true);
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  const dials = await dialHere(t, (host, port) => (port === 80 ? bad : 9));
+  await assert.rejects(makeKit("http://acme.test/", { dir: path.join(parent, "bad"), stores: false }), (err) => err.message === "Could not open http://acme.test/: net::ERR_INVALID_HTTP_RESPONSE");
+  assert.ok(dials.to().includes("acme.test:80"), dials.to().join(" "));
+  assert.ok(!dials.to().includes("acme.test:443"), "no https was tried in its place");
 });
 
 test("a browser that does not send every request through the kit's proxy, as one a program starts with switches of its own, is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
