@@ -22,17 +22,55 @@
 // its browser runs. A request it gets that is not one of these, as one
 // that names no host, gets a 400.
 
+const fs = require("fs");
 const net = require("net");
 const http = require("http");
 const crypto = require("crypto");
+
+// The tables of this machine's TCP sockets on Linux, each with the uid of
+// the user whose socket it is.
+const TCP_TABLES = ["/proc/net/tcp", "/proc/net/tcp6"];
+// 127.0.0.1 as those tables write an address, in either byte order, also
+// mapped into IPv6 (::ffff:127.0.0.1).
+const TABLE_LOOPBACK = /^(?:0100007F|7F000001|0000000000000000FFFF00000100007F|00000000000000000000FFFF7F000001):[0-9A-F]{4}$/;
+
+// Whose program a connection to the proxy comes from, on Linux: the uid
+// those tables give the socket at its other end, which is on 127.0.0.1 as
+// well, as the proxy listens there alone, found by the ports the connection
+// had when the proxy took it (see startProxy's hold), as a closed one has
+// none. "gone" when the tables could be read and hold no such socket, as
+// for a program that has closed it, and null where it cannot be told: on
+// another system, or with no table to read.
+async function ownerOf(socket) {
+  const ports = socket.easybrandkitPorts || { remote: socket.remotePort, local: socket.localPort };
+  if (process.platform !== "linux" || !ports.remote || !ports.local) return null;
+  const hex = (port) => Number(port).toString(16).toUpperCase().padStart(4, "0");
+  const [mine, theirs] = [hex(ports.remote), hex(ports.local)];
+  let read = false;
+  for (const file of TCP_TABLES) {
+    let table;
+    try {
+      table = await fs.promises.readFile(file, "latin1");
+    } catch {
+      continue;
+    }
+    read = true;
+    for (const line of table.split("\n")) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length > 7 && fields[1].endsWith(`:${mine}`) && fields[2].endsWith(`:${theirs}`) && TABLE_LOOPBACK.test(fields[1]) && TABLE_LOOPBACK.test(fields[2])) return Number(fields[7]);
+    }
+  }
+  return read ? "gone" : null;
+}
 
 // How the proxy connects to an address the rule took: net.connect with the
 // host as the rule judged it and a lookup that hands back only the
 // addresses the rule took for it, so that a name is never looked up again
 // and a connection tries those alone, one after another, as Node's own
-// connection with more than one address does. Tests put their own servers
-// in place of the addresses here.
-const wire = { dial: (options) => net.connect(options) };
+// connection with more than one address does. And whose program a
+// connection to the proxy comes from (see ownerOf). Tests put their own
+// servers in place of the addresses here, and their own owners.
+const wire = { dial: (options) => net.connect(options), owner: ownerOf };
 
 // The headers that belong to one connection and not to the request or the
 // answer it carries, which the proxy does not pass on, with those a
@@ -147,6 +185,7 @@ function startProxy(guard) {
   const proxy = { port: 0, token, through: new Set(), reading: "", refused: [], refusedMore: false, failed: [], failedCount: 0, closed: false };
   const hold = (socket) => {
     sockets.add(socket);
+    socket.easybrandkitPorts = { remote: socket.remotePort, local: socket.localPort };
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
     if (proxy.closed) socket.destroy();
@@ -160,9 +199,28 @@ function startProxy(guard) {
       return { why: NOT_JUDGED, addresses: [] };
     }
   };
-  const refuse = (what, why) => {
+  // A request refused, kept for the kit's notes when it came from a program
+  // of this user's, as the browser is: any program of this machine can
+  // connect to the proxy, as to any port of 127.0.0.1, and what another
+  // user's asks is refused as any request is, but not named in the notes as
+  // the browser's. Where that cannot be told, as on another system than
+  // Linux, it is kept. The table is read before the refusal is answered,
+  // while the connection is still there.
+  const own = process.getuid ? process.getuid() : null;
+  const refuse = async (what, why, socket) => {
+    const page = proxy.reading;
+    if (proxy.refused.some((one) => one.what === what) || (proxy.refusedMore && proxy.refused.length >= KEEP_REFUSED)) return;
+    if (own !== null && socket) {
+      let owner = null;
+      try {
+        owner = await wire.owner(socket);
+      } catch {
+        // Cannot be told.
+      }
+      if (owner !== null && owner !== own) return;
+    }
     if (proxy.refused.some((one) => one.what === what)) return;
-    if (proxy.refused.length < KEEP_REFUSED) proxy.refused.push({ what, why, page: proxy.reading });
+    if (proxy.refused.length < KEEP_REFUSED) proxy.refused.push({ what, why, page });
     else proxy.refusedMore = true;
   };
   const failed = (url, err) => {
@@ -235,7 +293,7 @@ function startProxy(guard) {
     try {
       url = new URL(target);
     } catch {
-      refuse(target.slice(0, 300), UNREADABLE);
+      await refuse(target.slice(0, 300), UNREADABLE, req.socket);
       return res.writeHead(403, { "content-length": "0" }).end();
     }
     if (ownAddress(url)) {
@@ -244,7 +302,7 @@ function startProxy(guard) {
     }
     const { why, addresses } = await route(url.href);
     if (why) {
-      refuse(url.href.slice(0, 300), why);
+      await refuse(url.href.slice(0, 300), why, req.socket);
       return res.writeHead(403, { "content-length": "0" }).end();
     }
     if (req.socket.destroyed) return;
@@ -312,7 +370,7 @@ function startProxy(guard) {
     const authority = String(req.url || "");
     const url = tunnelUrl(authority);
     if (!url) {
-      refuse(authority.slice(0, 300), UNREADABLE);
+      await refuse(authority.slice(0, 300), UNREADABLE, socket);
       return socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
     }
     if (ownAddress(url)) return socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
@@ -321,7 +379,7 @@ function startProxy(guard) {
     // names: it is judged as an https address there.
     const { why, addresses } = await route(url.href);
     if (why) {
-      refuse(what, why);
+      await refuse(what, why, socket);
       return socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
     }
     let upstream;

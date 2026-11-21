@@ -381,3 +381,54 @@ test("requests with no body to one host and port go on one connection the proxy 
   proxy.close();
   assert.equal(await settled(0), 0);
 });
+
+test("what a program of another user asks of the proxy and is refused is not kept for the notes, and where the owner cannot be told it is", async (t) => {
+  const dials = dialHere(t);
+  const proxy = await startProxy(ruleOf(() => null));
+  t.after(() => proxy.close());
+  const own = process.getuid ? process.getuid() : 0;
+  let owner = own + 4242;
+  t.mock.method(wire, "owner", async () => owner);
+  assert.equal((await viaProxy(proxy, "http://10.0.0.5/a-note-of-another-program")).status, 403);
+  const other = await tunnel(proxy, "10.0.0.5:9222");
+  other.socket.destroy();
+  assert.equal(other.line, "HTTP/1.1 403 Forbidden");
+  owner = "gone";
+  assert.equal((await viaProxy(proxy, "http://10.0.0.5/asked-and-gone")).status, 403);
+  assert.deepEqual(proxy.refused, []);
+  owner = own;
+  assert.equal((await viaProxy(proxy, "http://10.0.0.5/the-browser")).status, 403);
+  owner = null;
+  assert.equal((await viaProxy(proxy, "http://10.0.0.5/cannot-be-told")).status, 403);
+  assert.deepEqual(proxy.refused.map(({ what }) => what), ["http://10.0.0.5/the-browser", "http://10.0.0.5/cannot-be-told"]);
+  assert.deepEqual(dials, []);
+});
+
+test("the owner of a connection to the proxy is read from the kernel's tables of TCP sockets on Linux: this user's program, and one that has closed its end", { skip: process.platform !== "linux" && "the tables are read on Linux only" }, async (t) => {
+  // A rule that takes a moment to refuse, as one that looks a name up does.
+  const proxy = await startProxy({ route: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return { why: "is not on the public internet", addresses: [] };
+  } });
+  t.after(() => proxy.close());
+  const read = wire.owner;
+  const seen = [];
+  t.mock.method(wire, "owner", async (socket) => {
+    const owner = await read(socket);
+    seen.push(owner);
+    return owner;
+  });
+  // A program of this user's, which waits for the answer.
+  assert.equal((await viaProxy(proxy, "http://10.0.0.5/waits")).status, 403);
+  assert.deepEqual(seen, [process.getuid()]);
+  // A program that sends its request and closes its end at once has gone
+  // from the tables by the time the proxy reads them.
+  const sent = net.connect(proxy.port, "127.0.0.1", () => {
+    sent.write("GET http://10.0.0.5/gone HTTP/1.1\r\nHost: 10.0.0.5\r\n\r\n");
+    sent.resetAndDestroy();
+  });
+  sent.on("error", () => {});
+  for (let waited = 0; seen.length < 2 && waited < 3_000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(seen, [process.getuid(), "gone"]);
+  assert.deepEqual(proxy.refused.map(({ what }) => what), ["http://10.0.0.5/waits"]);
+});
