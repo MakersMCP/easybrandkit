@@ -29,7 +29,7 @@ const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 const proxyLib = require("../skills/easybrandkit/scripts/lib/proxy");
 const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { storeAnswers } = require("./store-answers");
-const { partedTemp, roomlessTemp } = require("./temp-skip");
+const { partedTemp, roomlessTemp, roomlessIn } = require("./temp-skip");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -5606,6 +5606,8 @@ test("a browser behind a firewall that drops every connection on this machine's 
   // waits for one as long as the system tries, two minutes and more.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-drop-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
   const script = `ip link set lo up && nft add table inet t && nft add chain inet t out "{ type filter hook output priority 0; }" && nft add rule inet t out oif lo tcp flags "&" "(syn|ack)" == syn drop && exec "$1" "$2" http://127.0.0.1:8000/ --no-stores --out "$3" --timeout 60`;
   const started = Date.now();
   const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", process.execPath, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
@@ -5628,6 +5630,8 @@ test("the browser asks no DNS over HTTPS server of its own past the kit's proxy,
   // of this network.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-doh-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
   const resolv = path.join(parent, "resolv.conf");
   const asked = path.join(parent, "asked.txt");
   const start = path.join(parent, "start.js");
@@ -5706,6 +5710,8 @@ test("a page's WebRTC has the browser look no name up itself: neither a name und
   // others, as a page can.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-mdns-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
   const word = crypto.randomBytes(4).toString("hex");
   for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:2 attempts:1\n"], ["nsswitch.conf", "hosts: files dns\n"], ["hosts", "127.0.0.1 localhost\n"]]) fs.writeFileSync(path.join(parent, name), text);
   const asked = path.join(parent, "asked.txt");

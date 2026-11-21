@@ -17,7 +17,12 @@ const path = require("node:path");
 
 const temp = path.resolve(os.tmpdir());
 const partedTemp = process.platform !== "win32" && process.platform !== "darwin" && temp.includes(path.delimiter) && `the path of the temp folder, ${temp}, has a ${path.delimiter} in it, which parts the folders of PATH, so the browser is not started from it`;
-const socket = Buffer.byteLength(path.join(temp, "org.chromium.Chromium.XXXXXX", "SingletonSocket"));
-const roomlessTemp = process.platform !== "win32" && socket > (process.platform === "linux" ? 107 : 103) && `the path of the temp folder, ${temp}, is too long for the socket the browser makes in it, whose path would be ${socket} bytes`;
+// The same for a temp folder of a test's own that a run is given, as one
+// made inside this one, which leaves the browser less room.
+function roomlessIn(dir) {
+  const socket = Buffer.byteLength(path.join(dir, "org.chromium.Chromium.XXXXXX", "SingletonSocket"));
+  return process.platform !== "win32" && socket > (process.platform === "linux" ? 107 : 103) && `the path of the temp folder, ${dir}, is too long for the socket the browser makes in it, whose path would be ${socket} bytes`;
+}
+const roomlessTemp = roomlessIn(temp);
 
-module.exports = { partedTemp, roomlessTemp };
+module.exports = { partedTemp, roomlessTemp, roomlessIn };
