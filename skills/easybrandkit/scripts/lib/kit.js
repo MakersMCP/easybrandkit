@@ -520,6 +520,20 @@ function notThroughProxy(message, unreached) {
   return `${text}${/[.!?]$/.test(text) ? "" : "."} easybrandkit does not use the proxy ${name} names: its browser and its own requests connect to each site themselves, so on a network that reaches the web only through that proxy, no site can be read.`;
 }
 
+// What an https address read for one given with no scheme does when the
+// site speaks plain http, as a server under development on a port of its
+// own does: Chrome reads its http answer to the browser's TLS hello as a
+// TLS error, and some servers close the connection.
+const NOT_TLS = /^could not be opened \(net::ERR_(SSL_PROTOCOL_ERROR|SSL_VERSION_OR_CIPHER_MISMATCH|CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE)\)$/;
+
+// A last line about the address given that was written with no scheme,
+// which was read as https://, with the word to give it as http:// when the
+// site speaks plain http.
+function readAsHttps(message, asked) {
+  const text = String(message).trim();
+  return `${text}${/[.!?]$/.test(text) ? "" : "."} It was given with no http:// or https://, so it was read as https://: if the site speaks plain http, as a server under development often does, give it as ${asked.replace(/^https:/, "http:")}.`;
+}
+
 // namedBy: when another source named the site, as a store listing names its
 // maker's website, and not the user, the address of that source. The site
 // is then read as a page easybrandkit chose itself, as the website a
@@ -533,6 +547,8 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   // the run here, before any work.
   const refused = refusedAddresses();
   const asked = normalizeUrl(rawUrl);
+  // Written with no scheme, which reads as https:// (see normalizeUrl).
+  const bare = !/^[a-z][a-z0-9+.-]*:\/\//i.test(String(rawUrl || "").trim());
   // On this machine or a private network by its form, which no proxy of
   // the system's stands in front of (see notThroughProxy).
   const local = notPublicByForm(new URL(asked));
@@ -681,6 +697,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     const plain = removed && err.syscall ? new Error(removed.said) : toldPlainly(err, run);
     // The address given, or the page read in its place, that could not be
     // reached, as on a network that reaches the web only through a proxy.
+    if (plain === err && err.pageFailed && bare && NOT_TLS.test(err.pageFailed) && err.message.startsWith(`Could not open ${asked}:`)) plain.message = readAsHttps(plain.message, asked);
     if (plain === err && err.pageFailed && UNREACHED.test(err.pageFailed) && !local) plain.message = notThroughProxy(plain.message, true);
     // For the CLI, which says that an earlier kit is as it was. saveRun's
     // own errors say what the folder holds.

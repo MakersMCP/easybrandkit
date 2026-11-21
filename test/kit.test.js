@@ -3962,6 +3962,22 @@ test("a local site whose page takes its styles and its logo from another port of
   assert.deepEqual(assets, [], "the other port was asked nothing");
 });
 
+test("an address given with no scheme is read as https, and when that fails as a site that speaks plain http makes it fail, the last line says to give it with http://", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const port = new URL(site.origin).port;
+  const read = `https://localhost:${port}/`;
+  await assert.rejects(makeKit(`localhost:${port}`, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open ${read}: net::ERR_SSL_PROTOCOL_ERROR. It was given with no http:// or https://, so it was read as https://: if the site speaks plain http, as a server under development often does, give it as http://localhost:${port}/.`);
+  // Given with https:// itself, the address is as the user wrote it.
+  await assert.rejects(makeKit(read, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open ${read}: net::ERR_SSL_PROTOCOL_ERROR`);
+  const { kit } = await makeKit(`http://localhost:${port}`, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+});
+
 test("the name of the address given is looked up by the kit's proxy, as every name: one not found is told as the browser tells it, and a site that takes no connection on either scheme as well", { skip: noBrowser }, async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
