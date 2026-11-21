@@ -5,8 +5,9 @@
 // protocol through a pipe of its own. It opens no port, so no other program
 // on the machine, another user's run among them, can reach it. Every
 // request it makes goes through the kit's own proxy (see proxy.js), which
-// judges it by the run's rule, unless a Chrome policy turns on the DNS over
-// HTTPS the kit turns off (see launch). Nothing is downloaded.
+// judges it by the run's rule, and it looks no name up itself, unless a
+// Chrome policy turns on the DNS over HTTPS the kit turns off (see
+// launch). Nothing is downloaded.
 
 const fs = require("fs");
 const os = require("os");
@@ -528,8 +529,23 @@ async function launch({ width, height }, { guard = null } = {}) {
         // No media router either (MediaRouter): a page that asks whether a
         // cast device is there (the Presentation API) had the browser search
         // this machine's networks for one, over SSDP and mDNS multicast,
-        // which goes past any proxy.
-        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb,Reporting,WebPayments,MediaRouter",
+        // which goes past any proxy. Nor WebRTC's mDNS names for this
+        // machine's own addresses (WebRtcHideLocalIpsWithMdns), for which
+        // the browser joined the mDNS group on each of this machine's
+        // networks as a page made a connection, though its WebRTC gathers no
+        // address of this machine (see --webrtc-ip-handling-policy below).
+        "--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable,UseDnsHttpsSvcb,Reporting,WebPayments,MediaRouter,WebRtcHideLocalIpsWithMdns",
+        // The browser looks no name up itself: every request it makes goes
+        // through the kit's proxy, which looks each name up with the run's
+        // own lookup (see address.js), so every name fails in the browser
+        // but 127.0.0.1, the proxy's own address. With its own lookup, a
+        // page's WebRTC had it look up the names the page gave as the
+        // remote addresses of a connection, past the proxy: a name under
+        // .local by mDNS on each of this machine's networks, in a packet of
+        // the page's choosing, and any other by the system's resolver.
+        // ^NOTFOUND fails a name; ~NOTFOUND only changes it, which still had
+        // the browser ask the network for ~NOTFOUND.
+        "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE 127.0.0.1",
         // Every request through the kit's proxy, this machine's own
         // addresses' too, which the browser otherwise sends past a proxy
         // (<-loopback> takes them off its list of addresses that go past

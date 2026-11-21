@@ -4930,9 +4930,14 @@ test("a browser the kit starts listens on no port, has HTTP/3 off, moves no http
     // (UseDnsHttpsSvcb). The test sites are on names the browser asks no
     // DNS for, so this is told by its switch. The Reporting API, Web
     // Payments and the search for cast devices are off too (see the tests
-    // of a page's reports and of its cast devices below).
+    // of a page's reports and of its cast devices below), and so are
+    // WebRTC's mDNS names for this machine's addresses.
     const off = /(?:^|[\0 ])--disable-features=([^\0 ]*)/.exec(started);
-    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "MediaRouter", "Reporting", "UseDnsHttpsSvcb", "WebPayments"], String(started));
+    assert.deepEqual(off && off[1].split(",").sort(), ["HttpsFirstBalancedModeAutoEnable", "HttpsUpgrades", "MediaRouter", "Reporting", "UseDnsHttpsSvcb", "WebPayments", "WebRtcHideLocalIpsWithMdns"], String(started));
+    // Every name fails in the browser's own lookup but the proxy's address
+    // (see the test of a page's WebRTC below). Chrome writes the switch's
+    // spaces as they are.
+    assert.ok(started.includes("--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE 127.0.0.1"), String(started));
     // Every request goes through the kit's proxy, this machine's own too,
     // WebRTC's UDP is limited to a proxy's, and the push channel is pointed
     // at the proxy's own name.
@@ -5607,6 +5612,104 @@ test("the browser asks no DNS over HTTPS server of its own past the kit's proxy,
   const lines = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
   assert.deepEqual(lines.filter((line) => line === "dns dns.google"), [], "the browser asked the resolver for no server of DNS over HTTPS");
   assert.deepEqual(lines.filter((line) => line.startsWith("tcp ")), [], "nothing connected to port 443 of this network");
+});
+
+// Namespaces with a network of their own that takes multicast, as a
+// machine's own networks do, beside the loopback.
+const multicast = ownNamespaces || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "ip link add dm0 type dummy && ip link set dm0 multicast on && ip link set dm0 up"]).status !== 0 && "no dummy network to give the namespace a network with multicast");
+
+test("a page's WebRTC has the browser look no name up itself: neither a name under .local by multicast DNS on this machine's networks nor another name of the page's by the system's resolver", { skip: noBrowser || multicast }, (t) => {
+  // In namespaces of their own: the loopback, and a network with multicast
+  // whose group of multicast DNS the test listens to, as a program of the
+  // machine can; a DNS server of the test's own on 127.0.0.1 that keeps each
+  // question, and the name service's own files, so that no name reaches the
+  // machine's own resolver or multicast DNS daemon. The page gives its
+  // WebRTC connection remote addresses by name, a name under .local and two
+  // others, as a page can.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-mdns-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const word = crypto.randomBytes(4).toString("hex");
+  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:2 attempts:1\n"], ["nsswitch.conf", "hosts: files dns\n"], ["hosts", "127.0.0.1 localhost\n"]]) fs.writeFileSync(path.join(parent, name), text);
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  const page = brandPage("rgb(255,0,0)").replace("</body>", `<script>
+    (async () => {
+      const peer = new RTCPeerConnection();
+      peer.createDataChannel("x");
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await peer.setRemoteDescription({ type: "answer", sdp: offer.sdp.replace(/a=ice-ufrag:.*\\r\\n/, "a=ice-ufrag:abcd\\r\\n").replace(/a=ice-pwd:.*\\r\\n/, "a=ice-pwd:abcdefghijklmnopqrstuvwx\\r\\n").replace(/a=setup:actpass/, "a=setup:active") });
+      for (const candidate of ["candidate:1 1 udp 2122260223 c0ffee00-${word}.local 6001 typ host", "candidate:2 1 udp 2122260223 udp-${word}.test 6003 typ host", "candidate:3 1 tcp 1518280447 tcp-${word}.test 6004 typ host tcptype passive"]) {
+        await peer.addIceCandidate({ candidate, sdpMid: "0", sdpMLineIndex: 0 }).catch(() => {});
+      }
+    })();
+  </script></body>`);
+  fs.writeFileSync(
+    start,
+    [
+      // Node.js loads a file given with --require in each of the kit's
+      // worker threads too, where these servers would find their addresses
+      // taken and end the kit's read of the page with an error, and the
+      // socket would join the group of multicast DNS once more: the file
+      // does its work in the kit's main thread alone.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const dgram = require("dgram");`,
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const keep = (line) => fs.appendFileSync(${JSON.stringify(asked)}, line + "\\n");`,
+      `const nameOf = (message) => {`,
+      `  let at = 12;`,
+      `  const labels = [];`,
+      `  while (at < message.length && message[at] && message[at] < 64) {`,
+      `    labels.push(message.subarray(at + 1, at + 1 + message[at]).toString("latin1"));`,
+      `    at += message[at] + 1;`,
+      `  }`,
+      `  return labels.join(".").toLowerCase();`,
+      `};`,
+      `const dns = dgram.createSocket("udp4");`,
+      `dns.on("message", (query) => keep("dns " + nameOf(query)));`,
+      `dns.bind(53, "127.0.0.1", () => dns.unref());`,
+      `const group = dgram.createSocket({ type: "udp4", reuseAddr: true });`,
+      `group.on("message", (message) => keep("mdns " + nameOf(message)));`,
+      `group.bind(5353, () => {`,
+      `  group.addMembership("224.0.0.251", "192.168.77.2");`,
+      `  group.setMulticastInterface("192.168.77.2");`,
+      `  group.setMulticastLoopback(true);`,
+      `  const query = Buffer.concat([Buffer.from([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]), ...["probe-${word}", "local"].map((label) => Buffer.concat([Buffer.from([label.length]), Buffer.from(label)])), Buffer.from([0, 0, 1, 0, 1])]);`,
+      `  group.send(query, 5353, "224.0.0.251");`,
+      `  group.unref();`,
+      `});`,
+      `// Who else joins the group on that network while the run lasts.`,
+      `const members = setInterval(() => {`,
+      `  let at = "";`,
+      `  for (const line of fs.readFileSync("/proc/net/igmp", "utf8").split("\\n")) {`,
+      `    const device = /^\\d+\\s+(\\S+)/.exec(line);`,
+      `    if (device) at = device[1];`,
+      `    const joined = /^\\s+FB0000E0\\s+(\\d+)/.exec(line);`,
+      `    if (joined && at === "dm0" && Number(joined[1]) > 1) keep("joined " + joined[1]);`,
+      `  }`,
+      `}, 50);`,
+      `members.unref();`,
+      `const page = ${JSON.stringify(page)};`,
+      `const site = http.createServer((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = [
+    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 multicast on && ip link set dm0 up && ip addr add 192.168.77.2/24 dev dm0 && ip route add 224.0.0.0/4 dev dm0",
+    'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    "for dir in /run/avahi-daemon /run/systemd/resolve; do if [ -d $dir ]; then mount -t tmpfs none $dir || exit 1; fi; done",
+    'exec "$2" --require "$3" "$4" http://127.0.0.1:8000/ --no-stores --out "$5"',
+  ].join(" && ");
+  const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /^Saved the Acme brand kit to /);
+  const lines = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
+  // The test's own question came back, so one of the browser's would have.
+  assert.ok(lines.includes(`mdns probe-${word}.local`), lines.join("\n"));
+  assert.deepEqual(lines.filter((line) => line.includes(word) && line !== `mdns probe-${word}.local`), [], "the browser asked for none of the page's names");
+  assert.deepEqual(lines.filter((line) => line.startsWith("joined ")), [], "nothing but the test joined the group of multicast DNS");
 });
 
 // What a program of the machine would be started for, recorded: stand-ins

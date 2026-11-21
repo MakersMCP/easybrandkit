@@ -3,11 +3,11 @@
 // The proxy every request of a run's browser goes through: a small HTTP
 // proxy of the kit's own on 127.0.0.1, started before the browser, which is
 // started with it as its proxy for every address, this machine's own among
-// them, and with its own DNS over HTTPS off (see chrome.js launch). So the
-// browser looks no name up and connects nowhere itself, unless a Chrome
-// policy turns its DNS over HTTPS on again: whatever asks for an address, a
-// page, a frame, a picture,
-// a script, the data a page fetches, a WebSocket, a service worker, a
+// them, with every name failing in its own lookup and with its own DNS over
+// HTTPS off (see chrome.js launch). So the browser looks no name up and
+// connects nowhere itself, unless a Chrome policy turns its DNS over HTTPS
+// on again: whatever asks for an address, a page, a frame, a picture, a
+// script, the data a page fetches, a WebSocket, a service worker, a
 // prefetch, the fetch of a site certificate's issuer or a page's WebAuthn
 // check, the request comes here. It takes plain http requests, which the
 // browser sends with the whole address, and CONNECT tunnels, which it opens
