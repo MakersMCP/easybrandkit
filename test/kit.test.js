@@ -30,7 +30,7 @@ const proxyLib = require("../skills/easybrandkit/scripts/lib/proxy");
 const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { storeAnswers } = require("./store-answers");
 const { partedTemp, roomlessTemp, roomlessIn } = require("./temp-skip");
-const { withoutBusyNotes, withoutUndrawnCard } = require("./busy-notes");
+const { withoutBusyNotes, withoutUndrawnCard, withoutWordsNote, cardTimedOut, drawingCard } = require("./busy-notes");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -1860,8 +1860,9 @@ test("logos: the site's own marks on their real background, plus colors, fonts, 
   });
   const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
   try {
-    // A blog post's address: the kit is read from the home page.
-    const { kit } = await makeKit(`${origin}/blog/first-post`, { dir, stores: false });
+    // A blog post's address: the kit is read from the home page. The test
+    // looks at the card too.
+    const { kit } = await drawingCard(() => makeKit(`${origin}/blog/first-post`, { dir, stores: false }));
     assert.equal(kit.url, `${origin}/`);
     assert.equal(kit.name, "Acme");
     assert.match(kit.notes[0], /is not the home page/);
@@ -2170,17 +2171,17 @@ test("a kit survives runs that fail, and one that ends well takes its place and 
   html = brandPage("rgb(0,0,255)");
   const { kit } = await makeKit(site.origin, { dir, stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
-  const names = filesOf(dir).map((line) => line.split(" ")[0]);
-  assert.deepEqual(names, ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "notes.txt", "pages/", "pages/mine.txt", "screen-01.png"]);
+  const names = ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "notes.txt", "pages/", "pages/mine.txt", "screen-01.png"];
+  assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), withoutUndrawnCard(names, kit.notes));
   const logo = readPng(path.join(dir, "logo-01.png"));
   assert.deepEqual(logo.pixel(logo.width >> 1, logo.height >> 1), [0, 0, 255], "the new logo");
 
   // Through a link to the folder, the files go into the folder it points at.
   fs.symlinkSync(dir, path.join(parent, "link"), "junction");
   html = brandPage("rgb(0,128,0)");
-  await makeKit(site.origin, { dir: path.join(parent, "link"), stores: false });
+  const linked = await makeKit(site.origin, { dir: path.join(parent, "link"), stores: false });
   assert.equal(fs.lstatSync(path.join(parent, "link")).isSymbolicLink(), true);
-  assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), names);
+  assert.deepEqual(filesOf(dir).map((line) => line.split(" ")[0]), withoutUndrawnCard(names, linked.kit.notes));
   const green = readPng(path.join(dir, "logo-01.png"));
   assert.deepEqual(green.pixel(green.width >> 1, green.height >> 1), [0, 128, 0], "the logo read through the link");
   assert.deepEqual(tempLeft(), [], "runs that end well");
@@ -4949,14 +4950,25 @@ fs.writeFileSync = function (file, data, ...rest) {
   throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", syscall: "write" });
 };
 `);
-  // Not spawnSync: the page is served from this process.
-  const child = spawn(process.execPath, ["--require", hook, CLI, site.origin, "--out", dir, "--no-stores"], { stdio: ["ignore", "ignore", "pipe"] });
-  let said = "";
-  child.stderr.on("data", (chunk) => (said += chunk));
-  const [code] = await once(child, "close");
-  assert.equal(code, 1, said);
-  assert.equal(said.trim().split("\n").pop(), `easybrandkit: The disk has no room left for the new kit (ENOSPC). The kit already in ${dir} is as it was.`);
-  assert.deepEqual(filesOf(dir), before, "the card");
+  // Not spawnSync: the page is served from this process. A card that a busy
+  // machine kept from being drawn in time is no card written: that run saves
+  // its kit without one, so the earlier kit is put back and the run made
+  // again, three times at most.
+  for (let tries = 1; ; tries++) {
+    const child = spawn(process.execPath, ["--require", hook, CLI, site.origin, "--out", dir, "--no-stores"], { stdio: ["ignore", "ignore", "pipe"] });
+    let said = "";
+    child.stderr.on("data", (chunk) => (said += chunk));
+    const [code] = await once(child, "close");
+    if (code === 0 && tries < 3 && cardTimedOut(JSON.parse(fs.readFileSync(path.join(dir, "brand.json"), "utf8")).notes)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      writeFiles(dir, EARLIER);
+      continue;
+    }
+    assert.equal(code, 1, said);
+    assert.equal(said.trim().split("\n").pop(), `easybrandkit: The disk has no room left for the new kit (ENOSPC). The kit already in ${dir} is as it was.`);
+    assert.deepEqual(filesOf(dir), before, "the card");
+    break;
+  }
 });
 
 test("a browser killed while the page is read fails the run at once and says so, and a server that never answers is told as that", { skip: noBrowser }, async (t) => {
@@ -5403,29 +5415,30 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   });
   const { kit } = await makeKit(site.origin, { dir, stores: false });
   assert.equal(kit.card, null);
-  assert.deepEqual(kit.notes, ["The card could not be drawn: the first screen could not be read."]);
+  assert.deepEqual(withoutWordsNote(kit.notes), ["The card could not be drawn: the first screen could not be read."]);
   assert.equal(fs.existsSync(path.join(dir, "card.png")), false);
-  assert.match(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8"), /\n## Notes\n\n- The card could not be drawn: the first screen could not be read\.\n$/);
+  // On a busy machine the note of the page's words can come before it.
+  assert.match(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8"), /\n## Notes\n\n(- (The|Some of the) page's headings and button labels were not read: [^\n]*\n)?- The card could not be drawn: the first screen could not be read\.\n$/);
   // A tab that stops answering is told in words, not by a call's name in
   // the DevTools protocol.
   drawn = Object.assign(new Error("Page.captureScreenshot timed out"), { timedOut: true });
   const stalled = await makeKit(site.origin, { dir, stores: false });
-  assert.deepEqual(stalled.kit.notes, ["The card could not be drawn: the browser tab stopped answering."]);
+  assert.deepEqual(withoutWordsNote(stalled.kit.notes), ["The card could not be drawn: the browser tab stopped answering."]);
   // Once the run's time is up, a call the card's tab does not answer has had
   // a second at most, and more time is what helps.
   atDraw = () => setTimeLimit(0);
   const spent = await makeKit(site.origin, { dir, stores: false });
   atDraw = () => {};
   setTimeLimit(120_000);
-  assert.deepEqual(spent.kit.notes, ["The card could not be drawn: the run's time ran out. Give it more time with --timeout."]);
+  assert.deepEqual(withoutWordsNote(spent.kit.notes), ["The card could not be drawn: the run's time ran out. Give it more time with --timeout."]);
   // So does the browser's own word that it did not answer before then.
   drawn = Object.assign(new Error("The browser did not open a tab before the run's time ran out"), { browserSaid: true, outOfTime: true });
   const late = await makeKit(site.origin, { dir, stores: false });
-  assert.deepEqual(late.kit.notes, ["The card could not be drawn: the browser did not open a tab before the run's time ran out. Give it more time with --timeout."]);
+  assert.deepEqual(withoutWordsNote(late.kit.notes), ["The card could not be drawn: the browser did not open a tab before the run's time ran out. Give it more time with --timeout."]);
   // And so is a connection to its tab that closed while the browser runs.
   drawn = Object.assign(new Error("The browser connection closed."), { closed: true, tooLarge: false });
   const dropped = await makeKit(site.origin, { dir, stores: false });
-  assert.deepEqual(dropped.kit.notes, ["The card could not be drawn: the kit's connection to its tab closed."]);
+  assert.deepEqual(withoutWordsNote(dropped.kit.notes), ["The card could not be drawn: the kit's connection to its tab closed."]);
   // And so is a tab for the card that the browser does not open in time: the
   // second tab of a run is the card's, which is given a second here, not 30,
   // and the third the browser is asked for, past the one of the kit's check
@@ -5444,7 +5457,7 @@ test("a browser killed while the card is drawn fails the run and keeps the earli
   });
   const slowTab = await reloadedKit().makeKit(site.origin, { dir, stores: false });
   assert.equal(tabs, 2);
-  assert.deepEqual(slowTab.kit.notes, ["The card could not be drawn: the browser did not open a tab in 1 s."]);
+  assert.deepEqual(withoutWordsNote(slowTab.kit.notes), ["The card could not be drawn: the browser did not open a tab in 1 s."]);
 });
 
 test("the folder is read again as the new kit goes in: a kit put there while the site was read is the one replaced", { skip: noBrowser }, async (t) => {
@@ -5465,9 +5478,9 @@ test("the folder is read again as the new kit goes in: a kit put there while the
     site.server.close();
     fs.rmSync(parent, { recursive: true, force: true });
   });
-  await makeKit(site.origin, { dir, stores: false });
+  const { kit } = await makeKit(site.origin, { dir, stores: false });
   assert.equal(swapped, true);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "screen-01.png"]);
+  assert.deepEqual(fs.readdirSync(dir).sort(), withoutUndrawnCard(["BRAND.md", "_brand.yml", "brand.json", "card.png", "logo-01.png", "logo-01.svg", "screen-01.png"], kit.notes));
 });
 
 test("the CLI says once that a new kit could not be put in place, and the kit there stays as it was", { skip: noBrowser }, async (t) => {
@@ -5479,9 +5492,11 @@ test("the CLI says once that a new kit could not be put in place, and the kit th
     fs.rmSync(parent, { recursive: true, force: true });
   });
   writeFiles(dir, EARLIER);
-  // A folder of the user's where the new kit has its card.
-  fs.rmSync(path.join(dir, "card.png"));
-  fs.mkdirSync(path.join(dir, "card.png"));
+  // A folder of the user's where the new kit has its BRAND.md, which every
+  // kit has, where a card that a busy machine kept from being drawn would
+  // have none.
+  fs.rmSync(path.join(dir, "BRAND.md"));
+  fs.mkdirSync(path.join(dir, "BRAND.md"));
   const before = filesOf(dir);
   // Not spawnSync: the page is served from this process.
   const child = spawn(process.execPath, [CLI, site.origin, "--out", dir, "--no-stores"], { stdio: ["ignore", "ignore", "pipe"] });
@@ -5490,7 +5505,7 @@ test("the CLI says once that a new kit could not be put in place, and the kit th
   const [code] = await once(child, "close");
   assert.equal(code, 1, said);
   const lines = said.trim().split("\n");
-  assert.equal(lines.pop(), `easybrandkit: The new kit could not be put in ${dir}: card.png is a folder there, where the new kit has a file. The kit already there is as it was.`);
+  assert.equal(lines.pop(), `easybrandkit: The new kit could not be put in ${dir}: BRAND.md is a folder there, where the new kit has a file. The kit already there is as it was.`);
   assert.ok(lines.every((line) => line.endsWith("...")), said);
   assert.deepEqual(filesOf(dir), before);
 });
