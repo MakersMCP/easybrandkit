@@ -3176,6 +3176,56 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for the address given before the bro
   assert.equal(kit.url, "http://brand.test/");
 });
 
+test("MAKERSMCP_REFUSE_ADDRESSES that refuses 127.0.0.1 and ::1 refuses the address given as 0.0.0.0 or ::, in every way of writing them and as a name found there, before anything is opened", async (t) => {
+  // A program on each of this machine's loopback addresses, which a
+  // connection to 0.0.0.0 or :: reaches.
+  const reached = [];
+  const site = await serve((req, res) => {
+    reached.push(`127.0.0.1 ${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  t.after(() => site.server.close());
+  const port = new URL(site.origin).port;
+  const six = http.createServer((req, res) => {
+    reached.push(`::1 ${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const sixPort = await new Promise((resolve) => {
+    six.once("error", () => resolve(0));
+    six.listen(0, "::1", () => resolve(six.address().port));
+  });
+  t.after(() => six.close());
+  for (const server of [site.server, six]) server.on("connection", () => reached.push("connection"));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // No browser to start: a refusal that came once one had started would be
+  // told as that.
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "127.0.0.1,::1", CHROME_PATH: path.join(parent, "no-chrome") });
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (host === "zero.test") return [{ address: "0.0.0.0", family: 4 }];
+    if (host === "zero6.test") return [{ address: "::", family: 6 }];
+    if (host === "zeromap.test") return [{ address: "::ffff:0.0.0.0", family: 6 }];
+    throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const cases = [
+    [`http://0:${port}/`, `http://0.0.0.0:${port}/`, "127.0.0.1"],
+    [`http://0.0.0.0:${port}/`, `http://0.0.0.0:${port}/`, "127.0.0.1"],
+    [`http://0x0:${port}/`, `http://0.0.0.0:${port}/`, "127.0.0.1"],
+    [`http://[::ffff:0.0.0.0]:${port}/`, `http://[::ffff:0:0]:${port}/`, "127.0.0.1"],
+    [`http://zero.test:${port}/`, `http://zero.test:${port}/`, "127.0.0.1"],
+    [`http://zeromap.test:${port}/`, `http://zeromap.test:${port}/`, "127.0.0.1"],
+  ];
+  if (sixPort) cases.push([`http://[::]:${sixPort}/`, `http://[::]:${sixPort}/`, "::1"], [`http://[0:0:0:0:0:0:0:0]:${sixPort}/`, `http://[::]:${sixPort}/`, "::1"], [`http://zero6.test:${sixPort}/`, `http://zero6.test:${sixPort}/`, "::1"]);
+  for (const [given, asked, at] of cases) {
+    await assert.rejects(makeKit(given, { dir, stores: false }), (err) => err.message === `${asked} is at ${at}, an address MAKERSMCP_REFUSE_ADDRESSES refuses, so no kit was made.` && !err.earlierKit, given);
+  }
+  assert.deepEqual(reached, [], "nothing reached this machine's loopback");
+  assert.deepEqual(filesOf(dir), before);
+});
+
 test("MAKERSMCP_REFUSE_ADDRESSES holds where the kit's own lookup finds the address given, and the browser's own lookup, which finds it elsewhere, is never used", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const trap = await counting(t);

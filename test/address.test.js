@@ -410,6 +410,56 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for every address a run opens, the o
   assert.equal(await guardFor("https://gone.acme.com/").judge("https://gone.acme.com/"), "");
 });
 
+// A connection to 0.0.0.0 reaches 127.0.0.1, and one to :: reaches ::1, so
+// a setting that refuses those refuses each way of writing 0.0.0.0 and ::,
+// and a name found at one of them, also as the address given. Judged as
+// written, each was opened, and the program on this machine's loopback at
+// the port given was read.
+test("MAKERSMCP_REFUSE_ADDRESSES that refuses 127.0.0.1 or ::1 refuses 0.0.0.0 and ::, which a connection takes for them, in every form and for a name found there", async (t) => {
+  const four = refusedAddresses("127.0.0.1");
+  const six = refusedAddresses("::1");
+  // Each IPv6 form that holds 0.0.0.0 is judged by it, as every such form is
+  // judged by the IPv4 address it holds.
+  for (const address of ["0.0.0.0", "::ffff:0.0.0.0", "::ffff:0:0", "[::ffff:0:0]", "::ffff:0:0:0", "2002::", "64:ff9b::"]) {
+    assert.equal(four.match(address), "127.0.0.1", address);
+    assert.equal(six.match(address), "", address);
+  }
+  for (const address of ["::", "0:0:0:0:0:0:0:0", "[::]"]) {
+    assert.equal(six.match(address), "::1", address);
+    assert.equal(four.match(address), "", address);
+  }
+  // A range that holds 127.0.0.1 does as well, and a list that names
+  // 0.0.0.0 itself names it as that; any other address of 0.0.0.0/8 reaches
+  // no program of this machine.
+  assert.equal(refusedAddresses("127.0.0.0/8").match("0.0.0.0"), "127.0.0.1");
+  assert.equal(refusedAddresses("0.0.0.0/8").match("0.0.0.0"), "0.0.0.0");
+  assert.equal(four.match("0.1.2.3"), "");
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (host === "zero.test") return [{ address: "0.0.0.0", family: 4 }];
+    if (host === "zero6.test") return [{ address: "::", family: 6 }];
+    if (host === "zeromap.test") return [{ address: "::ffff:0.0.0.0", family: 6 }];
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  const refused = refusedAddresses("127.0.0.1,::1");
+  const refuses = (address) => `is at ${address}, an address MAKERSMCP_REFUSE_ADDRESSES refuses`;
+  for (const [raw, at] of [
+    ["http://0:3000/", "127.0.0.1"],
+    ["http://0.0.0.0:3000/", "127.0.0.1"],
+    ["http://0x0:3000/", "127.0.0.1"],
+    ["http://0.0:3000/", "127.0.0.1"],
+    ["http://[::ffff:0.0.0.0]:3000/", "127.0.0.1"],
+    ["http://[::]:3000/", "::1"],
+    ["http://[0:0:0:0:0:0:0:0]:3000/", "::1"],
+    ["http://[::0.0.0.0]:3000/", "::1"],
+    ["http://zero.test:3000/", "127.0.0.1"],
+    ["http://zero6.test:3000/", "::1"],
+    ["http://zeromap.test:3000/", "127.0.0.1"],
+  ]) {
+    assert.equal(await guardFor(raw, { refused }).judge(raw), refuses(at), raw);
+    assert.deepEqual(await guardFor(raw, { refused }).route(raw), { why: refuses(at), addresses: [] }, raw);
+  }
+});
+
 test("a request the kit makes itself connects only to an address the rule took, by the one lookup the rule judged, which asks the DNS once a run", async (t) => {
   // A name whose next answer would be this machine: the lookup the rule
   // judged by is the only one, so the connection never gets that answer.

@@ -282,8 +282,16 @@ const SETTING = "MAKERSMCP_REFUSE_ADDRESSES";
 // site, with words that blamed each site's address, and a host can copy
 // such a range from a firewall's list of the IPv6 ranges it refuses whole.
 //
+// A connection to 0.0.0.0 goes to 127.0.0.1 and one to :: to ::1 (see
+// ownName), so the list judges each as the address it reaches as well: a
+// list that refuses 127.0.0.1 refuses 0.0.0.0 and every IPv6 form of it, as
+// ::ffff:0.0.0.0, and one that refuses ::1 refuses ::, written so or found
+// for a name. Judged as written, each was opened as the address given, and
+// the program on this machine's loopback at its port was read.
+//
 // match(address) gives the address that the list refuses for an IP address,
-// the IPv4 address it holds or else it, or "".
+// the IPv4 address it holds or else it, or the loopback address it reaches,
+// or "".
 function refusedAddresses(value = process.env[SETTING]) {
   const v4 = new net.BlockList();
   const v6 = new net.BlockList();
@@ -316,11 +324,13 @@ function refusedAddresses(value = process.env[SETTING]) {
       if (!size) return "";
       const address = plainIp(raw);
       const family = net.isIP(address);
-      if (family === 4) return v4.check(address, "ipv4") ? address : "";
+      const four = (one) => (v4.check(one, "ipv4") ? one : one === "0.0.0.0" && v4.check("127.0.0.1", "ipv4") ? "127.0.0.1" : "");
+      if (family === 4) return four(address);
       const groups = family === 6 ? groupsOf(address) : null;
       if (!groups) return "";
-      for (const held of [heldIpv4(address), ...teredoIpv4(groups)]) if (held && v4.check(held, "ipv4")) return held;
+      for (const held of [heldIpv4(address), ...teredoIpv4(groups)]) if (held && four(held)) return four(held);
       if (v6.check(address, "ipv6") || (fours && localNat64(groups))) return address;
+      if (groups.every((group) => group === 0) && v6.check("::1", "ipv6")) return "::1";
       return "";
     },
   };
