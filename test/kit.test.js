@@ -3934,6 +3934,34 @@ test("a local site under development given as http://localhost:<port> is read th
   assert.ok(net.isIP("127.0.0.1"));
 });
 
+test("a local site whose page takes its styles and its logo from another port of this machine, as a dev server of assets serves them, is read without them, with no broken picture for a logo, and the kit's notes name what was not reached", { skip: noBrowser }, async (t) => {
+  // The assets on a port of their own, which counts what it is asked, as
+  // Vite's dev server serves a backend's styles and pictures.
+  const assets = [];
+  const other = await serve((req, res) => {
+    assets.push(req.url);
+    if (req.url.endsWith(".css")) return res.writeHead(200, { "content-type": "text/css" }).end("body { background: #073b4c; color: #ffd166; font-family: Georgia; }");
+    res.writeHead(200, { "content-type": "image/svg+xml" }).end(svg("#ffd166", 300, 90));
+  });
+  const at = `localhost:${new URL(other.origin).port}`;
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><html><head><title>Brightside</title><link rel="stylesheet" href="http://${at}/app.css"></head><body><header><a href="/"><img src="http://${at}/logo.svg" alt="Brightside logo"></a></header><main><h1>Brightside</h1><p>${"Words of the page. ".repeat(40)}</p></main></body></html>`));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    other.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const given = `http://localhost:${new URL(site.origin).port}/`;
+  const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos, [], "the picture that did not load is no logo");
+  assert.equal(fs.existsSync(path.join(parent, "kit", "logo-01.png")), false);
+  const port = new URL(other.origin).port;
+  // The browser asks for the two in either order.
+  assert.equal(kit.notes[0], "No logo was found on the page itself.");
+  assert.deepEqual(kit.notes.slice(1).sort(), ["app.css", "logo.svg"].map((file) => `While easybrandkit read ${given}, the browser asked for http://${at}/${file}, which is on port ${port}, not 80 or 443: it was not reached.`));
+  assert.deepEqual(assets, [], "the other port was asked nothing");
+});
+
 test("the name of the address given is looked up by the kit's proxy, as every name: one not found is told as the browser tells it, and a site that takes no connection on either scheme as well", { skip: noBrowser }, async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
