@@ -5,6 +5,7 @@
 // and keeps, and that it connects only to the addresses the rule took.
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const test = require("node:test");
@@ -431,4 +432,82 @@ test("the owner of a connection to the proxy is read from the kernel's tables of
   for (let waited = 0; seen.length < 2 && waited < 3_000; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(seen, [process.getuid(), "gone"]);
   assert.deepEqual(proxy.refused.map(({ what }) => what), ["http://10.0.0.5/waits"]);
+});
+
+test("the owner of a connection is read from the client's own end in the kernel's tables, only on 127.0.0.1, and in the IPv6 table as well", { skip: process.platform !== "linux" && "the tables are read on Linux only" }, async (t) => {
+  // A client on port 40000 (9C40) of 127.0.0.1, connected to the proxy on
+  // port 8080 (1F90). Each end of a connection is a line of its own, with
+  // the uid of the user whose socket it is: the proxy's own end is the
+  // kit's, and the client's end another user's. A line with the same two
+  // ports on other addresses is no end of that connection.
+  const line = (local, remote, uid) => `   1: ${local} ${remote} 01 00000000:00000000 00:00000000 00000000 ${String(uid).padStart(5)}        0 4242 1 0000000000000000 20 4 30 10 -1`;
+  const head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+  let tables = {};
+  t.mock.method(fs.promises, "readFile", async (file) => {
+    if (tables[file] === undefined) throw Object.assign(new Error(`ENOENT: no such file or directory, open '${file}'`), { code: "ENOENT" });
+    return tables[file];
+  });
+  const socket = { easybrandkitPorts: { remote: 40000, local: 8080 } };
+  tables = {
+    "/proc/net/tcp": [head, line("0500000A:9C40", "0600000A:1F90", 1003), line("0100007F:1F90", "0100007F:9C40", 1001), line("0100007F:9C40", "0100007F:1F90", 1002)].join("\n"),
+  };
+  assert.equal(await wire.owner(socket), 1002);
+  // The client's end in the IPv6 table, as 127.0.0.1 mapped into IPv6.
+  tables = {
+    "/proc/net/tcp": [head, line("0100007F:1F90", "0100007F:9C40", 1001)].join("\n"),
+    "/proc/net/tcp6": [head, line("0000000000000000FFFF00000100007F:9C40", "0000000000000000FFFF00000100007F:1F90", 1004)].join("\n"),
+  };
+  assert.equal(await wire.owner(socket), 1004);
+  // No such end: gone; no table: cannot be told.
+  tables = { "/proc/net/tcp": [head, line("0100007F:1F90", "0100007F:9C40", 1001)].join("\n") };
+  assert.equal(await wire.owner(socket), "gone");
+  tables = {};
+  assert.equal(await wire.owner(socket), null);
+});
+
+test("a refusal keeps the page the kit was reading when it came, though the kit moves on to another while the owner is read", async (t) => {
+  dialHere(t);
+  const proxy = await startProxy(ruleOf(() => null));
+  t.after(() => proxy.close());
+  const own = process.getuid ? process.getuid() : null;
+  proxy.reading = "https://acme.com/";
+  t.mock.method(wire, "owner", async () => {
+    proxy.reading = "https://acme.com/pricing";
+    return own;
+  });
+  assert.equal((await viaProxy(proxy, "http://10.0.0.5/pixel.png")).status, 403);
+  assert.deepEqual(proxy.refused, [{ what: "http://10.0.0.5/pixel.png", why: "is not on the public internet", page: "https://acme.com/" }]);
+});
+
+test("a reason phrase Node.js does not write is left out, a status under 100 is kept as an answer that is not HTTP, and a browser that gives up mid-answer ends the site's request", async (t) => {
+  let heldClosed = null;
+  const site = await rawServer(t, (socket) => {
+    const path = site.heard[site.heard.length - 1].split(" ")[1];
+    if (path === "/odd-reason") return socket.write("HTTP/1.1 200 O\u0001K\r\nContent-Length: 5\r\n\r\nhello", "latin1");
+    if (path === "/odd-status") return socket.write("HTTP/1.1 099 Early\r\nContent-Length: 0\r\n\r\n", "latin1");
+    // Half of an answer, the rest held back.
+    heldClosed = once(socket, "close");
+    socket.write("HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\npart", "latin1");
+  });
+  dialHere(t, { "acme.test:80": site.port });
+  const proxy = await startProxy(ruleOf(() => ["93.184.216.34"]));
+  t.after(() => proxy.close());
+  const reason = await viaProxy(proxy, "http://acme.test/odd-reason");
+  assert.deepEqual([reason.status, reason.body], [200, "hello"]);
+  await assert.rejects(viaProxy(proxy, "http://acme.test/odd-status"), (err) => err.code === "ECONNRESET" || /socket hang up/.test(err.message));
+  assert.deepEqual(proxy.failed.map(({ key, code }) => [key, code]), [["acme.test:80", "HPE_INVALID_STATUS"]]);
+  // The browser takes the start of the answer and gives the request up:
+  // the site's connection is ended with it.
+  await new Promise((resolve) => {
+    const req = http.request({ host: "127.0.0.1", port: proxy.port, path: "http://acme.test/slow", headers: { host: "acme.test" }, agent: false }, (res) => {
+      res.once("data", () => {
+        req.destroy();
+        resolve();
+      });
+    });
+    req.on("error", () => {});
+    req.end();
+  });
+  assert.ok(heldClosed, "the site was asked for the slow answer");
+  assert.equal(await Promise.race([heldClosed.then(() => "ended"), new Promise((resolve) => setTimeout(resolve, 5_000, "still open"))]), "ended");
 });

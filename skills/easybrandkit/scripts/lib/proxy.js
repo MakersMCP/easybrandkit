@@ -315,18 +315,17 @@ function startProxy(guard) {
           return req.socket.destroy();
         }
         answer.pipe(res);
-        // An answer cut short by the site is cut short for the browser too.
+        // An answer cut short by the site, which Node.js tells as an error
+        // of the answer, is cut short for the browser too.
         answer.on("error", () => res.destroy());
-        answer.on("close", () => !answer.complete && res.destroy());
       });
       // A server that closes the connection before it answers is told by
       // the browser as an empty answer, as it would be told without the
       // proxy; one that resets it, a system error, is kept as that, and so
       // is an answer that is not HTTP as the browser reads it, which the
-      // browser is told nothing of (see chrome.js navigate). A request that
-      // was sent again has the say from then on.
+      // browser is told nothing of (see chrome.js navigate). Node.js tells a
+      // request's error once.
       one.on("error", (err) => {
-        if (one !== asked) return;
         if (answered || gone) return res.destroy();
         if (bodiless && !again && one.reusedSocket && !err.kept) return send(true);
         if (err && !err.kept && (err.syscall || /^HPE_/.test(String(err.code)))) failed(url, err);
