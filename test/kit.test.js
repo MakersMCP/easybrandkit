@@ -5181,6 +5181,20 @@ const namespaces =
   (process.platform !== "linux" && "the namespaces of Linux") ||
   (spawnSync("unshare", ["-rmn", "sh", "-c", 'ip link set lo up && mount --bind "$0" "$0"', __filename]).status !== 0 && "no user, mount and network namespace here, or no ip command");
 
+// The environment of a run whose lookups a test counts: UV_THREADPOOL_SIZE,
+// which the kit keeps when its caller sets it, is left to the kit, as a
+// number set where the suite runs would change how many names it looks up
+// at once.
+const withoutThreads = (env) => Object.fromEntries(Object.entries(env).filter(([name]) => name !== "UV_THREADPOOL_SIZE"));
+
+// Namespaces in which the browser can run as this user, with its sandbox:
+// this user mapped to itself, keeping the capabilities the namespaces give,
+// so that the network and its addresses can be set up there. Older
+// unshare, as Ubuntu 22.04's, has no way to map this user to itself.
+const ownNamespaces =
+  namespaces ||
+  (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", 'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && mount --bind "$0" "$0"', __filename]).status !== 0 && "no namespaces that keep this user, as unshare --map-current-user --keep-caps makes");
+
 test("names whose DNS gives no answer do not hold up the lookup of another name past its 5 s", { skip: namespaces }, (t) => {
   // In namespaces of its own: a network of its loopback alone, whose DNS
   // server, the test's, takes every question and answers none, as for a name
@@ -5226,7 +5240,7 @@ test("names whose DNS gives no answer do not hold up the lookup of another name 
   const cli = spawnSync("unshare", ["-rmn", "sh", "-c", script, "sh", resolv, hosts, process.execPath, start, CLI, path.join(parent, "kit")], {
     encoding: "utf8",
     timeout: 60_000,
-    env: { ...process.env, MAKERSMCP_REFUSE_ADDRESSES: "192.0.2.1", CHROME_PATH: path.join(parent, "no-chrome"), TMPDIR: parent },
+    env: { ...withoutThreads(process.env), MAKERSMCP_REFUSE_ADDRESSES: "192.0.2.1", CHROME_PATH: path.join(parent, "no-chrome"), TMPDIR: parent },
   });
   // The site's name was found at once, and the run went on to the browser;
   // the three names had no answer yet. The process ended only once the
@@ -5239,6 +5253,83 @@ test("names whose DNS gives no answer do not hold up the lookup of another name 
   const [host, found, ms] = lines[0].split(" ");
   assert.deepEqual([host, found], ["site.example", "93.184.216.34"]);
   assert.ok(Number(ms) < 1_000, `the site's name was found in ${ms} ms`);
+});
+
+test("the browser asks no DNS over HTTPS server of its own past the kit's proxy, where the system's resolver is one Chrome takes as such a provider", { skip: noBrowser || ownNamespaces }, (t) => {
+  // In namespaces of its own: a network of its loopback alone, which holds
+  // Google's public DNS addresses too, and a resolver of 8.8.8.8, which
+  // Chrome takes as a provider of DNS over HTTPS, as a machine or a
+  // container with that resolver has. A DNS server of the test's on 8.8.8.8
+  // keeps each question and answers dns.google, the provider's server, at
+  // those addresses, and on each of them a server of the test's keeps each
+  // connection to port 443. A browser that asks dns.google of the resolver
+  // and connects there does it past the kit's proxy, which looks up the
+  // names of what the browser asks for itself and connects to no port 443
+  // of this network.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-doh-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const resolv = path.join(parent, "resolv.conf");
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  fs.writeFileSync(resolv, "nameserver 8.8.8.8\noptions timeout:2 attempts:1\n");
+  fs.writeFileSync(
+    start,
+    [
+      // Node.js loads a file given with --require in each of the kit's
+      // worker threads too, where these servers would find their addresses
+      // taken and end the kit's read of the page with an error: the file
+      // does its work in the kit's main thread alone.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const dgram = require("dgram");`,
+      `const net = require("net");`,
+      `const http = require("http");`,
+      `const fs = require("fs");`,
+      `const keep = (line) => fs.appendFileSync(${JSON.stringify(asked)}, line + "\\n");`,
+      `const dns = dgram.createSocket("udp4");`,
+      `dns.on("message", (query, from) => {`,
+      `  let at = 12;`,
+      `  const labels = [];`,
+      `  while (at < query.length && query[at]) {`,
+      `    labels.push(query.subarray(at + 1, at + 1 + query[at]).toString());`,
+      `    at += query[at] + 1;`,
+      `  }`,
+      `  const name = labels.join(".").toLowerCase();`,
+      `  const type = query.readUInt16BE(at + 1);`,
+      `  keep("dns " + name);`,
+      `  if (name !== "dns.google" || (type !== 1 && type !== 28)) return;`,
+      `  const head = Buffer.from(query.subarray(0, 12));`,
+      `  head.writeUInt16BE(0x8180, 2);`,
+      `  head.writeUInt16BE(1, 6);`,
+      `  const data = type === 1 ? Buffer.from([8, 8, 8, 8]) : Buffer.from("20014860486000000000000000008888", "hex");`,
+      `  const record = Buffer.alloc(12);`,
+      `  record.writeUInt16BE(0xc00c, 0);`,
+      `  record.writeUInt16BE(type, 2);`,
+      `  record.writeUInt16BE(1, 4);`,
+      `  record.writeUInt16BE(data.length, 10);`,
+      `  dns.send(Buffer.concat([head, query.subarray(12, at + 5), record, data]), from.port, from.address);`,
+      `});`,
+      `dns.bind(53, "8.8.8.8", () => dns.unref());`,
+      `for (const host of ["8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"]) {`,
+      `  const server = net.createServer((socket) => {`,
+      `    keep("tcp " + host);`,
+      `    socket.on("error", () => {});`,
+      `    socket.destroy();`,
+      `  });`,
+      `  server.listen(443, host, () => server.unref());`,
+      `}`,
+      `const page = ${JSON.stringify(brandPage("rgb(255,0,0)"))};`,
+      `const site = http.createServer((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = `ip link set lo up && ip addr add 8.8.8.8/32 dev lo && ip addr add 8.8.4.4/32 dev lo && ip -6 addr add 2001:4860:4860::8888/128 dev lo && ip -6 addr add 2001:4860:4860::8844/128 dev lo && mount --bind "$1" /etc/resolv.conf && exec "$2" --require "$3" "$4" http://127.0.0.1:8000/ --no-stores --out "$5"`;
+  const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", resolv, process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /^Saved the Acme brand kit to /);
+  const lines = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
+  assert.deepEqual(lines.filter((line) => line === "dns dns.google"), [], "the browser asked the resolver for no server of DNS over HTTPS");
+  assert.deepEqual(lines.filter((line) => line.startsWith("tcp ")), [], "nothing connected to port 443 of this network");
 });
 
 // What a program of the machine would be started for, recorded: stand-ins

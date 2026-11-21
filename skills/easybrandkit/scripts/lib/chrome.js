@@ -5,7 +5,8 @@
 // protocol through a pipe of its own. It opens no port, so no other program
 // on the machine, another user's run among them, can reach it. Every
 // request it makes goes through the kit's own proxy (see proxy.js), which
-// judges it by the run's rule. Nothing is downloaded.
+// judges it by the run's rule, unless a Chrome policy turns on the DNS over
+// HTTPS the kit turns off (see launch). Nothing is downloaded.
 
 const fs = require("fs");
 const os = require("os");
@@ -356,7 +357,7 @@ async function launch({ width, height }, { guard = null } = {}) {
       // Too short of files to list it.
     }
     const stands = path.join(profile, "stand-ins");
-    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "easybrandkit-output"), ...HANDLERS.map((name) => path.join(stands, name))]) {
+    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "Local State"), path.join(profile, "easybrandkit-output"), ...HANDLERS.map((name) => path.join(stands, name))]) {
       try {
         fs.unlinkSync(file);
       } catch {
@@ -399,6 +400,20 @@ async function launch({ width, height }, { guard = null } = {}) {
   } catch (err) {
     // For anything but no room, the refusal still holds.
     if (NO_ROOM.has(err.code)) throw room(err, preferences);
+  }
+  // The browser asks no DNS over HTTPS server of its own (dns_over_https.mode
+  // off, in its Local State, where Chrome keeps it): with its default, where
+  // the system's resolver is one Chrome takes as a provider of DNS over
+  // HTTPS, as 8.8.8.8, 1.1.1.1 or 9.9.9.9 are, it asked the resolver for
+  // that provider's server, as dns.google, and connected to it on port 443
+  // itself, as Chrome sends what it asks such a server past any proxy, the
+  // kit's too. No page chooses that server. A Chrome policy
+  // (DnsOverHttpsMode) can turn it on again, which the kit cannot tell.
+  const localState = path.join(profile, "Local State");
+  try {
+    fs.writeFileSync(localState, JSON.stringify({ dns_over_https: { mode: "off" } }));
+  } catch (err) {
+    if (NO_ROOM.has(err.code)) throw room(err, localState);
   }
   // Chrome on Linux has its crash handler write the reports of its processes
   // into the user's own browser's folder (~/.config/google-chrome/Crash

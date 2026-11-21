@@ -71,10 +71,12 @@ broken punycode (xn--a), which the browser reads.
 With --named-by, the site given is such an address too. Every request the
 browser makes, a page's pictures, scripts and data and the browser's own
 among them, goes through a proxy of the kit's own on 127.0.0.1, which holds
-it to the same rule, so the browser needs to connect to 127.0.0.1; a browser
-that sends one past it is not used. MAKERSMCP_REFUSE_ADDRESSES, a comma list
-of IP addresses and ranges such as 10.0.0.0/8, refuses those for every
-address opened and every request made, the one given included.
+it to the same rule, so the browser needs to connect to 127.0.0.1. A browser
+that sends its requests past it is not used, but for one whose DNS over
+HTTPS a Chrome policy turns on, which the README names.
+MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and ranges such as
+10.0.0.0/8, refuses those for every address opened and every request made,
+the one given included.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On
