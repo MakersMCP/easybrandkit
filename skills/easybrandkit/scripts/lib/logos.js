@@ -1208,4 +1208,4 @@ function groundOf(png, band, sides = { top: true, right: true, bottom: true, lef
   return { hex: "#" + middle.map((v) => v.toString(16).padStart(2, "0")).join(""), solid: near >= samples.length * 0.9 };
 }
 
-module.exports = { findLogos, readSnapshot, captureLogos, saveVector, readWords, brandLink, brandTokens, tagPng, logoInk, groundOf, CHALLENGE_TITLE };
+module.exports = { findLogos, readSnapshot, captureLogos, saveVector, readWords, brandLink, brandTokens, tagPng, logoInk, groundOf, CHALLENGE_TITLE, LOADED };

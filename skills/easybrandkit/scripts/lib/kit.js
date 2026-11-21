@@ -697,7 +697,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     const plain = removed && err.syscall ? new Error(removed.said) : toldPlainly(err, run);
     // The address given, or the page read in its place, that could not be
     // reached, as on a network that reaches the web only through a proxy.
-    if (plain === err && err.pageFailed && bare && NOT_TLS.test(err.pageFailed) && err.message.startsWith(`Could not open ${asked}:`)) plain.message = readAsHttps(plain.message, asked);
+    if (plain === err && err.pageFailed && bare && NOT_TLS.test(err.pageFailed)) plain.message = readAsHttps(plain.message, asked);
     if (plain === err && err.pageFailed && UNREACHED.test(err.pageFailed) && !local) plain.message = notThroughProxy(plain.message, true);
     // For the CLI, which says that an earlier kit is as it was. saveRun's
     // own errors say what the folder holds.

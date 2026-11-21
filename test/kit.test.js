@@ -19,7 +19,7 @@ const test = require("node:test");
 const { makeKit, normalizeUrl, homePageOf, siteOfListing, prepareDir, brandName } = require("../skills/easybrandkit/scripts/lib/kit");
 const { checkDir } = require("../skills/easybrandkit/scripts/lib/folder");
 const { findChrome, launch, openPage, browserWait, killBrowsers, removeTemps, pipeOf, busPath, proxyNotes } = require("../skills/easybrandkit/scripts/lib/chrome");
-const { groundOf, saveVector, readWords } = require("../skills/easybrandkit/scripts/lib/logos");
+const { groundOf, saveVector, readWords, LOADED } = require("../skills/easybrandkit/scripts/lib/logos");
 const { waitForContent, hideOverlays } = require("../skills/easybrandkit/scripts/lib/page");
 const { startRun, discardRun } = require("../skills/easybrandkit/scripts/lib/run");
 const { noControls, plainText, noEndSlashes } = require("../skills/easybrandkit/scripts/lib/text");
@@ -4043,6 +4043,15 @@ test("a local site whose page takes its styles and its logo from another port of
   assert.deepEqual(assets, [], "the other port was asked nothing");
 });
 
+test("a picture whose load has failed shows no logo, and one still loading is taken as it stands", () => {
+  // The function the kit asks an <img> mark in its own world (see
+  // logos.js pictureShown), on what the browser says of the picture.
+  const shown = (picture) => new Function(`return (${LOADED})`)().call(picture);
+  assert.equal(shown({ complete: true, naturalWidth: 0 }), false, "a picture the browser could not load or draw");
+  assert.equal(shown({ complete: true, naturalWidth: 120 }), true);
+  assert.equal(shown({ complete: false, naturalWidth: 0 }), true, "a picture still loading");
+});
+
 test("an address given with no scheme is read as https, and when that fails as a site that speaks plain http makes it fail, the last line says to give it with http://", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
@@ -4139,7 +4148,7 @@ test("a proxy that HTTPS_PROXY or another such setting names is not used, and a 
   const settings = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"];
   setEnv(t, Object.fromEntries(settings.map((name) => [name, undefined])));
   t.mock.method(dns.promises, "lookup", async (host) => {
-    if (host === "gone.test") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.test"), { code: "ENOTFOUND" });
+    if (host === "gone.test" || host === "itunes.apple.com") throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
     return [{ address: "93.184.216.34", family: 4 }];
   });
   await dialHere(t, () => 9);
@@ -4149,7 +4158,16 @@ test("a proxy that HTTPS_PROXY or another such setting names is not used, and a 
   process.env.HTTPS_PROXY = `http://user:secret@127.0.0.1:${named.address().port}`;
   await assert.rejects(makeKit("https://gone.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open https://gone.test/: net::ERR_NAME_NOT_RESOLVED. ${said("HTTPS_PROXY")}` && !err.message.includes("secret"));
   await assert.rejects(makeKit("https://closed.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open https://closed.test/: net::ERR_CONNECTION_REFUSED. ${said("HTTPS_PROXY")}`);
+  // A store listing whose store cannot be reached is told the same way.
+  const listing = "https://apps.apple.com/us/app/acme/id1234567890";
+  await assert.rejects(makeKit(listing, { dir: path.join(parent, "kit") }), (err) => err.message === `${listing} could not be read: host itunes.apple.com could not be looked up. ${said("HTTPS_PROXY")}`);
   delete process.env.HTTPS_PROXY;
+  // ALL_PROXY and all_proxy name such a proxy as well.
+  for (const name of ["ALL_PROXY", "all_proxy"]) {
+    process.env[name] = `socks5://127.0.0.1:${named.address().port}`;
+    await assert.rejects(makeKit("https://gone.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open https://gone.test/: net::ERR_NAME_NOT_RESOLVED. ${said(name)}`, name);
+    delete process.env[name];
+  }
   process.env.http_proxy = `http://127.0.0.1:${named.address().port}`;
   setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "192.0.2.1" });
   await assert.rejects(makeKit("https://gone.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `https://gone.test/ is on a host whose name could not be looked up, so no kit was made. ${said("http_proxy")}`);
