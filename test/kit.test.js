@@ -5367,6 +5367,19 @@ const namespaces =
   (process.platform !== "linux" && "the namespaces of Linux") ||
   (spawnSync("unshare", ["-rmn", "sh", "-c", 'ip link set lo up && mount --bind "$0" "$0"', __filename]).status !== 0 && "no user, mount and network namespace here, or no ip command");
 
+test("a run where the kit's proxy cannot listen on 127.0.0.1 stops before the browser starts, says why, and leaves nothing in the temp folder", { skip: namespaces }, (t) => {
+  // In a network namespace of its own whose loopback has no 127.0.0.1.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-noloop-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(parent, "temp"));
+  const script = `ip link set lo up && ip addr del 127.0.0.1/8 dev lo && exec "$1" "$2" http://127.0.0.1:9/ --no-stores --out "$3"`;
+  const cli = spawnSync("unshare", ["-rn", "sh", "-c", script, "sh", process.execPath, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 60_000, env: { ...process.env, TMPDIR: path.join(parent, "temp"), CHROME_PATH: "/bin/true" } });
+  assert.equal(cli.status, 1, cli.stderr);
+  assert.equal(cli.stderr, "easybrandkit: true was not started: easybrandkit could not start the proxy that every request of the browser goes through, on 127.0.0.1: address not available (EADDRNOTAVAIL).\n");
+  assert.deepEqual(fs.readdirSync(path.join(parent, "temp")), []);
+  assert.equal(fs.existsSync(path.join(parent, "kit")), false);
+});
+
 // The environment of a run whose lookups a test counts: UV_THREADPOOL_SIZE,
 // which the kit keeps when its caller sets it, is left to the kit, as a
 // number set where the suite runs would change how many names it looks up
