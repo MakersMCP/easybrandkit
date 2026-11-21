@@ -212,17 +212,19 @@ function bare(url) {
   }
 }
 
-// Whether a host is this machine itself, by a name or an address of its
-// own: localhost and the names under it, 127/8, ::1, and 0.0.0.0 and ::,
-// which reach this machine too, 127/8 and 0.0.0.0 also mapped into IPv6
-// (::ffff:127.0.0.1), as a URL writes such an address. The other IPv6 forms
-// of 127.0.0.1 (::7f00:1, ::ffff:0:7f00:1, 2002:7f00:1::, 64:ff9b::7f00:1)
-// are not this machine's own names, and are judged as any other address.
-function loopback(host) {
+// Whether a host is one of this machine's own names for itself: localhost
+// and the names under it, 127.0.0.1 and ::1, and 0.0.0.0 and ::, which a
+// connection on Linux takes for 127.0.0.1 and ::1, 127.0.0.1 and 0.0.0.0
+// also mapped into IPv6 (::ffff:127.0.0.1), as a URL writes such an address. The
+// rest of 127/8 is not: a program of this machine can listen on 127.0.0.2
+// or 127.0.0.53 apart from the one on 127.0.0.1. Nor are the other IPv6
+// forms of 127.0.0.1 (::7f00:1, ::ffff:0:7f00:1, 2002:7f00:1::,
+// 64:ff9b::7f00:1), which are judged as any other address.
+function ownName(host) {
   const groups = net.isIP(host) === 6 ? groupsOf(host) : null;
   const mapped = Boolean(groups) && groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
   const v4 = mapped ? heldIpv4(host) : host;
-  if (net.isIP(v4) === 4) return v4.startsWith("127.") || v4 === "0.0.0.0";
+  if (net.isIP(v4) === 4) return v4 === "127.0.0.1" || v4 === "0.0.0.0";
   if (groups) return groups.slice(0, 7).every((group) => group === 0) && groups[7] <= 1;
   return localName(v4);
 }
@@ -247,12 +249,12 @@ const WEB_PORTS = new Set(["80", "443"]);
 
 // Whether two web addresses are on the same host and port. A local site can
 // send its visitors from one name of this machine to another, as from
-// 127.0.0.1:8080 to localhost:8080, so two hosts of this machine on the same
-// port count as one.
+// 127.0.0.1:8080 to localhost:8080, so two of this machine's own names for
+// itself on the same port count as one (see ownName).
 function sameHost(a, b) {
   if (portOf(a) !== portOf(b)) return false;
   const [one, two] = [bare(a), bare(b)];
-  return one === two || (loopback(one) && loopback(two));
+  return one === two || (ownName(one) && ownName(two));
 }
 
 // ---- MAKERSMCP_REFUSE_ADDRESSES ----

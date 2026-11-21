@@ -183,6 +183,19 @@ test("an address the run was not given is opened on port 80 or 443 only, and the
   }
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8080/")), true);
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8081/")), false);
+  // 0.0.0.0 and ::, which a connection takes for 127.0.0.1 and ::1, are this
+  // machine's own names too; the rest of 127/8 is not, as another program
+  // can listen on 127.0.0.2 or 127.0.0.53 on the same port.
+  for (const raw of ["http://0.0.0.0:3000/", "http://[::]:3000/x", "http://0:3000/", "http://127.1:3000/"]) assert.equal(await local.judge(raw), "", raw);
+  for (const raw of ["http://127.0.0.2:3000/other-loopback", "http://127.0.0.53:3000/", "http://[::ffff:127.0.0.2]:3000/", "http://127.255.255.254:3000/"]) {
+    assert.equal(await local.judge(raw), "is on port 3000, not 80 or 443", raw);
+  }
+  assert.equal(await guardFor("http://localhost/").judge("http://127.0.0.2/"), "is not on the public internet");
+  const other = guardFor("http://127.0.0.2:3000/");
+  assert.equal(await other.judge("http://127.0.0.2:3000/x"), "");
+  assert.equal(await other.judge("http://localhost:3000/"), "is on port 3000, not 80 or 443");
+  assert.equal(sameHost(new URL("http://127.0.0.2:8080/"), new URL("http://localhost:8080/")), false);
+  assert.equal(sameHost(new URL("http://0.0.0.0:8080/"), new URL("http://[::1]:8080/")), true);
 });
 
 test("a run that has no address of its own, as one reading a site another source named, holds every address to the rule, this machine's and those on any port included", async (t) => {
