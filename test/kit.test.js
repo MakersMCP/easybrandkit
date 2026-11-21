@@ -38,7 +38,7 @@ const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit
 // Each test starts with the settings for the browser this file started
 // with: a test whose cleanup failed part way, before it gave them back,
 // would leave its stand-in browser to every test after it.
-const BROWSER_SETTINGS = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG", "STAND_IN_LOCAL_STATE"];
+const BROWSER_SETTINGS = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_DROP", "STAND_IN_LOG", "STAND_IN_LOCAL_STATE"];
 const STARTED_WITH = Object.fromEntries(BROWSER_SETTINGS.map((name) => [name, process.env[name]]));
 test.beforeEach(() => {
   setTimeLimit(120_000);
@@ -4114,6 +4114,15 @@ test("a browser that does not send every request through the kit's proxy, as one
   // A proxy it cannot reach.
   process.env.STAND_IN_ARGS = JSON.stringify(["--proxy-server=http://127.0.0.1:9"]);
   await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => /^The browser could not connect to the proxy its requests go through \(net::ERR_PROXY_CONNECTION_FAILED\), so no kit was made\. easybrandkit gives it a proxy of its own at 127\.0\.0\.1:\d+: /.test(err.message) && err.earlierKit === dir);
+  // WebRTC's switch left out: the profile's own setting holds its UDP to a
+  // proxy's, and the site is read.
+  process.env.STAND_IN_ARGS = "[]";
+  process.env.STAND_IN_DROP = JSON.stringify(["--webrtc-ip-handling-policy"]);
+  const { kit } = await makeKit(site.origin, { dir: path.join(parent, "dropped"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.ok(asked > 0, "the site was read");
+  asked = 0;
+  delete process.env.STAND_IN_DROP;
   // WebRTC's UDP, which goes around a proxy, turned back on.
   process.env.STAND_IN_ARGS = JSON.stringify(["--webrtc-ip-handling-policy=default"]);
   await assert.rejects(makeKit(site.origin, { dir, stores: false }), (err) => err.message === "The browser's WebRTC sends UDP past easybrandkit's proxy, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own makes it do, so no kit was made: a page could have it send UDP to an address easybrandkit does not open without easybrandkit judging that address. Lift that policy, or point CHROME_PATH at the browser's own program or at another browser." && err.earlierKit === dir);
@@ -4210,7 +4219,9 @@ test("a page that tries to save files for the whole run leaves nothing in the us
 // all calls after. Where a rule says "silent", the browser's own messages
 // are passed on whole, one by one, so that an answer of the relay's comes
 // between two of them.
-// STAND_IN_ARGS, a JSON list, is added to the browser's arguments.
+// STAND_IN_ARGS, a JSON list, is added to the browser's arguments, and an
+// argument that starts with one of STAND_IN_DROP, a JSON list, is left out,
+// as a program that starts the browser with switches of its own can do.
 // STAND_IN_LOCAL_STATE, when given, is written into the profile as the
 // browser's Local State before the browser starts, as a program that starts
 // it with settings of its own can do.
@@ -4222,7 +4233,8 @@ const { spawn } = require("child_process");
 const rules = JSON.parse(process.env.STAND_IN_RELAY || "{}");
 const log = process.env.STAND_IN_LOG;
 const counts = {};
-const args = [...process.argv.slice(2), ...JSON.parse(process.env.STAND_IN_ARGS || "[]")];
+const dropped = JSON.parse(process.env.STAND_IN_DROP || "[]");
+const args = [...process.argv.slice(2).filter((arg) => !dropped.some((start) => arg.startsWith(start))), ...JSON.parse(process.env.STAND_IN_ARGS || "[]")];
 const profile = (args.find((arg) => arg.startsWith("--user-data-dir=")) || "").slice("--user-data-dir=".length);
 if (process.env.STAND_IN_LOCAL_STATE && profile) fs.writeFileSync(require("path").join(profile, "Local State"), process.env.STAND_IN_LOCAL_STATE);
 const browser = spawn(process.env.STAND_IN_BROWSER, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
@@ -4275,7 +4287,7 @@ function useRelay(t, dir, rules = {}, args = []) {
   const chrome = path.join(dir, "chrome");
   fs.writeFileSync(relay, RELAY);
   fs.writeFileSync(chrome, `#!/bin/sh\nexec ${sh(process.execPath)} ${sh(relay)} "$@"\n`, { mode: 0o755 });
-  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_LOG", "STAND_IN_LOCAL_STATE"];
+  const names = ["CHROME_PATH", "STAND_IN_BROWSER", "STAND_IN_RELAY", "STAND_IN_ARGS", "STAND_IN_DROP", "STAND_IN_LOG", "STAND_IN_LOCAL_STATE"];
   const env = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => {
     for (const [name, value] of Object.entries(env)) {
@@ -4284,6 +4296,7 @@ function useRelay(t, dir, rules = {}, args = []) {
     }
   });
   Object.assign(process.env, { CHROME_PATH: chrome, STAND_IN_BROWSER: real, STAND_IN_RELAY: JSON.stringify(rules), STAND_IN_ARGS: JSON.stringify(args) });
+  delete process.env.STAND_IN_DROP;
   delete process.env.STAND_IN_LOG;
   delete process.env.STAND_IN_LOCAL_STATE;
 }
