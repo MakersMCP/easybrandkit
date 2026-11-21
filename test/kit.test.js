@@ -4247,6 +4247,23 @@ async function noAnswerPort(t) {
   return port;
 }
 
+test("a browser that connects to the kit's proxy at once but answers the kit's first check after more than 15 s, as on a busy machine, is not told as one that cannot connect to the proxy, and the site is read", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // The first address of the kit's check is the browser's first page: its
+  // answer comes 16 s late, past the 15 s in which a browser that has not
+  // connected to the proxy is told as one that cannot.
+  useRelay(t, parent, { "Page.navigate": ["late", "pass"] });
+  const started = Date.now();
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.ok(Date.now() - started >= 16_000, `${Date.now() - started} ms: the check's first answer came late`);
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+});
+
 test("a browser whose connection to the kit's proxy gets no answer, as behind a firewall that drops it, ends the run within seconds of its first request, in the words for a proxy it cannot connect to", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") || (process.platform !== "linux" && "a full queue of connections is dropped on Linux") }, async (t) => {
   let asked = 0;
   const site = await serve((req, res) => {
@@ -4313,11 +4330,12 @@ test("a page that tries to save files for the whole run leaves nothing in the us
 // them, "rename", as one that does not know them and answers so, "end", as
 // one that ends when it is sent one, the relay with it at once, as its own
 // exit would wait for its read of the kit's pipe, "silent", as one that
-// answers them and does nothing, the relay answering each in its place, or
-// "pass", or a list of these for its calls in turn, the last of them for
-// all calls after. Where a rule says "silent", the browser's own messages
-// are passed on whole, one by one, so that an answer of the relay's comes
-// between two of them.
+// answers them and does nothing, the relay answering each in its place,
+// "late", as one that answers them 16 s after the browser did, as a busy
+// machine can, or "pass", or a list of these for its calls in turn, the
+// last of them for all calls after. Where a rule says "silent" or "late",
+// the browser's own messages are passed on whole, one by one, so that an
+// answer of the relay's comes between two of them.
 // STAND_IN_ARGS, a JSON list, is added to the browser's arguments, and an
 // argument that starts with one of STAND_IN_DROP, a JSON list, is left out,
 // as a program that starts the browser with switches of its own can do.
@@ -4339,14 +4357,21 @@ if (process.env.STAND_IN_LOCAL_STATE && profile) fs.writeFileSync(require("path"
 const browser = spawn(process.env.STAND_IN_BROWSER, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
 browser.on("exit", (code) => process.exit(code === null ? 1 : code));
 const back = fs.createWriteStream(null, { fd: 4 });
-const answers = Object.values(rules).some((rule) => [].concat(rule).includes("silent"));
+const answers = Object.values(rules).some((rule) => [].concat(rule).some((one) => one === "silent" || one === "late"));
+// The calls whose answers come late, by their session and id.
+const late = new Set();
+const callOf = (msg) => (msg.sessionId || "") + " " + msg.id;
 if (answers) {
   let told = "";
   browser.stdio[4].setEncoding("utf8");
   browser.stdio[4].on("data", (chunk) => {
     const parts = (told + chunk).split("\\0");
     told = parts.pop();
-    for (const part of parts) back.write(part + "\\0");
+    for (const part of parts) {
+      const msg = JSON.parse(part);
+      if (msg.id !== undefined && late.delete(callOf(msg))) setTimeout(() => back.write(part + "\\0"), 16000);
+      else back.write(part + "\\0");
+    }
   });
 } else {
   browser.stdio[4].pipe(back);
@@ -4372,6 +4397,7 @@ fs.createReadStream(null, { fd: 3, encoding: "utf8" })
         back.write(JSON.stringify({ id: msg.id, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}), result: {} }) + "\\0");
         continue;
       }
+      if (now === "late") late.add(callOf(msg));
       browser.stdio[3].write(JSON.stringify(msg) + "\\0");
     }
   })
