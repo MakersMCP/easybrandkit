@@ -38,7 +38,7 @@ const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
 const { SaveError, toldPlainly, removedFrom, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
-const { guardFor, refusedAddresses, readUrl } = require("./address");
+const { guardFor, refusedAddresses, readUrl, notPublicByForm } = require("./address");
 const { plainText } = require("./text");
 const version = require("./version");
 
@@ -496,6 +496,30 @@ function siteOfListing(raw) {
   }
 }
 
+// The settings that name a proxy for programs to reach the web through, as
+// a network that reaches the web only through one gives them, which the
+// kit does not use: its browser goes through the kit's own proxy, which
+// connects to each site itself, as the kit's own requests do (see proxy.js
+// and address.js guardFor).
+const PROXY_SETTINGS = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"];
+
+// What the address given did that such a network makes it do: no name is
+// found, no connection is made, or no answer comes.
+const UNREACHED = /^(could not be opened \(net::ERR_(NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_[A-Z_]+|ADDRESS_UNREACHABLE|INTERNET_DISCONNECTED|TIMED_OUT|EMPTY_RESPONSE)\)|did not answer|is on a host whose name could not be looked up)/;
+const STORE_UNREACHED = /could not be looked up|did not answer in|connect E(CONNREFUSED|TIMEDOUT|HOSTUNREACH|NETUNREACH)/;
+
+// A last line that says the address given could not be reached, with the
+// word, when one of those settings is given, that the kit does not use the
+// proxy it names; the setting's value is not said, as it can hold a
+// password. An address of this machine or of a private network by its form,
+// as a server under development that is not running, gets no such word.
+function notThroughProxy(message, unreached) {
+  const name = PROXY_SETTINGS.find((one) => process.env[one]);
+  if (!name || !unreached) return message;
+  const text = String(message).trim();
+  return `${text}${/[.!?]$/.test(text) ? "" : "."} easybrandkit does not use the proxy ${name} names: its browser and its own requests connect to each site themselves, so on a network that reaches the web only through that proxy, no site can be read.`;
+}
+
 // namedBy: when another source named the site, as a store listing names its
 // maker's website, and not the user, the address of that source. The site
 // is then read as a page easybrandkit chose itself, as the website a
@@ -509,6 +533,9 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   // the run here, before any work.
   const refused = refusedAddresses();
   const asked = normalizeUrl(rawUrl);
+  // On this machine or a private network by its form, which no proxy of
+  // the system's stands in front of (see notThroughProxy).
+  const local = notPublicByForm(new URL(asked));
   const source = namedBy ? normalizeUrl(namedBy) : "";
   const host = new URL(asked).hostname.toLowerCase();
   const listing = PLATFORM_HOST.test(host) ? classify(asked) : null;
@@ -523,7 +550,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   const guard = guardFor(source ? null : asked, { refused });
   if (!listing) {
     const why = await guard.judge(asked);
-    if (why) throw new Error(`${asked}${source ? `, named by ${source},` : ""} ${why}, so no kit was made.`);
+    if (why) throw new Error(notThroughProxy(`${asked}${source ? `, named by ${source},` : ""} ${why}, so no kit was made.`, UNREACHED.test(why) && !local));
   }
   const notes = [];
   const target = dir || (listing ? `easybrandkit-${listing.type}-${listing.id}` : `easybrandkit-${host.replace(/^www\./, "")}`);
@@ -556,7 +583,7 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     if (listing) {
       log(`Reading the ${listing.type === "appstore" ? "App Store" : "Google Play"} listing`);
       given = await readSource(listing, work, guard);
-      if (!given.ok) throw new Error(`${asked} could not be read: ${given.error}.`);
+      if (!given.ok) throw new Error(notThroughProxy(`${asked} could not be read: ${given.error}.`, STORE_UNREACHED.test(given.error)));
       page = siteOfListing(given.site || "");
     } else {
       page = homePageOf(asked) || asked;
@@ -652,6 +679,9 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
     // still there.
     const removed = removedFrom(run);
     const plain = removed && err.syscall ? new Error(removed.said) : toldPlainly(err, run);
+    // The address given, or the page read in its place, that could not be
+    // reached, as on a network that reaches the web only through a proxy.
+    if (plain === err && err.pageFailed && UNREACHED.test(err.pageFailed) && !local) plain.message = notThroughProxy(plain.message, true);
     // For the CLI, which says that an earlier kit is as it was. saveRun's
     // own errors say what the folder holds.
     if (removed ? removed.earlier : run.earlier) plain.earlierKit = target;

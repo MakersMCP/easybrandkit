@@ -3994,6 +3994,56 @@ test("a plain http site whose answers the browser takes though Node's strict rea
   assert.ok(!dials.to().includes("acme.test:443"), "no https was tried in its place");
 });
 
+test("a proxy that HTTPS_PROXY or another such setting names is not used, and a run that cannot reach the address given says so, naming the setting; one that reaches it is read as before", { skip: noBrowser }, async (t) => {
+  const net = require("node:net");
+  // The proxy such a setting names, which counts what it is asked.
+  let asked = 0;
+  const named = net.createServer((socket) => {
+    asked++;
+    socket.destroy();
+  });
+  named.listen(0, "127.0.0.1");
+  await once(named, "listening");
+  t.after(() => named.close());
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const settings = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"];
+  setEnv(t, Object.fromEntries(settings.map((name) => [name, undefined])));
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (host === "gone.test") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.test"), { code: "ENOTFOUND" });
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  await dialHere(t, () => 9);
+  const said = (name) => `easybrandkit does not use the proxy ${name} names: its browser and its own requests connect to each site themselves, so on a network that reaches the web only through that proxy, no site can be read.`;
+  // With no such setting, the last line is as it was.
+  await assert.rejects(makeKit("https://gone.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === "Could not open https://gone.test/: net::ERR_NAME_NOT_RESOLVED");
+  process.env.HTTPS_PROXY = `http://user:secret@127.0.0.1:${named.address().port}`;
+  await assert.rejects(makeKit("https://gone.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open https://gone.test/: net::ERR_NAME_NOT_RESOLVED. ${said("HTTPS_PROXY")}` && !err.message.includes("secret"));
+  await assert.rejects(makeKit("https://closed.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open https://closed.test/: net::ERR_CONNECTION_REFUSED. ${said("HTTPS_PROXY")}`);
+  delete process.env.HTTPS_PROXY;
+  process.env.http_proxy = `http://127.0.0.1:${named.address().port}`;
+  setEnv(t, { MAKERSMCP_REFUSE_ADDRESSES: "192.0.2.1" });
+  await assert.rejects(makeKit("https://gone.test/", { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `https://gone.test/ is on a host whose name could not be looked up, so no kit was made. ${said("http_proxy")}`);
+  delete process.env.MAKERSMCP_REFUSE_ADDRESSES;
+  // A site of this machine that takes no connection, as a server under
+  // development that is not running, is no proxy's business.
+  const gone = net.createServer();
+  gone.listen(0, "127.0.0.1");
+  await once(gone, "listening");
+  const down = `http://127.0.0.1:${gone.address().port}/`;
+  gone.close();
+  await once(gone, "close");
+  await assert.rejects(makeKit(down, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open ${down}: net::ERR_CONNECTION_REFUSED`);
+  // A site it reaches is read, and the setting changes nothing there.
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
+  assert.equal(asked, 0, "the proxy the setting names was asked nothing");
+});
+
 test("a browser that does not send every request through the kit's proxy, as one a program starts with switches of its own, is not used, and the site is not opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   let asked = 0;
   const site = await serve((req, res) => {
