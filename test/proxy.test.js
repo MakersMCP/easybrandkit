@@ -10,6 +10,7 @@ const net = require("node:net");
 const test = require("node:test");
 const { once } = require("node:events");
 const { startProxy, wire, OWN_NAME } = require("../skills/easybrandkit/scripts/lib/proxy");
+const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 
 // A rule that takes what take says, at the addresses it gives, and refuses
 // the rest as not on the public internet; each address it was asked for is
@@ -26,17 +27,16 @@ function ruleOf(take) {
   };
 }
 
-// Every connection the proxy makes, kept with what it was given, and made
-// to this machine's port that ports names for its host and port, or to the
+// Every connection the proxy makes, kept with the host it is for and the
+// address it is made to, none for a host that is an IP address, and made to
+// this machine's port that ports names for its host and port, or to the
 // port asked: each address the rule took stands for a server of the test's
 // own here.
 function dialHere(t, ports = {}) {
   const dials = [];
-  t.mock.method(wire, "dial", (options) => {
-    const handed = [];
-    if (options.lookup) options.lookup(options.host, { all: true }, (err, list) => handed.push(...(err ? [] : list.map((one) => one.address))));
-    dials.push({ host: options.host, port: options.port, handed });
-    return net.connect({ host: "127.0.0.1", port: ports[`${options.host}:${options.port}`] || options.port });
+  t.mock.method(dialLib.wire, "dial", (address, port, name) => {
+    dials.push({ host: name, port, handed: name === address ? [] : [address] });
+    return net.connect({ host: "127.0.0.1", port: ports[`${name}:${port}`] || port });
   });
   return dials;
 }
@@ -156,7 +156,7 @@ test("a tunnel the rule takes carries its bytes both ways to the address it took
   assert.equal(echoed.toString(), "hello");
   socket.destroy();
   assert.deepEqual(rule.asked, ["https://acme.test/"]);
-  assert.deepEqual(dials[0], { host: "acme.test", port: 443, handed: ["2606:4700::1111", "93.184.216.34"] });
+  assert.deepEqual(dials, [{ host: "acme.test", port: 443, handed: ["2606:4700::1111"] }], "the first address, which connected at once");
   const closed = await tunnel(proxy, "closed.test:443");
   closed.socket.destroy();
   assert.equal(closed.line, "HTTP/1.1 502 Bad Gateway");

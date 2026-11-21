@@ -23,9 +23,9 @@
 // that names no host, gets a 400.
 
 const fs = require("fs");
-const net = require("net");
 const http = require("http");
 const crypto = require("crypto");
+const { dialFirst } = require("./dial");
 
 // The tables of this machine's TCP sockets on Linux, each with the uid of
 // the user whose socket it is.
@@ -63,14 +63,11 @@ async function ownerOf(socket) {
   return read ? "gone" : null;
 }
 
-// How the proxy connects to an address the rule took: net.connect with the
-// host as the rule judged it and a lookup that hands back only the
-// addresses the rule took for it, so that a name is never looked up again
-// and a connection tries those alone, one after another, as Node's own
-// connection with more than one address does. And whose program a
-// connection to the proxy comes from (see ownerOf). Tests put their own
-// servers in place of the addresses here, and their own owners.
-const wire = { dial: (options) => net.connect(options), owner: ownerOf };
+// Whose program a connection to the proxy comes from (see ownerOf). Tests
+// put their own owners here. The proxy connects to the addresses the rule
+// took for a host as every connection of a run is made (see dial.js), so a
+// name is never looked up again.
+const wire = { owner: ownerOf };
 
 // The headers that belong to one connection and not to the request or the
 // answer it carries, which the proxy does not pass on, with those a
@@ -143,7 +140,7 @@ function tunnelUrl(authority) {
 // The port of a web address, the scheme's own when it names none.
 const portOf = (url) => url.port || (url.protocol === "https:" ? "443" : "80");
 
-// A host as net.connect takes it: an IPv6 address without its brackets.
+// A host as a connection names it: an IPv6 address without its brackets.
 const plainHost = (url) => url.hostname.replace(/^\[|\]$/g, "");
 
 // Where a failed connection is kept: its host and port.
@@ -230,30 +227,9 @@ function startProxy(guard) {
     if (err) err.kept = true;
   };
   // A connection to url's host and port at one of addresses, the ones the
-  // rule took for it: the socket, once connected.
-  const connect = (url, addresses) =>
-    new Promise((resolve, reject) => {
-      if (!addresses.length) return reject(Object.assign(new Error(`${url.hostname} was not found`), { code: "ENOTFOUND" }));
-      const list = addresses.map((address) => ({ address, family: net.isIP(address) }));
-      const lookup = (hostname, options, callback) => {
-        const family = options && options.family;
-        const some = list.filter((one) => !family || one.family === family);
-        if (!some.length) return callback(Object.assign(new Error(`${hostname} has no address of the family asked for`), { code: "ENOTFOUND", hostname }));
-        if (options && options.all) callback(null, some);
-        else callback(null, some[0].address, some[0].family);
-      };
-      let socket;
-      try {
-        // An IP address is connected to as it is, the one address the rule
-        // took for it; a name through the lookup above.
-        const host = plainHost(url);
-        socket = hold(wire.dial(net.isIP(host) ? { host: list[0].address, port: Number(portOf(url)) } : { host, port: Number(portOf(url)), lookup }));
-      } catch (err) {
-        return reject(err);
-      }
-      socket.once("connect", () => resolve(socket));
-      socket.once("error", reject);
-    });
+  // rule took for it (see dial.js): the socket, once connected. Every
+  // attempt is held, so close ends those still under way too.
+  const connect = (url, addresses, signal = null) => dialFirst(addresses, Number(portOf(url)), { name: plainHost(url), hold, signal });
   // Whether an address is the proxy's own.
   const ownAddress = (url) => url.hostname === OWN_NAME || (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && portOf(url) === String(proxy.port));
   // The probes of chrome.js: /<token>/<n>, answered here.
@@ -383,13 +359,21 @@ function startProxy(guard) {
       await refuse(what, why, socket);
       return socket.end("HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n");
     }
+    // A browser that gives the tunnel up while it is made ends the attempts
+    // under way.
+    const given = new AbortController();
+    const up = () => given.abort();
+    socket.once("close", up);
     let upstream;
     try {
-      upstream = await connect(url, addresses);
+      upstream = await connect(url, addresses, given.signal);
     } catch (err) {
+      if (given.signal.aborted) return;
+      socket.removeListener("close", up);
       failed(url, err);
       return socket.end("HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n");
     }
+    socket.removeListener("close", up);
     if (socket.destroyed) return upstream.destroy();
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
     if (head && head.length) upstream.write(head);

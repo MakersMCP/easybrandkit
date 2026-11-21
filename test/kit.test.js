@@ -27,6 +27,7 @@ const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { renderCard } = require("../skills/easybrandkit/scripts/lib/card");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 const proxyLib = require("../skills/easybrandkit/scripts/lib/proxy");
+const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { storeAnswers } = require("./store-answers");
 const { partedTemp, roomlessTemp } = require("./temp-skip");
 
@@ -2248,21 +2249,20 @@ test("a deeper address whose home page fails is read as given and says so, and i
   assert.deepEqual(filesOf(dir), before);
 });
 
-// Every connection the kit's proxy makes goes to the addresses the kit's own
-// lookup judged (see lib/proxy.js), which the lookups these tests mock put on
-// the public internet. Here a name of the test's own (names, every name under
-// .test by default) stands for a server of the test's own on this machine:
-// each connection to one goes to 127.0.0.1, on the port at gives for its name
-// and port, the port asked by default, as a browser with
-// --host-resolver-rules=MAP *.test 127.0.0.1 went; "close" for a server that
-// takes the connection and closes it with no answer, as a site down on that
-// port, and 9 where nothing listens. This machine's own names, as
-// localhost, go to 127.0.0.1 on the port asked, as their lookup hands that
-// over first; any other name, as the hosts of the browser's own maker it
-// asks for its updates, goes to port 9, so that none reaches a server of the
-// test's. An IP address is connected to as it is. dials keeps each
-// connection as host:port, and the addresses the proxy's lookup handed over
-// for it.
+// Every connection of a run, the kit's proxy's and the kit's own requests',
+// goes to the addresses the kit's own lookup judged (see lib/dial.js), which
+// the lookups these tests mock put on the public internet. Here a name of
+// the test's own (names, every name under .test by default) stands for a
+// server of the test's own on this machine: each connection to one goes to
+// 127.0.0.1, on the port at gives for its name and port, the port asked by
+// default, as a browser with --host-resolver-rules=MAP *.test 127.0.0.1
+// went; "close" for a server that takes the connection and closes it with
+// no answer, as a site down on that port, and 9 where nothing listens.
+// This machine's own names, as localhost, and an IP address are connected
+// to at the address the attempt is for; any other name, as the hosts of the
+// browser's own maker it asks for its updates, goes to port 9, so that none
+// reaches a server of the test's. dials keeps each attempt as host:port,
+// and the address it was for, none for a host that is an IP address.
 async function dialHere(t, at = () => null, names = /(^|\.)test$/) {
   const net = require("node:net");
   const closing = net.createServer((socket) => socket.destroy());
@@ -2270,13 +2270,10 @@ async function dialHere(t, at = () => null, names = /(^|\.)test$/) {
   await once(closing, "listening");
   t.after(() => closing.close());
   const dials = [];
-  t.mock.method(proxyLib.wire, "dial", (options) => {
-    const handed = [];
-    if (options.lookup) options.lookup(options.host, { all: true }, (err, list) => handed.push(...(err ? [] : list.map((one) => one.address))));
-    dials.push({ to: `${options.host}:${options.port}`, handed });
-    if (net.isIP(options.host)) return net.connect({ host: options.host, port: options.port });
-    if (/(^|\.)localhost$/i.test(options.host)) return net.connect({ host: "127.0.0.1", port: options.port });
-    const to = names.test(options.host) ? at(options.host, options.port) || options.port : 9;
+  t.mock.method(dialLib.wire, "dial", (address, port, name) => {
+    dials.push({ to: `${name}:${port}`, handed: name === address ? [] : [address] });
+    if (net.isIP(name) || /(^|\.)localhost$/i.test(name)) return net.connect({ host: address, port });
+    const to = names.test(name) ? at(name, port) || port : 9;
     return net.connect({ host: "127.0.0.1", port: to === "close" ? closing.address().port : to });
   });
   return Object.assign(dials, { to: () => dials.map((one) => one.to) });
