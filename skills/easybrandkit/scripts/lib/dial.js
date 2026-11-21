@@ -4,16 +4,17 @@
 // proxy (see proxy.js) and the kit's own requests alike (see stores.js and
 // facts.js), each to the addresses the run's rule took for that host (see
 // address.js route) and to no other. A host with more than one address is
-// connected to as the browser connects to one: one attempt per address,
-// the families taking turns, the next started 250 ms after the one before,
-// or at once when the last one started has failed, and each left to go on
-// until it connects or fails. The first to connect is taken and the others
-// are ended. Node's own connection to more than one address ends every
-// attempt but the last after 250 ms, so a public site whose name has an
-// IPv6 address this machine has no route to, and whose IPv4 address takes
-// longer than that to answer, as a site far away does, failed with
-// ETIMEDOUT, and so did a site of this machine given as localhost while
-// this process was held a moment, where the browser by itself connects.
+// connected to with each attempt left to go on until it connects or fails,
+// as the browser leaves its own: one attempt per address, the families
+// taking turns, the next started 250 ms after the one before, or at once
+// when every one started before it has failed. The first to connect is
+// taken and the others are ended. Node's own connection to more than one
+// address ends every attempt but the last after 250 ms, so a public site
+// whose name has an IPv6 address this machine has no route to, and whose
+// IPv4 address takes longer than that to answer, as a site far away does,
+// failed with ETIMEDOUT, and so did a site of this machine given as
+// localhost while this process was held a moment, where the browser by
+// itself connects.
 
 const net = require("net");
 const tls = require("tls");
