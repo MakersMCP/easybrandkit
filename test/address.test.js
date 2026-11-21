@@ -309,6 +309,26 @@ test("an address given whose host has a label of broken punycode is no web addre
   assert.equal(normalizeUrl("http://b\u00fccher.example/"), "http://xn--bcher-kva.example/");
 });
 
+test("a host whose last dots are taken off is read again as the URL parser reads a host, so a short or other IPv4 form is the address it is, with no lookup", async (t) => {
+  const asked = [];
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    asked.push(host);
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+  const guard = guardFor("https://acme.com/");
+  for (const raw of ["http://127.1../", "http://0x7f.1../", "http://0177.1../", "http://10.655363../", "http://192.168.1../", "http://169.254.43518../latest/meta-data/", "http://2130706433../", "http://127.0.0.1.../"]) {
+    assert.equal(await guard.judge(raw), "is not on the public internet", raw);
+  }
+  assert.deepEqual(asked, []);
+  // A name keeps its letters, its dots taken off.
+  assert.equal(await guard.judge("https://www.acme.com../"), "");
+  assert.deepEqual(asked, ["www.acme.com"]);
+  // This machine on the port given, so written, is the address given.
+  const local = guardFor("http://localhost:3000/");
+  assert.equal(await local.judge("http://127.1..:3000/"), "");
+  assert.equal(sameHost(new URL("http://0x7f.1..:8080/"), new URL("http://localhost:8080/")), true);
+});
+
 test("where the browser says it reached a page counts for an address the run was not given: a name found elsewhere by the browser is told by where it went", async (t) => {
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const guard = guardFor("http://acme.com/");

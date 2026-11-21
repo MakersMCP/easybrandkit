@@ -194,8 +194,22 @@ function readUrl(raw) {
 
 // An address's host as it is judged: in small letters, without the brackets
 // of an IPv6 address and without its last dots, as 127.0.0.1.. is still
-// 127.0.0.1 to the browser.
-const bare = (url) => url.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.+$/, "");
+// 127.0.0.1 to the browser. What is left is read again as the URL parser
+// reads a host, so a short or other IPv4 form with its dots taken off is
+// the address it is: 127.1.., 0x7f.1.. and 192.168.1.. are 127.0.0.1,
+// 127.0.0.1 and 192.168.0.1, where the URL parser leaves them names, as it
+// does any host with two dots or more after it.
+function bare(url) {
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const plain = host.replace(/\.+$/, "");
+  if (plain === host || net.isIP(plain)) return plain;
+  try {
+    const again = new URL(`http://${plain}/`).hostname;
+    return net.isIP(again) === 4 ? again : plain;
+  } catch {
+    return plain;
+  }
+}
 
 // Whether a host is this machine itself, by a name or an address of its
 // own: localhost and the names under it, 127/8, ::1, and 0.0.0.0 and ::,
