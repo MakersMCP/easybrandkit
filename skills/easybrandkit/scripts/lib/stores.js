@@ -8,17 +8,17 @@
 // It fetches only HTTPS URLs on port 443 of the listed store, social and
 // image hosts, re-checks every redirect, refuses addresses that are not on
 // the public internet and those MAKERSMCP_REFUSE_ADDRESSES names (see
-// address.js), connects only to the addresses it judged, and caps each file
-// at 15 MB.
+// address.js), looks each host up once a run, by the run's own lookup,
+// connects only to the addresses it judged, and caps each file at 15 MB.
 
 const fs = require("fs");
+const net = require("net");
 const https = require("https");
 const path = require("path");
 const zlib = require("zlib");
-const { promises: dns } = require("dns");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
-const { isPublicAddress, atRefused } = require("./address");
+const { isPublicAddress, atRefused, guardFor } = require("./address");
 
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_SCREENSHOTS = 5;
@@ -96,20 +96,24 @@ function classify(raw) {
 // HTTPS address on a listed host, at addresses that are all on the public
 // internet, none of them one the run's rule refuses (guard, see address.js),
 // with the addresses its host was found at (found), which its request
-// connects to (see get).
+// connects to (see get). The host is looked up by the run's own lookup,
+// which asks the DNS once a run for each name (guard.found): a name a page,
+// a listing's picture or a redirect names again is not looked up again.
 async function judgedFetch(raw, guard = null) {
   const url = new URL(raw);
   const host = url.hostname.toLowerCase();
   if (url.protocol !== "https:") throw new Error(`not HTTPS: ${raw}`);
   if (url.username || url.password || (url.port && url.port !== "443")) throw new Error(`not a plain URL: ${raw}`);
   if (!FETCH_HOSTS.some((pattern) => pattern.test(host))) throw new Error(`host not allowed: ${host}`);
-  const records = await dns.lookup(host, { all: true, verbatim: true });
-  const refused = guard && records.map((record) => guard.refused.match(record.address)).find(Boolean);
+  const rule = guard || guardFor(null);
+  const addresses = await rule.found(host);
+  if (!addresses.length) throw new Error(`host ${host} could not be looked up`);
+  const refused = addresses.map((address) => rule.refused.match(address)).find(Boolean);
   if (refused) throw new Error(`host ${host} ${atRefused(refused)}`);
-  if (!records.length || !records.every((record) => isPublicAddress(record.address))) {
+  if (!addresses.every((address) => isPublicAddress(address))) {
     throw new Error(`host does not resolve to a public address: ${host}`);
   }
-  return { url, found: records.map(({ address, family }) => ({ address, family })) };
+  return { url, found: addresses.map((address) => ({ address, family: net.isIP(address) })) };
 }
 
 // The address alone, judged as above.
@@ -349,8 +353,9 @@ function profilePlan(html) {
 // picture that cannot be written, as on a full disk, fails the run instead:
 // what it has of the file would otherwise go into the kit. guard: the run's
 // rule for the addresses it opens, whose refused addresses are refused here
-// too.
-async function readSource(link, dir, guard = null) {
+// too, and whose lookup each host is found by; without one, the listing
+// gets a lookup of its own.
+async function readSource(link, dir, guard = guardFor(null)) {
   const source = { type: link.type, url: link.url, ok: false, assets: [] };
   let notWritten = null;
   try {

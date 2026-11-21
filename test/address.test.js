@@ -6,7 +6,6 @@
 
 const assert = require("node:assert/strict");
 const dns = require("node:dns");
-const os = require("node:os");
 const test = require("node:test");
 const { isPublicAddress, heldIpv4, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
 const CASES = require("./address-cases.json");
@@ -199,9 +198,9 @@ test("a run that has no address of its own, as one reading a site another source
     assert.equal(await none.judge(raw), why, raw);
   }
   // A request the kit makes itself, as for robots.txt, connects by the
-  // rule's own lookup there, where one on the address given need not.
+  // rule's own lookup, on the address given too.
   for (const raw of ["https://acme.com/robots.txt", "http://localhost:3000/robots.txt"]) assert.equal(typeof none.lookupFor(raw), "function", raw);
-  assert.equal(guardFor("https://acme.com/").lookupFor("https://acme.com/robots.txt"), undefined);
+  assert.equal(typeof guardFor("https://acme.com/").lookupFor("https://acme.com/robots.txt"), "function");
 });
 
 test("an address the run was not given is opened only on the public internet, by its form and by every address its name is found at, and never where its name is not found in time", async (t) => {
@@ -329,6 +328,41 @@ test("a host whose last dots are taken off is read again as the URL parser reads
   assert.equal(sameHost(new URL("http://0x7f.1..:8080/"), new URL("http://localhost:8080/")), true);
 });
 
+test("route gives the addresses a connection may go to, every address the lookup found for the host and none for one the rule refuses, the address given looked up too", async (t) => {
+  const asked = [];
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    asked.push(host);
+    if (host === "intranet.acme.com") return [{ address: "10.0.0.5", family: 4 }];
+    if (host === "gone.acme.com") throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.acme.com"), { code: "ENOTFOUND" });
+    return [{ address: "93.184.216.34", family: 4 }, { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 }];
+  });
+  const both = ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"];
+  const guard = guardFor("http://intranet.acme.com:8080/");
+  assert.deepEqual(await guard.route("https://www.acme.com/"), { why: "", addresses: both });
+  assert.deepEqual(await guard.route("http://www.acme.com:8080/"), { why: "is on port 8080, not 80 or 443", addresses: [] });
+  assert.deepEqual(await guard.route("https://intranet.acme.com/"), { why: "is at 10.0.0.5, an address not on the public internet", addresses: [] });
+  assert.deepEqual(await guard.route("http://[::1]/"), { why: "is not on the public internet", addresses: [] });
+  // The address given and its own pages, wherever they are, which a
+  // connection has to know too.
+  assert.deepEqual(await guard.route("http://intranet.acme.com:8080/x"), { why: "", addresses: ["10.0.0.5"] });
+  assert.deepEqual(await guard.route("https://intranet.acme.com:8080/"), { why: "", addresses: ["10.0.0.5"] });
+  assert.deepEqual(await guardFor("http://localhost:3000/").route("http://localhost:3000/"), { why: "", addresses: ["127.0.0.1", "::1"] });
+  assert.deepEqual(await guardFor("http://localhost:3000/").route("http://127.1..:3000/"), { why: "", addresses: ["127.0.0.1"] });
+  assert.deepEqual(await guardFor("http://[::1]:3000/").route("http://[::1]:3000/"), { why: "", addresses: ["::1"] });
+  // A name not found is no refusal of the address given, but nothing to
+  // connect to; it is refused where the setting names addresses, as judge
+  // refuses it there.
+  assert.deepEqual(await guardFor("https://gone.acme.com/").route("https://gone.acme.com/"), { why: "", addresses: [] });
+  assert.deepEqual(await guardFor("https://gone.acme.com/", { refused: refusedAddresses("10.0.0.0/8") }).route("https://gone.acme.com/"), { why: "is on a host whose name could not be looked up", addresses: [] });
+  // judge asks no lookup for the address given, route does, once.
+  assert.equal(await guardFor("https://other.acme.com/").judge("https://other.acme.com/"), "");
+  assert.equal(asked.filter((host) => host === "other.acme.com").length, 0);
+  assert.deepEqual(await guard.found("www.acme.com"), both);
+  assert.deepEqual(await guard.found("93.184.216.34"), ["93.184.216.34"]);
+  assert.deepEqual(await guard.found("app.localhost"), ["127.0.0.1", "::1"]);
+  assert.equal(asked.filter((host) => host === "www.acme.com").length, 1);
+});
+
 test("where the browser says it reached a page counts for an address the run was not given: a name found elsewhere by the browser is told by where it went", async (t) => {
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const guard = guardFor("http://acme.com/");
@@ -380,24 +414,32 @@ test("MAKERSMCP_REFUSE_ADDRESSES is refused for every address a run opens, the o
   assert.equal(await guardFor("https://gone.acme.com/").judge("https://gone.acme.com/"), "");
 });
 
-test("a request the kit makes itself connects only to an address the rule takes, as the name is found when it connects", async (t) => {
-  // This machine's own name, which the system finds on this machine or its
-  // network, taken for a public one by the lookup the rule judged by.
-  const host = os.hostname();
-  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+test("a request the kit makes itself connects only to an address the rule took, by the one lookup the rule judged, which asks the DNS once a run", async (t) => {
+  // A name whose next answer would be this machine: the lookup the rule
+  // judged by is the only one, so the connection never gets that answer.
+  let answers = 0;
+  const found = t.mock.method(dns.promises, "lookup", async (host) => (host === "rebind.acme.com" && answers++ ? [{ address: "127.0.0.1", family: 4 }] : [{ address: "93.184.216.34", family: 4 }, { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 }]));
+  const system = t.mock.method(dns, "lookup", (host, options, callback) => callback(new Error("the DNS was asked again")));
+  const ask = (lookup, host, options) => new Promise((resolve) => lookup(host, options, (err, ...got) => resolve(err || got)));
   const guard = guardFor("https://acme.com/");
-  const lookup = guard.lookupFor(`http://${host}/robots.txt`);
-  assert.equal(typeof lookup, "function");
-  const found = await new Promise((resolve) => lookup(host, { all: true }, (err, list) => resolve(err || list)));
-  const system = await new Promise((resolve) => dns.lookup(host, { all: true, verbatim: true }, (err, list) => resolve(err ? [] : list)));
-  if (system.length && system.every(({ address }) => isPublicAddress(address))) return t.skip(`${host} is found on the public internet here`);
-  if (!system.length) return t.skip(`${host} is not found here`);
-  assert.ok(found instanceof Error && found.code === "ENOTPUBLIC", String(found));
-  assert.match(found.message, /an address not on the public internet$/);
-  // The pages on the host and port given connect as any program does, unless
-  // the setting refuses where they are.
-  assert.equal(guard.lookupFor("https://acme.com/robots.txt"), undefined);
-  const refusing = guardFor(`http://${host}:8080/`, { refused: refusedAddresses(system.map(({ address }) => address).join(",")) });
-  const own = await new Promise((resolve) => refusing.lookupFor(`http://${host}:8080/robots.txt`)(host, {}, (err, address) => resolve(err || address)));
-  assert.ok(own instanceof Error && /MAKERSMCP_REFUSE_ADDRESSES refuses$/.test(own.message), String(own));
+  assert.equal(await guard.judge("https://rebind.acme.com/"), "");
+  const lookup = guard.lookupFor("https://rebind.acme.com/robots.txt");
+  assert.deepEqual(await ask(lookup, "rebind.acme.com", { all: true }), [[{ address: "93.184.216.34", family: 4 }, { address: "2606:2800:220:1:248:1893:25c8:1946", family: 6 }]]);
+  assert.deepEqual(await ask(lookup, "rebind.acme.com", {}), ["93.184.216.34", 4]);
+  assert.deepEqual(await ask(lookup, "rebind.acme.com", { family: 6 }), ["2606:2800:220:1:248:1893:25c8:1946", 6]);
+  assert.equal(found.mock.calls.filter((call) => call.arguments[0] === "rebind.acme.com").length, 1);
+  // The address given and its own pages connect the same way.
+  assert.deepEqual(await ask(guard.lookupFor("https://acme.com/robots.txt"), "acme.com", {}), ["93.184.216.34", 4]);
+  assert.equal(system.mock.callCount(), 0);
+  // One the rule refuses, or whose name is not found, connects nowhere.
+  const refusing = guardFor("http://acme.com:8080/", { refused: refusedAddresses("93.184.216.0/24") });
+  const own = await ask(refusing.lookupFor("http://acme.com:8080/robots.txt"), "acme.com", {});
+  assert.ok(own instanceof Error && own.code === "ENOTPUBLIC" && /MAKERSMCP_REFUSE_ADDRESSES refuses$/.test(own.message), String(own));
+  const port = await ask(guard.lookupFor("http://rebind.acme.com:9222/json/list"), "rebind.acme.com", {});
+  assert.ok(port instanceof Error && port.message === "rebind.acme.com is on port 9222, not 80 or 443", String(port));
+  found.mock.mockImplementation(async () => {
+    throw Object.assign(new Error("getaddrinfo ENOTFOUND gone.acme.com"), { code: "ENOTFOUND" });
+  });
+  const gone = await ask(guardFor("https://gone.acme.com/").lookupFor("https://gone.acme.com/robots.txt"), "gone.acme.com", {});
+  assert.ok(gone instanceof Error && gone.code === "ENOTFOUND", String(gone));
 });

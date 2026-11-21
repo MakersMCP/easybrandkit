@@ -23,8 +23,9 @@
 // for every address a run opens, the one given included.
 //
 // A host name is judged by every address it is found at here, looked up once
-// a run. The browser looks the name up again as it opens the page; where it
-// says which address it reached, that is judged too (see guardFor).
+// a run, and the kit's own requests connect only to one of those. The
+// browser looks the name up again as it opens the page; where it says which
+// address it reached, that is judged too (see guardFor).
 
 const net = require("net");
 const dns = require("dns");
@@ -346,7 +347,9 @@ const LOOKUP_WAIT = 5_000;
 // web address, whose scheme, host and port are the run's own; null for a
 // run that has none, as one reading a site another source named, see
 // makeKit), with the addresses refused (refused, from refusedAddresses).
-// Each name is looked up once a run.
+// Each name is looked up once a run, and every request the kit makes
+// itself connects only to an address that lookup found and the rule took,
+// so the kit asks the DNS for no name twice and uses no later answer.
 //
 // judge(raw, seen) resolves to "" for an address the run may open, and else
 // to why not, to follow "it" or "which". What is not a web address is not
@@ -360,14 +363,22 @@ const LOOKUP_WAIT = 5_000;
 // judged as the lookup's addresses are; through a proxy it says Unknown and
 // gives the proxy's address, which says nothing of the page.
 //
+// route(raw): { why, addresses }, why as judge gives it, and the addresses
+// a connection to it may go to, for one the run may open: every address
+// the lookup found for its host. For the address given they are looked up
+// too, and none, for a name not found, is no refusal but a connection that
+// cannot be made.
+//
+// found(host): the addresses a host is at, by the same lookup: an IP
+// address is at itself, and this machine's own names are on its loopback.
+// [] for a name not found.
+//
 // inside(url, seen): whether a host is not on the public internet, or
 // cannot be told to be, by the same lookup.
 //
 // lookupFor(raw): the lookup a request the kit makes itself connects with,
-// which hands back only addresses the rule takes, as the name is found when
-// it connects, so it connects to no address the rule refuses; undefined for
-// an address on the scheme, host and port given when nothing is refused,
-// and one that hands back no address for one the URL parser cannot read.
+// which hands back only the addresses route gives for raw, and none for one
+// the rule refuses or the URL parser cannot read.
 function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const given = givenRaw ? new URL(givenRaw) : null;
   const answers = new Map();
@@ -384,9 +395,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     }
     return answers.get(host);
   };
-  // The addresses a host is at: an IP address is at itself, and this
-  // machine's own names are on its loopback. [] for a name not found.
-  const addressesOf = async (host) => {
+  const found = async (host) => {
     if (net.isIP(host)) return [host];
     if (localName(host)) return ["127.0.0.1", "::1"];
     return (await lookup(host)).list;
@@ -400,48 +409,52 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const own = (url) => Boolean(given) && sameHost(url, given) && (url.protocol === given.protocol || (given.protocol === "http:" && url.protocol === "https:"));
   // What the browser says it reached, when it reached the server itself.
   const reached = ({ space = "", ip = "" } = {}) => (space && space !== "Unknown" && net.isIP(plainIp(ip)) ? plainIp(ip) : "");
-  async function judge(raw, seen = {}) {
+  // The rule for one address. resolve: whether the addresses of one the run
+  // may open are wanted, as for a connection; without it, the address given
+  // is looked up only to check it against the refused addresses.
+  async function rule(raw, resolve, seen = {}) {
     const url = readUrl(raw);
-    if (!url) return webScheme(raw) ? UNREADABLE : "";
-    if (!/^https?:$/.test(url.protocol)) return "";
+    if (!url) return { why: webScheme(raw) ? UNREADABLE : "", addresses: [] };
+    if (!/^https?:$/.test(url.protocol)) return { why: "", addresses: [] };
     const mine = own(url);
-    if (!mine && !WEB_PORTS.has(portOf(url))) return onPort(portOf(url));
+    if (!mine && !WEB_PORTS.has(portOf(url))) return { why: onPort(portOf(url)), addresses: [] };
     const host = bare(url);
-    if (!mine && (localName(host) || (net.isIP(host) && !isPublicAddress(host)))) return NOT_PUBLIC;
-    if (!mine || refused.size) {
-      const addresses = await addressesOf(host);
-      if (!addresses.length) return UNRESOLVED;
-      if (!mine) for (const address of addresses) if (!isPublicAddress(address)) return atNotPublic(plainIp(address));
-      for (const address of addresses) if (refused.match(address)) return atRefused(refused.match(address));
+    if (!mine && (localName(host) || (net.isIP(host) && !isPublicAddress(host)))) return { why: NOT_PUBLIC, addresses: [] };
+    let addresses = [];
+    if (!mine || refused.size || resolve) {
+      addresses = await found(host);
+      if (!addresses.length && (!mine || refused.size)) return { why: UNRESOLVED, addresses: [] };
+      if (!mine) for (const address of addresses) if (!isPublicAddress(address)) return { why: atNotPublic(plainIp(address)), addresses: [] };
+      for (const address of addresses) if (refused.match(address)) return { why: atRefused(refused.match(address)), addresses: [] };
     }
     const ip = reached(seen);
-    if (ip && !mine && !isPublicAddress(ip)) return atNotPublic(ip);
-    if (ip && refused.match(ip)) return atRefused(refused.match(ip));
-    return "";
+    if (ip && !mine && !isPublicAddress(ip)) return { why: atNotPublic(ip), addresses: [] };
+    if (ip && refused.match(ip)) return { why: atRefused(refused.match(ip)), addresses: [] };
+    return { why: "", addresses: addresses.map(plainIp) };
   }
+  const judge = async (raw, seen = {}) => (await rule(raw, false, seen)).why;
+  const route = (raw) => rule(raw, true);
   async function inside(url, seen = {}) {
-    const host = bare(url);
     const ip = reached(seen);
     if (ip && !isPublicAddress(ip)) return true;
-    const addresses = await addressesOf(host);
+    const addresses = await found(bare(url));
     return !addresses.length || addresses.some((address) => !isPublicAddress(address));
   }
   function lookupFor(raw) {
-    const url = readUrl(raw);
-    if (!url) return (hostname, options, callback) => callback(Object.assign(new Error(`${hostname} ${UNREADABLE}`), { code: "ENOTPUBLIC", hostname }));
-    const mine = own(url);
-    if (mine && !refused.size) return undefined;
     return (hostname, options, callback) => {
-      dns.lookup(hostname, { ...options, all: true, verbatim: true }, (err, list) => {
-        if (err) return callback(err);
-        const bad = list.find(({ address }) => refused.match(address) || (!mine && !isPublicAddress(address)));
-        if (bad || !list.length) return callback(Object.assign(new Error(`${hostname} ${bad ? (refused.match(bad.address) ? atRefused(refused.match(bad.address)) : atNotPublic(bad.address)) : UNRESOLVED}`), { code: "ENOTPUBLIC", hostname }));
-        if (options && options.all) callback(null, list);
-        else callback(null, list[0].address, list[0].family);
-      });
+      route(raw).then(
+        ({ why, addresses }) => {
+          const family = options && options.family;
+          const list = addresses.map((address) => ({ address, family: net.isIP(address) })).filter((one) => !family || one.family === family);
+          if (why || !list.length) return callback(Object.assign(new Error(`${hostname} ${why || UNRESOLVED}`), { code: why ? "ENOTPUBLIC" : "ENOTFOUND", hostname }));
+          if (options && options.all) callback(null, list);
+          else callback(null, list[0].address, list[0].family);
+        },
+        (err) => callback(err),
+      );
     };
   }
-  return { given: given ? given.href : "", refused, judge, inside, lookupFor };
+  return { given: given ? given.href : "", refused, judge, route, found, inside, lookupFor };
 }
 
-module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused };
+module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, UNRESOLVED };

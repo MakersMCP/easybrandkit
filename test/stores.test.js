@@ -265,7 +265,44 @@ test("a picture that does not come is skipped, a host that cannot be found is to
   });
   const unknown = await stores.readSource(link, dir);
   assert.equal(unknown.ok, false);
-  assert.match(unknown.error, /ENOTFOUND/);
+  assert.equal(unknown.error, "host itunes.apple.com could not be looked up");
+});
+
+test("a listing's hosts are each looked up once, its pictures and its redirects judged and connected by that one answer, a run's own lookup shared", async (t) => {
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const png = Buffer.alloc(33);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(1024, 20);
+  const art = "https://is1-ssl.mzstatic.com/image/thumb";
+  const lookup = { results: [{ trackName: "Acme", artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, screenshotUrls: [`${art}/1.png/392x696bb.jpg`, `${art}/2.png/392x696bb.jpg`] }] };
+  // The first screenshot is moved to the second's host, as a CDN does.
+  const asked = storeAnswers(t, (url) => {
+    if (url.hostname === "itunes.apple.com") return { body: JSON.stringify(lookup) };
+    if (url.pathname.includes("/1.png/")) return { status: 302, headers: { location: `${art}/moved/1290x0w.png` } };
+    return { body: png };
+  });
+  // Each name's later answers would be this machine.
+  const answered = new Map();
+  const found = t.mock.method(dns.promises, "lookup", async (host) => {
+    answered.set(host, (answered.get(host) || 0) + 1);
+    return [{ address: answered.get(host) > 1 ? "127.0.0.1" : "17.253.144.10", family: 4 }];
+  });
+  const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
+  const guard = guardFor("https://acme.com/");
+  const source = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir, guard);
+  assert.equal(source.ok, true, source.error);
+  assert.deepEqual(source.assets.map((asset) => asset.file), ["appstore-icon.png", "appstore-shot-01.png", "appstore-shot-02.png"]);
+  assert.deepEqual([...answered], [["itunes.apple.com", 1], ["is1-ssl.mzstatic.com", 1]]);
+  assert.equal(found.mock.callCount(), 2);
+  for (const { url, options } of asked) {
+    const to = await new Promise((resolve) => options.lookup(new URL(url).hostname, {}, (err, address) => resolve(err || address)));
+    assert.equal(to, "17.253.144.10", url);
+  }
+  // A second listing read in the same run asks the DNS nothing more.
+  await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), dir, guard);
+  assert.equal(found.mock.callCount(), 2);
 });
 
 test("a store that does not answer in time is named, not told in the words of Node's timer", async (t) => {

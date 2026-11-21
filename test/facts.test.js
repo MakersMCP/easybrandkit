@@ -929,12 +929,12 @@ test("robots.txt: its redirects are followed five at most, each only to a page t
   assert.deepEqual(asked, ["/robots.txt"]);
 });
 
-test("robots.txt on a host the run was not given is asked for only through the rule's own lookup, which takes no address the rule refuses", async (t) => {
+test("robots.txt is asked for only through the rule's own lookup, on the host given too, which hands back only the addresses it judged and asks the DNS once a run", async (t) => {
   setTimeLimit(120_000);
-  // This machine's own name, which the system finds on this machine or its
-  // network, taken for a public one by the lookup the rule judged by.
-  const host = os.hostname();
-  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  // A name whose next answer would be this machine.
+  let answers = 0;
+  const found = t.mock.method(dns.promises, "lookup", async (host) => (host === "www.acme.test" && answers++ ? [{ address: "127.0.0.1", family: 4 }] : [{ address: "93.184.216.34", family: 4 }]));
+  const system = t.mock.method(dns, "lookup", (host, options, callback) => callback(new Error("the DNS was asked again")));
   const lookups = [];
   const answer = (url, options) => {
     lookups.push([String(url), options.lookup]);
@@ -945,18 +945,16 @@ test("robots.txt on a host the run was not given is asked for only through the r
   t.mock.method(http, "get", answer);
   t.mock.method(https, "get", answer);
   const guard = guardFor("https://acme.test/");
-  // The home page's own robots.txt connects as any program does.
+  const to = (lookup, host) => new Promise((resolve) => lookup(host, {}, (err, address) => resolve(err || address)));
+  // The home page's own robots.txt, and one on another host.
   assert.deepEqual(await readRobots("https://acme.test", guard), { error: "its robots.txt could not be read" });
-  assert.deepEqual(lookups.map(([url, lookup]) => [url, typeof lookup]), [["https://acme.test/robots.txt", "undefined"]]);
-  // One on another host goes through the rule's lookup.
-  assert.deepEqual(await readRobots(`http://${host}`, guard), { error: "its robots.txt could not be read" });
-  const [url, lookup] = lookups[1];
-  assert.equal(url, `http://${host}/robots.txt`);
-  assert.equal(typeof lookup, "function");
-  const system = await new Promise((resolve) => dns.lookup(host, { all: true }, (err, list) => resolve(err ? [] : list)));
-  if (!system.length || system.every(({ address }) => require("../skills/easybrandkit/scripts/lib/address").isPublicAddress(address))) return t.skip(`${host} is not found here on this machine or its network`);
-  const said = await new Promise((resolve) => lookup(host, {}, (err) => resolve(err)));
-  assert.ok(said && said.code === "ENOTPUBLIC", String(said));
+  assert.deepEqual(await readRobots("http://www.acme.test", guard), { error: "its robots.txt could not be read" });
+  assert.deepEqual(await readRobots("http://www.acme.test", guard), { error: "its robots.txt could not be read" });
+  assert.deepEqual(lookups.map(([url, lookup]) => [url, typeof lookup]), [["https://acme.test/robots.txt", "function"], ["http://www.acme.test/robots.txt", "function"], ["http://www.acme.test/robots.txt", "function"]]);
+  assert.equal(await to(lookups[0][1], "acme.test"), "93.184.216.34");
+  assert.equal(await to(lookups[2][1], "www.acme.test"), "93.184.216.34");
+  assert.equal(found.mock.calls.filter((call) => call.arguments[0] === "www.acme.test").length, 1);
+  assert.equal(system.mock.callCount(), 0);
 });
 
 test("a menu page whose read fails is told on one line, and an exception in it not by what it says", async (t) => {
