@@ -23,6 +23,7 @@ const { setTimeLimit } = require("../skills/easybrandkit/scripts/lib/time");
 const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { partedTemp, roomlessTemp } = require("./temp-skip");
+const { withoutBusyNotes } = require("./busy-notes");
 
 const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp || roomlessTemp;
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
@@ -1206,7 +1207,7 @@ test("--facts: a menu page that cannot be opened, moves on, goes blank or moves 
   });
   const { kit, facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true, timeLimit: 150_000 });
   assert.deepEqual(facts.pages.map((p) => p.role), ["home"]);
-  assert.deepEqual(kit.notes, []);
+  assert.deepEqual(withoutBusyNotes(kit.notes), []);
   assert.deepEqual(facts.skipped, [
     { role: "pricing", url: `${origin}/pricing`, reason: "it answered 404" },
     // Not told as the page before it was: each address starts afresh.

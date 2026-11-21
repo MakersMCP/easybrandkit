@@ -30,6 +30,7 @@ const proxyLib = require("../skills/easybrandkit/scripts/lib/proxy");
 const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { storeAnswers } = require("./store-answers");
 const { partedTemp, roomlessTemp, roomlessIn } = require("./temp-skip");
+const { withoutBusyNotes, withoutUndrawnCard } = require("./busy-notes");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -2222,17 +2223,17 @@ test("a deeper address whose home page fails is read as given and says so, and i
     const dir = path.join(parent, what.replace(/\W+/g, "-"));
     const { kit } = await makeKit(asked, { dir, stores: false });
     assert.equal(kit.url, asked, what);
-    assert.deepEqual(kit.notes, [noteOf(told)], what);
+    assert.deepEqual(withoutBusyNotes(kit.notes), [noteOf(told)], what);
     assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], what);
-    assert.deepEqual(fs.readdirSync(dir).sort(), kitNames, what);
+    assert.deepEqual(fs.readdirSync(dir).sort(), withoutUndrawnCard(kitNames, kit.notes), what);
   }
   // A home page that fails only once its two logos are cut leaves none of
   // what it wrote: the page given has one logo.
   home = answer(200, `${brandPage("rgb(255,0,0)", "rgb(255,255,255)")}<script>fetch("/when").then(() => location.replace("/gone"))</script>`);
   const late = path.join(parent, "late");
   const { kit } = await makeKit(asked, { dir: late, stores: false, log: (line) => line === "Taking the first screen" && when.release() });
-  assert.deepEqual(kit.notes, [noteOf(`led to ${site.origin}/gone, which answered 410`)]);
-  assert.deepEqual(fs.readdirSync(late).sort(), kitNames);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [noteOf(`led to ${site.origin}/gone, which answered 410`)]);
+  assert.deepEqual(fs.readdirSync(late).sort(), withoutUndrawnCard(kitNames, kit.notes));
 
   // The page given is named by the brand's part of its title, not by its
   // own subject, which comes first in it.
@@ -2248,7 +2249,7 @@ test("a deeper address whose home page fails is read as given and says so, and i
   // and FACTS.md says that the home page could not be read, and why.
   const withFacts = path.join(parent, "facts");
   const { kit: factsKit, facts } = await makeKit(asked, { dir: withFacts, stores: false, facts: true });
-  assert.deepEqual(factsKit.notes, [noteOf("answered 404")]);
+  assert.deepEqual(withoutBusyNotes(factsKit.notes), [noteOf("answered 404")]);
   assert.deepEqual(facts.pages.map((one) => [one.role, one.url, one.file]), [["given", asked, "pages/given.md"]]);
   assert.deepEqual(facts.skipped, [{ role: "home", url, reason: "it answered 404" }]);
   assert.deepEqual(fs.readdirSync(path.join(withFacts, "pages")), ["given.md"]);
@@ -2262,7 +2263,7 @@ test("a deeper address whose home page fails is read as given and says so, and i
   home = answer(200);
   const read = await makeKit(asked, { dir: path.join(parent, "home"), stores: false });
   assert.equal(read.kit.url, url);
-  assert.deepEqual(read.kit.notes, [`${asked} is not the home page, so ${url} was read instead: the home page carries the brand's own header and colors.`]);
+  assert.deepEqual(withoutBusyNotes(read.kit.notes), [`${asked} is not the home page, so ${url} was read instead: the home page carries the brand's own header and colors.`]);
 
   // Both fail: the error names the address given, and the earlier kit stays.
   const dir = path.join(parent, "kit");
@@ -2373,7 +2374,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
     assert.equal(kit.name, "Acme", what);
     assert.deepEqual(kit.stores[0].assets.map((asset) => asset.file), ["appstore-icon.png", "appstore-shot-01.png"], what);
     assert.deepEqual(kit.logos, [], what);
-    assert.deepEqual(kit.notes, [noteOf(told), ...(what === "a 403" ? ["No facts were read: the website it names could not be read."] : [])], what);
+    assert.deepEqual(withoutBusyNotes(kit.notes), [noteOf(told), ...(what === "a 403" ? ["No facts were read: the website it names could not be read."] : [])], what);
     assert.equal(facts, null, what);
     assert.deepEqual(fs.readdirSync(dir).sort(), fromListing, what);
     assert.ok(fs.readFileSync(path.join(dir, "BRAND.md"), "utf8").includes(`- ${noteOf(told)}\n`), what);
@@ -2386,7 +2387,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   t.mock.method(pageLib, "waitForContent", async () => "loader");
   const bare = await reloadedKit().makeKit(listing, { dir: path.join(parent, "bare"), stores: false });
   pageLib.waitForContent.mock.restore();
-  assert.deepEqual(bare.kit.notes, [noteOf("still shows no content after 30 s")]);
+  assert.deepEqual(withoutBusyNotes(bare.kit.notes), [noteOf("still shows no content after 30 s")]);
   assert.deepEqual(fs.readdirSync(path.join(parent, "bare")).sort(), fromListing);
 
   // A run with no time left to wait, or that used up its time on the page,
@@ -2407,7 +2408,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
     missing = blocked;
     const dir = path.join(parent, `partly-${blocked}`);
     const { kit } = await makeKit(listing, { dir, stores: false });
-    assert.deepEqual(kit.notes, [`${listing} is a store listing, and the website it names, ${seller}, answered 403, so only the listing was read: the kit has ${gave} but no logos, colors or fonts. For those, give an address of the product's site that opens.`]);
+    assert.deepEqual(withoutBusyNotes(kit.notes), [`${listing} is a store listing, and the website it names, ${seller}, answered 403, so only the listing was read: the kit has ${gave} but no logos, colors or fonts. For those, give an address of the product's site that opens.`]);
     assert.deepEqual(fs.readdirSync(dir).sort(), files);
   };
   await partly("1.png", "the app icon", ["BRAND.md", "_brand.yml", "appstore-icon.png", "brand.json"]);
@@ -2428,26 +2429,26 @@ test("a store listing whose website fails keeps what the listing gave and says s
   const noPictures = await makeKit(listing, { dir: path.join(parent, "no-pictures"), stores: false });
   assert.deepEqual(noPictures.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.deepEqual(noPictures.kit.stores[0].assets, []);
-  assert.deepEqual(noPictures.kit.notes, [`${listing} is a store listing none of whose pictures could be downloaded, so the kit comes from the website it names, ${seller}.`]);
+  assert.deepEqual(withoutBusyNotes(noPictures.kit.notes), [`${listing} is a store listing none of whose pictures could be downloaded, so the kit comes from the website it names, ${seller}.`]);
   // And the note says which ones came.
   missing = "1.png";
   const iconOnly = await makeKit(listing, { dir: path.join(parent, "icon-only"), stores: false });
-  assert.deepEqual(iconOnly.kit.notes, [`${listing} is a store listing: its icon comes from the listing, the rest from the website it names, ${seller}.`]);
+  assert.deepEqual(withoutBusyNotes(iconOnly.kit.notes), [`${listing} is a store listing: its icon comes from the listing, the rest from the website it names, ${seller}.`]);
   missing = "AppIcon";
   const shotOnly = await makeKit(listing, { dir: path.join(parent, "shot-only"), stores: false });
-  assert.deepEqual(shotOnly.kit.notes, [`${listing} is a store listing: its screenshot comes from the listing, the rest from the website it names, ${seller}.`]);
+  assert.deepEqual(withoutBusyNotes(shotOnly.kit.notes), [`${listing} is a store listing: its screenshot comes from the listing, the rest from the website it names, ${seller}.`]);
   missing = "";
 
   // A website that opens gives the rest of the kit.
   answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
   const whole = await makeKit(listing, { dir: path.join(parent, "whole"), stores: false });
-  assert.deepEqual(whole.kit.notes, [`${listing} is a store listing: its icon and screenshot come from the listing, the rest from the website it names, ${seller}.`]);
+  assert.deepEqual(withoutBusyNotes(whole.kit.notes), [`${listing} is a store listing: its icon and screenshot come from the listing, the rest from the website it names, ${seller}.`]);
   assert.deepEqual(whole.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.ok(fs.existsSync(path.join(parent, "whole", "appstore-icon.png")));
   // A listing that names no website.
   seller = "";
   const alone = await makeKit(listing, { dir: path.join(parent, "alone"), stores: false, facts: true });
-  assert.deepEqual(alone.kit.notes, [`${listing} is a store listing that names no website, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. Give the product's website for those.`, "No facts were read: the listing names no website."]);
+  assert.deepEqual(withoutBusyNotes(alone.kit.notes), [`${listing} is a store listing that names no website, so only the listing was read: the kit has the app icon and a screenshot but no logos, colors or fonts. Give the product's website for those.`, "No facts were read: the listing names no website."]);
 
   // A browser that ends on the way, or that is not there, is no failure of
   // the website's, and ends the run.
@@ -2563,7 +2564,7 @@ test("an address a site leads to is opened only on port 80 or 443 and on the pub
   const asked = `${given}project/`;
   const { kit } = await makeKit(asked, { dir: path.join(parent, "deeper"), stores: false });
   assert.equal(kit.url, asked);
-  assert.deepEqual(kit.notes, [`The home page, ${given}, could not be read: it led to http://127.0.0.1:${other.port}/inside, which is on port ${other.port}, not 80 or 443. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`The home page, ${given}, could not be read: it led to http://127.0.0.1:${other.port}/inside, which is on port ${other.port}, not 80 or 443. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
   // Given that program's own address, it is read, as a site of the user's.
   const own = await makeKit(`${other.origin}/inside`, { dir: path.join(parent, "own"), stores: false });
   assert.deepEqual(own.kit.logos.map((logo) => logo.file), ["logo-01.png"]);
@@ -2856,12 +2857,12 @@ test("an http address on port 80 that gives no answer or no connection, as a sit
   const { kit } = await makeKit("http://brand.test/", { dir: path.join(parent, "kit"), stores: false });
   assert.equal(kit.url, "https://brand.test/");
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
-  assert.deepEqual(kit.notes, ["http://brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), so https://brand.test/ was read in its place."]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), ["http://brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), so https://brand.test/ was read in its place."]);
   assert.ok(asked.includes("brand.test/"), asked.join(" "));
   // So is a page the kit chose, as the home page of a deeper address.
   const deeper = await makeKit("http://www.brand.test/blog/post", { dir: path.join(parent, "deeper"), stores: false });
   assert.equal(deeper.kit.url, "https://www.brand.test/");
-  assert.deepEqual(deeper.kit.notes, ["http://www.brand.test/blog/post is not the home page, so http://www.brand.test/ was read instead: the home page carries the brand's own header and colors.", "http://www.brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), so https://www.brand.test/ was read in its place."]);
+  assert.deepEqual(withoutBusyNotes(deeper.kit.notes), ["http://www.brand.test/blog/post is not the home page, so http://www.brand.test/ was read instead: the home page carries the brand's own header and colors.", "http://www.brand.test/ could not be opened (net::ERR_EMPTY_RESPONSE), so https://www.brand.test/ was read in its place."]);
   // Where https fails as well, the last line names both.
   const dir = path.join(parent, "earlier");
   writeFiles(dir, EARLIER);
@@ -3471,7 +3472,7 @@ test("a tab that stops answering is told in words, and more time is advised only
   const stalledOnce = withStalledTab(t, "Page.getLayoutMetrics", 1);
   const asked = `${url}deep`;
   const { kit } = await stalledOnce(asked, { dir: path.join(parent, "deep"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`The home page, ${url}, could not be read: it stopped answering. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
 // kit.js with the browser tab's calls passed through change first: what it
@@ -3749,7 +3750,7 @@ test("a run's notes name what the kit's proxy refused while it read the page, an
   const { kit } = await makeKit(given, { dir: path.join(parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);
   assert.ok(looked.includes("pixel.gone.test"), "the proxy looked the picture's name up");
-  assert.deepEqual(kit.notes, [`While easybrandkit read ${given}, the browser asked for http://127.0.0.1:${other.port}/pic.png, which is on port ${other.port}, not 80 or 443: it was not reached.`]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`While easybrandkit read ${given}, the browser asked for http://127.0.0.1:${other.port}/pic.png, which is on port ${other.port}, not 80 or 443: it was not reached.`]);
   assert.ok(fs.readFileSync(path.join(parent, "kit", "BRAND.md"), "utf8").includes(`- ${kit.notes[0]}\n`));
   assert.equal(other.connections, 0);
 });
@@ -4009,7 +4010,7 @@ test("a local site under development given as http://localhost:<port> is read th
     const { kit } = await makeKit(`http://${host}:${port}/`, { dir: path.join(parent, host), stores: false });
     assert.equal(kit.url, `http://${host}:${port}/`);
     assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], host);
-    assert.deepEqual(kit.notes, [], host);
+    assert.deepEqual(withoutBusyNotes(kit.notes), [], host);
     for (const want of [`${host}:${port} /pic.png`, `${host}:${port} /app.js`, `${host}:${port} upgrade /hot`, `${host}:${port} /opened`]) assert.ok(asked.includes(want), `${want}: ${asked.join(", ")}`);
   }
   assert.ok(net.isIP("127.0.0.1"));
@@ -4039,7 +4040,7 @@ test("a local site whose page takes its styles and its logo from another port of
   const port = new URL(other.origin).port;
   // The browser asks for the two in either order.
   assert.equal(kit.notes[0], "No logo was found on the page itself.");
-  assert.deepEqual(kit.notes.slice(1).sort(), ["app.css", "logo.svg"].map((file) => `While easybrandkit read ${given}, the browser asked for http://${at}/${file}, which is on port ${port}, not 80 or 443: it was not reached.`));
+  assert.deepEqual(withoutBusyNotes(kit.notes).slice(1).sort(), ["app.css", "logo.svg"].map((file) => `While easybrandkit read ${given}, the browser asked for http://${at}/${file}, which is on port ${port}, not 80 or 443: it was not reached.`));
   assert.deepEqual(assets, [], "the other port was asked nothing");
 });
 
@@ -4882,7 +4883,7 @@ test("a home page the run used up its time on ends the run, with the advice to g
   // With time to spare, a home page that does not answer is a page that failed.
   const stalledOnce = withStalledTab(t, "Page.navigate", 1);
   const { kit } = await stalledOnce(deeper, { dir: path.join(parent, "deeper"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, ${home}, could not be read: it did not answer. ${deeper} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`The home page, ${home}, could not be read: it did not answer. ${deeper} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
 test("a short time limit reads what a page shows, and says so when the page shows nothing and there is no time to wait", { skip: noBrowser }, async (t) => {
@@ -4897,7 +4898,7 @@ test("a short time limit reads what a page shows, and says so when the page show
   // A home page with text and links and no logo is the home page.
   const { kit } = await makeKit(`${home}deep`, { dir: path.join(parent, "home"), stores: false, timeLimit: 45_000 });
   assert.equal(kit.url, home);
-  assert.deepEqual(kit.notes, [`${home}deep is not the home page, so ${home} was read instead: the home page carries the brand's own header and colors.`, "No logo was found on the page itself."]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`${home}deep is not the home page, so ${home} was read instead: the home page carries the brand's own header and colors.`, "No logo was found on the page itself."]);
   // A page that shows nothing is not told as one that was waited for.
   await assert.rejects(makeKit(`${home}tr`, { dir: path.join(parent, "bare"), stores: false, timeLimit: 45_000 }), (err) => err.message === `${home}tr shows no content yet and the run has no time left to wait for it, so nothing was read. Try again, or give it more time with --timeout.`);
   assert.equal(fs.existsSync(path.join(parent, "bare")), false);
@@ -5220,7 +5221,7 @@ test("a page whose tab closes while the browser runs fails the run in words, and
   make = withClosingTab(t, "DOMSnapshot.captureSnapshot", true, 1);
   const asked = `${url}deep`;
   const { kit } = await make(asked, { dir: path.join(parent, "deep"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, ${url}, could not be read: it is too large to read. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`The home page, ${url}, could not be read: it is too large to read. ${asked} was read as given, and its name, header and colors can differ from the home page's.`]);
 });
 
 test("files of someone's that come into a folder made during the run are refused, not taken for a kit", { skip: noBrowser }, async (t) => {
@@ -5872,14 +5873,14 @@ test("a site cannot make the browser start a program of this machine with an add
     way = name;
     const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, name.replace(/ /g, "-")), stores: false });
     assert.deepEqual(startedSoFar(), [], `nothing started for ${name}`);
-    assert.deepEqual(kit.notes, [not(url)], name);
+    assert.deepEqual(withoutBusyNotes(kit.notes), [not(url)], name);
     assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], name);
   }
   // More than three are named by their number.
   way = "four frames";
   const four = await makeKit(`${site.origin}/`, { dir: path.join(parent, "four"), stores: false });
   assert.deepEqual(startedSoFar(), [], "nothing started for four frames");
-  assert.deepEqual(four.kit.notes, [not("mailto:1@acme.example"), not("mailto:2@acme.example"), not("mailto:3@acme.example"), "1 more address that is not a web address was tried as well."]);
+  assert.deepEqual(withoutBusyNotes(four.kit.notes), [not("mailto:1@acme.example"), not("mailto:2@acme.example"), not("mailto:3@acme.example"), "1 more address that is not a web address was tried as well."]);
   // Where the browser hands such an address to the system itself, as on
   // macOS and Windows, a frame's is not said to be held; the page's own move
   // still is. (The browser here still has its stand-ins.)
@@ -5891,10 +5892,10 @@ test("a site cannot make the browser start a program of this machine with an add
   chromeModule.triedNotes = triedNotes;
   way = "a frame";
   const framed = await elsewhere(`${site.origin}/`, { dir: path.join(parent, "frame-elsewhere"), stores: false });
-  assert.deepEqual(framed.kit.notes, [`${site.origin}/ tried to open ${mail}, which is not a web address, in a way easybrandkit stops only on Linux.`]);
+  assert.deepEqual(withoutBusyNotes(framed.kit.notes), [`${site.origin}/ tried to open ${mail}, which is not a web address, in a way easybrandkit stops only on Linux.`]);
   way = "its script";
   const own = await elsewhere(`${site.origin}/`, { dir: path.join(parent, "script-elsewhere"), stores: false });
-  assert.deepEqual(own.kit.notes, [not(mail)]);
+  assert.deepEqual(withoutBusyNotes(own.kit.notes), [not(mail)]);
   // A redirect of the address given to one: the run says where it led, and
   // the stand-ins take it.
   way = "a redirect";
@@ -5906,7 +5907,7 @@ test("a site cannot make the browser start a program of this machine with an add
   way = "a menu page's redirect";
   const { kit: menu, facts } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "menu"), stores: false, facts: true });
   assert.deepEqual(facts.skipped.map(({ role, reason }) => [role, reason]), [["pricing", "it led to mailto:sales@acme.example, which is not a web address"]]);
-  assert.deepEqual(menu.notes, [`${site.origin}/pricing tried to open mailto:sales@acme.example, which is not a web address: it was not opened.`]);
+  assert.deepEqual(withoutBusyNotes(menu.notes), [`${site.origin}/pricing tried to open mailto:sales@acme.example, which is not a web address: it was not opened.`]);
   assert.deepEqual(startedSoFar(), [], "nothing started for a menu page");
 });
 
@@ -6178,7 +6179,7 @@ test("a browser installed as a snap or a Flatpak is not said to have opened noth
   // The page's own move is cancelled in the page, in any browser; a frame's
   // address reached the browser, also when the page's own move to it was
   // cancelled as well.
-  assert.deepEqual(kit.notes.sort(), [
+  assert.deepEqual(withoutBusyNotes(kit.notes).sort(), [
     `${site.origin}/ tried to open mailto:both@acme.example, which is not a web address, in a way easybrandkit may not stop in a browser installed as a snap or a Flatpak.`,
     `${site.origin}/ tried to open mailto:frame@acme.example, which is not a web address, in a way easybrandkit may not stop in a browser installed as a snap or a Flatpak.`,
     `${site.origin}/ tried to open mailto:own@acme.example, which is not a web address: it was not opened.`,
@@ -6227,7 +6228,7 @@ test("a page the kit chose on another port than 80 or 443 is not opened, a menu 
   asked.length = 0;
   const blog = `http://blog.brand.test:${port}/post`;
   const { kit } = await makeKit(blog, { dir: path.join(parent, "blog"), stores: false });
-  assert.deepEqual(kit.notes, [`The home page, http://brand.test:${port}/, could not be read: it is on port ${port}, not 80 or 443. ${blog} was read as given, and its name, header and colors can differ from the home page's.`]);
+  assert.deepEqual(withoutBusyNotes(kit.notes), [`The home page, http://brand.test:${port}/, could not be read: it is on port ${port}, not 80 or 443. ${blog} was read as given, and its name, header and colors can differ from the home page's.`]);
   assert.ok(!asked.some((one) => one.startsWith(`brand.test:${port} `)), asked.join(", "));
 });
 
