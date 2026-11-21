@@ -1507,6 +1507,122 @@ test("a profile whose Local State cannot be written, which turns the browser's o
   }
 });
 
+test("a profile whose folder for the browser's downloads cannot be made stops the run before the browser starts: with no room, told as the temp folder's, and in any other way, in words that name it", { skip: (["darwin", "win32"].includes(process.platform) && "the folder is made on Linux and the like only") || partedTemp }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  // A browser that keeps it was started, and then waits.
+  const started = path.join(parent, "started");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${sh(started)}\nexec sleep 60\n`, { mode: 0o755 });
+  setEnv(t, { TMPDIR: temp, CHROME_PATH: chrome });
+  t.after(() => {
+    killBrowsers();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  let failing = null;
+  const write = fs.writeFileSync;
+  t.mock.method(fs, "writeFileSync", function (file, ...rest) {
+    if (failing && path.basename(String(file)) === "user-dirs.dirs" && String(file).startsWith(temp)) throw failing;
+    return write.call(this, file, ...rest);
+  });
+  for (const [err, said] of [
+    [Object.assign(new Error("EIO: i/o error, write"), { code: "EIO", errno: -5, syscall: "write" }), `chrome was not started: easybrandkit could not make the folder the browser's downloads go into in ${temp}, which keeps the first bytes of a download out of your Downloads folder: i/o error (EIO).`],
+    [Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", errno: -28, syscall: "write" }), `The disk that holds the temp folder, ${temp}, is full (ENOSPC). Free some space on it, or set TMPDIR to a folder on another disk.`],
+  ]) {
+    failing = err;
+    await assert.rejects(makeKit("https://acme.example/", { dir, stores: false }), (got) => got.message === said && got.earlierKit === dir, err.code);
+    assert.equal(fs.existsSync(started), false, `${err.code}: the browser was not started`);
+    assert.deepEqual(fs.readdirSync(temp), [], `${err.code}: the profile is removed`);
+    assert.deepEqual(filesOf(dir), before);
+  }
+});
+
+test("on Linux the browser's downloads go into its profile: a config folder there names the profile's Downloads folder in user-dirs.dirs and links to every other entry of the user's own, which stays as it was when the profile goes", { skip: (["darwin", "win32"].includes(process.platform) && "the browser finds its Downloads folder in user-dirs.dirs on Linux and the like only") || partedTemp }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-cf-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // A temp folder whose path holds what user-dirs.dirs has to escape.
+  const temp = path.join(parent, 'q"\\$`');
+  if (roomlessIn(temp)) return t.skip(roomlessIn(temp));
+  fs.mkdirSync(temp);
+  // A browser that writes down its config folder, what user-dirs.dirs there
+  // says, and where each entry of that folder leads, then quits.
+  const seen = path.join(parent, "seen");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\n{ printf '%s\\n' "$XDG_CONFIG_HOME"; cat "$XDG_CONFIG_HOME/user-dirs.dirs"; for entry in "$XDG_CONFIG_HOME"/*; do printf '%s %s\\n' "\${entry##*/}" "$(readlink "$entry")"; done; } > ${sh(seen)}\n`, { mode: 0o755 });
+  // The user's own config folder, as ~/.config and as XDG_CONFIG_HOME.
+  const config = (folder) => {
+    fs.mkdirSync(path.join(folder, "fontconfig"), { recursive: true });
+    fs.writeFileSync(path.join(folder, "fontconfig", "fonts.conf"), "<fontconfig/>\n");
+    fs.writeFileSync(path.join(folder, "mimeapps.list"), "[Default Applications]\n");
+    fs.writeFileSync(path.join(folder, "user-dirs.dirs"), 'XDG_DOWNLOAD_DIR="$HOME/Downloads"\n');
+    return fs.readdirSync(folder).sort();
+  };
+  const home = path.join(parent, "home");
+  const own = config(path.join(home, ".config"));
+  const elsewhere = path.join(parent, "elsewhere");
+  config(elsewhere);
+  setEnv(t, { TMPDIR: temp, CHROME_PATH: chrome, HOME: home, XDG_CONFIG_HOME: undefined });
+  // XDG_CONFIG_HOME unset, set, and set to a relative path, which names no
+  // config folder and is passed over, as xdg-user-dirs passes it over.
+  for (const [given, folder] of [
+    [undefined, path.join(home, ".config")],
+    [elsewhere, elsewhere],
+    ["config", path.join(home, ".config")],
+  ]) {
+    if (given === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = given;
+    fs.rmSync(seen, { force: true });
+    await assert.rejects(launch({ width: 800, height: 600 }), /did not start/);
+    const [at, dirs, ...links] = fs.readFileSync(seen, "utf8").trim().split("\n").map((line) => line.trimEnd());
+    const profile = path.dirname(at);
+    assert.equal(path.basename(at), "config", given);
+    assert.ok(path.basename(profile).startsWith("easybrandkit-chrome-"), profile);
+    // Read as xdg-user-dirs reads it: the value in double quotes, each
+    // character after a backslash taken as it is.
+    const value = /^XDG_DOWNLOAD_DIR="((?:[^"\\]|\\.)*)"$/.exec(dirs);
+    assert.ok(value, dirs);
+    assert.equal(value[1].replace(/\\(.)/g, "$1"), path.join(profile, "Downloads"), given);
+    assert.deepEqual(links.sort(), [`fontconfig ${path.join(folder, "fontconfig")}`, `mimeapps.list ${path.join(folder, "mimeapps.list")}`, "user-dirs.dirs"], given);
+    assert.deepEqual(fs.readdirSync(temp), [], `${given}: the profile is removed`);
+    assert.deepEqual(fs.readdirSync(folder).sort(), own, `${given}: the user's own config folder is as it was`);
+    assert.equal(fs.readFileSync(path.join(folder, "fontconfig", "fonts.conf"), "utf8"), "<fontconfig/>\n");
+    assert.equal(fs.readFileSync(path.join(folder, "user-dirs.dirs"), "utf8"), 'XDG_DOWNLOAD_DIR="$HOME/Downloads"\n', `${given}: the user's own user-dirs.dirs is as it was`);
+  }
+});
+
+test("a profile that cannot be listed as it is removed, as with no file left to open, is removed by the names made in it, the links of its config folder among them", { skip: (["darwin", "win32"].includes(process.platform) && "the stand-ins and the config folder are made on Linux and the like only") || partedTemp }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  // The user's own config folder, with entries the browser's links lead to.
+  const home = path.join(parent, "home");
+  fs.mkdirSync(path.join(home, ".config", "fontconfig"), { recursive: true });
+  fs.writeFileSync(path.join(home, ".config", "mimeapps.list"), "[Default Applications]\n");
+  setEnv(t, { TMPDIR: temp, CHROME_PATH: chrome, HOME: home, XDG_CONFIG_HOME: undefined });
+  // The file of what the browser prints finds no room, once everything else
+  // is made in the profile, and the profile then cannot be listed.
+  const open = fs.openSync;
+  t.mock.method(fs, "openSync", function (file, ...rest) {
+    if (String(file).startsWith(temp) && path.basename(String(file)) === "easybrandkit-output") throw Object.assign(new Error("ENOSPC: no space left on device, open"), { code: "ENOSPC", errno: -28, syscall: "open" });
+    return open.call(this, file, ...rest);
+  });
+  const rm = fs.rmSync;
+  t.mock.method(fs, "rmSync", function (at, ...rest) {
+    if (path.dirname(String(at)) === temp && path.basename(String(at)).startsWith("easybrandkit-chrome-")) throw Object.assign(new Error("EMFILE: too many open files, scandir"), { code: "EMFILE", errno: -24, syscall: "scandir" });
+    return rm.call(this, at, ...rest);
+  });
+  await assert.rejects(launch({ width: 800, height: 600 }), (err) => err.code === "ENOSPC");
+  assert.deepEqual(fs.readdirSync(temp), [], "the profile is removed");
+  assert.deepEqual(fs.readdirSync(path.join(home, ".config")).sort(), ["fontconfig", "mimeapps.list"], "the user's own config folder is as it was");
+});
+
 test("a browser that does not answer is told within seconds when the temp folder has no room, and is waited for as long as the run has left otherwise", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");
@@ -4316,12 +4432,22 @@ async function savingSite(t) {
 
 const LINUX_HOME = noBrowser || (process.platform !== "linux" && "the Downloads folder follows HOME on Linux only");
 
-test("a page that tries to save files for the whole run leaves nothing in the user's Downloads folder", { skip: LINUX_HOME }, async (t) => {
+test("a page that tries to save files for the whole run leaves nothing in the user's Downloads folder, not for a moment", { skip: LINUX_HOME }, async (t) => {
   const site = await savingSite(t);
+  // Chrome writes the first bytes of a file before it refuses it, in a
+  // hidden file it removes a moment later: every entry that shows up in the
+  // user's Downloads folder is kept, also one that goes again at once.
+  const downloads = path.join(process.env.HOME, "Downloads");
+  fs.mkdirSync(downloads);
+  const seen = [];
+  const watcher = fs.watch(downloads, (event, name) => seen.push(`${event} ${name}`));
+  t.after(() => watcher.close());
   const { kit } = await makeKit(site.origin, { dir: path.join(site.parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"], "the page stays where it is");
   assert.ok(site.asked >= 1, "the page asked for the file");
   assert.deepEqual(site.downloads(), []);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.deepEqual(seen, [], "nothing came into the Downloads folder");
 });
 
 // Stands in for the browser between the kit and a real one: it starts the

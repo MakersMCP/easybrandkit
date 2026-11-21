@@ -61,6 +61,48 @@ function standIns(profile) {
   return dir;
 }
 
+// Chrome writes the first bytes of a file a page starts to download before
+// it refuses the download (see launch), in a hidden file in the user's
+// Downloads folder, .com.google.Chrome. and six letters, and removes it a
+// moment later: a run stopped in that moment left the site's bytes there,
+// and now and then the browser leaves the file there empty. On Linux and
+// the other systems that get stand-ins, the browser finds that folder as
+// xdg-user-dirs names it, in user-dirs.dirs in the config folder
+// (XDG_CONFIG_HOME, ~/.config by default), so it is given a config folder in
+// its profile whose user-dirs.dirs names the profile's own Downloads folder,
+// which goes with the profile. That config folder links to every other
+// entry of the user's own, so the browser reads the user's font and other
+// settings as before; the links go with the profile, and what they lead to
+// stays. Gives that config folder, and keeps the name of each link in
+// linked.
+function downloadsIn(profile, linked) {
+  const config = path.join(profile, "config");
+  const downloads = path.join(profile, "Downloads");
+  fs.mkdirSync(config, { mode: 0o700 });
+  fs.mkdirSync(downloads, { mode: 0o700 });
+  const given = process.env.XDG_CONFIG_HOME;
+  const own = path.resolve(given && path.isAbsolute(given) ? given : path.join(process.env.HOME || os.homedir(), ".config"));
+  let names = [];
+  try {
+    names = fs.readdirSync(own);
+  } catch {
+    // None, or not to be read: there is nothing to keep.
+  }
+  for (const name of names) {
+    if (name === "user-dirs.dirs") continue;
+    try {
+      fs.symlinkSync(path.join(own, name), path.join(config, name));
+      linked.push(name);
+    } catch {
+      // Left out.
+    }
+  }
+  // The path in double quotes, with a backslash before a quote, a
+  // backslash, a $ or a backquote, as the file is read.
+  fs.writeFileSync(path.join(config, "user-dirs.dirs"), `XDG_DOWNLOAD_DIR="${downloads.replace(/["\\$`]/g, (c) => `\\${c}`)}"\n`);
+  return config;
+}
+
 // The browsers this process has open, so that a run that is stopped can end
 // them at once instead of leaving them running.
 const open = new Set();
@@ -341,6 +383,8 @@ async function launch({ width, height }, { guard = null } = {}) {
   }
   const before = tempNames(temp);
   const profile = fs.mkdtempSync(path.join(temp, "easybrandkit-chrome-"));
+  // The links made in its config folder (see downloadsIn).
+  const linked = [];
   // What is made in the profile before the browser starts: on a disk with
   // no room for it, the browser would have none for its own files either,
   // and would wait for the run's whole time.
@@ -358,14 +402,15 @@ async function launch({ width, height }, { guard = null } = {}) {
       // Too short of files to list it.
     }
     const stands = path.join(profile, "stand-ins");
-    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "Local State"), path.join(profile, "easybrandkit-output"), ...HANDLERS.map((name) => path.join(stands, name))]) {
+    const config = path.join(profile, "config");
+    for (const file of [path.join(profile, "Default", "Preferences"), path.join(profile, "Local State"), path.join(profile, "easybrandkit-output"), ...HANDLERS.map((name) => path.join(stands, name)), ...linked.map((name) => path.join(config, name)), path.join(config, "user-dirs.dirs")]) {
       try {
         fs.unlinkSync(file);
       } catch {
         // Not made.
       }
     }
-    for (const dir of [path.join(profile, "Default"), stands, profile]) {
+    for (const dir of [path.join(profile, "Default"), stands, config, path.join(profile, "Downloads"), profile]) {
       try {
         fs.rmdirSync(dir);
       } catch {
@@ -450,6 +495,13 @@ async function launch({ width, height }, { guard = null } = {}) {
       const full = room(err, path.join(profile, "stand-ins"));
       if (full) throw full;
       throw new Error(`${place.name} was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: ${systemWords(err)}.`);
+    }
+    try {
+      env.XDG_CONFIG_HOME = downloadsIn(profile, linked);
+    } catch (err) {
+      const full = room(err, path.join(profile, "config"));
+      if (full) throw full;
+      throw new Error(`${place.name} was not started: easybrandkit could not make the folder the browser's downloads go into in ${temp}, which keeps the first bytes of a download out of your Downloads folder: ${systemWords(err)}.`);
     }
     env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath(path.join(profile, "no-bus"))}`;
     env.WAYLAND_DISPLAY = path.join(profile, "no-display");
