@@ -488,6 +488,40 @@ test("MAKERSMCP_REFUSE_ADDRESSES that refuses 127.0.0.1 or ::1 refuses 0.0.0.0 a
   }
 });
 
+// The same, by the table shared with easyscreenshotkit (address-cases.json),
+// so that a change to either kit's copy shows in the other's tests: each
+// address the table lists as reaching a loopback address is refused by a
+// setting that names that address, and by no setting that names the other
+// or another address; written as the host of an address, it is refused as
+// the address given and as one of its own pages, and a page another site
+// links there is refused by the rule for such a page before the setting.
+test("the addresses the shared table lists as reaching this machine's loopback are refused by MAKERSMCP_REFUSE_ADDRESSES that names that loopback address and by none that names the other, as an address and as the host of an address given or of a page", async () => {
+  const otherOf = (loop) => (loop === "::1" ? "127.0.0.1" : "::1");
+  for (const [loop, list] of Object.entries(CASES.reachesLoopback)) {
+    for (const address of list) {
+      assert.equal(refusedAddresses(loop).match(address), loop, address);
+      assert.equal(refusedAddresses(otherOf(loop)).match(address), "", address);
+      assert.equal(refusedAddresses("185.137.215.163").match(address), "", address);
+    }
+  }
+  const page = guardFor("https://acme.com/", { refused: refusedAddresses("127.0.0.0/8,::1") });
+  for (const [loop, hosts] of Object.entries(CASES.reachesLoopbackHosts)) {
+    for (const host of hosts) {
+      const given = `http://${host}:3000/`;
+      for (const setting of [loop, "127.0.0.0/8,::1"]) {
+        const guard = guardFor(given, { refused: refusedAddresses(setting) });
+        assert.equal(await guard.judge(given), `is at ${loop}, an address MAKERSMCP_REFUSE_ADDRESSES refuses`, `${given} ${setting}`);
+        assert.equal(await guard.judge(`${given}app.js`), `is at ${loop}, an address MAKERSMCP_REFUSE_ADDRESSES refuses`, `${given}app.js ${setting}`);
+      }
+      // A setting that names the other loopback address leaves it the
+      // address given, opened as the user's own.
+      assert.equal(await guardFor(given, { refused: refusedAddresses(otherOf(loop)) }).judge(given), "", given);
+      assert.equal(await page.judge(given), "is on port 3000, not 80 or 443", given);
+      assert.equal(await page.judge(`http://${host}/`), "is not on the public internet", host);
+    }
+  }
+});
+
 test("a request the kit makes itself connects only to an address the rule took, by the one lookup the rule judged, which asks the DNS once a run", async (t) => {
   // A name whose next answer would be this machine: the lookup the rule
   // judged by is the only one, so the connection never gets that answer.
