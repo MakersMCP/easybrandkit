@@ -381,7 +381,7 @@ test("the kit's own requests take no proxy the environment names, NODE_USE_ENV_P
       `  const real = dialLib.wire.dial;`,
       `  dialLib.wire.dial = (address, port, name) => {`,
       `    dials.push(name + " " + address + ":" + port);`,
-      `    if (address === "127.0.0.1") return real(address, port, name);`,
+      `    if (address === "127.0.0.1" || address === "::1") return real(address, port, name);`,
       `    return net.connect({ host: "127.0.0.1", port: port === 443 ? store.address().port : site.address().port });`,
       `  };`,
       `  const takes = await new Promise((resolve) => http.get("http://control.test/", () => resolve(true)).on("error", () => resolve(false)));`,
@@ -429,6 +429,8 @@ test("the kit's own requests take no proxy the environment names, NODE_USE_ENV_P
     assert.equal(said.listing, false, `${way}: the store stand-in takes no TLS`);
     assert.deepEqual(said.storeAsked, ["connection"], way);
     const port = said.dials[0].split(":").pop();
-    assert.deepEqual(said.dials, [`localhost 127.0.0.1:${port}`, "hop.test 93.184.216.34:80", "itunes.apple.com 17.253.144.10:443"], way);
+    // localhost is tried at ::1 first, where nothing listens here, then at
+    // 127.0.0.1, as the browser tries it.
+    assert.deepEqual(said.dials, [`localhost ::1:${port}`, `localhost 127.0.0.1:${port}`, "hop.test 93.184.216.34:80", "itunes.apple.com 17.253.144.10:443"], way);
   }
 });

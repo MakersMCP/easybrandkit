@@ -280,7 +280,7 @@ test("a run that has no address of its own, as one reading a site another source
   // given too.
   assert.deepEqual(await none.addressesFor("https://acme.com/robots.txt"), ["93.184.216.34"]);
   await assert.rejects(none.addressesFor("http://localhost:3000/robots.txt"), (err) => err.code === "ENOTPUBLIC" && err.message === "http://localhost:3000/robots.txt is on port 3000, not 80 or 443");
-  assert.deepEqual(await guardFor("http://localhost:3000/").addressesFor("http://localhost:3000/robots.txt"), ["127.0.0.1", "::1"]);
+  assert.deepEqual(await guardFor("http://localhost:3000/").addressesFor("http://localhost:3000/robots.txt"), ["::1", "127.0.0.1"]);
 });
 
 test("an address the run was not given is opened only on the public internet, by its form and by every address its name is found at, and never where its name is not found in time", async (t) => {
@@ -455,7 +455,7 @@ test("route gives the addresses a connection may go to, every address the lookup
   // connection has to know too.
   assert.deepEqual(await guard.route("http://intranet.acme.com:8080/x"), { why: "", addresses: ["10.0.0.5"] });
   assert.deepEqual(await guard.route("https://intranet.acme.com:8080/"), { why: "", addresses: ["10.0.0.5"] });
-  assert.deepEqual(await guardFor("http://localhost:3000/").route("http://localhost:3000/"), { why: "", addresses: ["127.0.0.1", "::1"] });
+  assert.deepEqual(await guardFor("http://localhost:3000/").route("http://localhost:3000/"), { why: "", addresses: ["::1", "127.0.0.1"] });
   assert.deepEqual(await guardFor("http://localhost:3000/").route("http://127.1..:3000/"), { why: "", addresses: ["127.0.0.1"] });
   assert.deepEqual(await guardFor("http://[::1]:3000/").route("http://[::1]:3000/"), { why: "", addresses: ["::1"] });
   // A name not found is no refusal of the address given, but nothing to
@@ -468,7 +468,7 @@ test("route gives the addresses a connection may go to, every address the lookup
   assert.equal(asked.filter((host) => host === "other.acme.com").length, 0);
   assert.deepEqual(await guard.found("www.acme.com"), both);
   assert.deepEqual(await guard.found("93.184.216.34"), ["93.184.216.34"]);
-  assert.deepEqual(await guard.found("app.localhost"), ["127.0.0.1", "::1"]);
+  assert.deepEqual(await guard.found("app.localhost"), ["::1", "127.0.0.1"]);
   assert.equal(asked.filter((host) => host === "www.acme.com").length, 1);
 });
 

@@ -3432,7 +3432,50 @@ test("MAKERSMCP_REFUSE_ADDRESSES that refuses 127.0.0.1 and ::1 refuses the addr
   assert.deepEqual(filesOf(dir), before);
 });
 
-test("MAKERSMCP_REFUSE_ADDRESSES holds where the kit's own lookup finds the address given, and the browser's own lookup, which finds it elsewhere, is never used", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+// localhost is connected to at ::1 first, as this machine's resolver and
+// the browser order its addresses: with 127.0.0.1 first, a site under
+// development that listens on ::1 alone, as Node.js's own
+// listen(port, "localhost") binds on Ubuntu, was passed over for another
+// program that listens on 127.0.0.1 on the same port, whose page the kit
+// then read, where 0.4.2's browser read the site.
+test("a site given as localhost that listens on ::1 alone is read, and not another program that listens on 127.0.0.1 on the same port", { skip: noBrowser }, async (t) => {
+  const reached = [];
+  const answer = (at, title) => (req, res) => {
+    reached.push(`${at} ${req.url}`);
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("<title>Acme</title>", `<title>${title}</title>`));
+  };
+  // ::1 on a port the system picks, then 127.0.0.1 on that same port, with
+  // another port when another program holds that one.
+  let six;
+  let four;
+  for (let tries = 1; ; tries++) {
+    six = http.createServer(answer("::1", "Dev site on IPv6"));
+    const unbound = await new Promise((resolve) => {
+      six.once("error", resolve);
+      six.listen(0, "::1", () => resolve(null));
+    });
+    if (unbound) return t.skip(`no ::1 to listen on here (${unbound.code})`);
+    four = http.createServer(answer("127.0.0.1", "Other program on IPv4"));
+    const taken = await new Promise((resolve) => {
+      four.once("error", resolve);
+      four.listen(six.address().port, "127.0.0.1", () => resolve(null));
+    });
+    if (!taken) break;
+    six.close();
+    if (taken.code !== "EADDRINUSE" || tries >= 20) throw taken;
+  }
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    six.close();
+    four.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const { kit } = await makeKit(`http://localhost:${six.address().port}/`, { dir: path.join(parent, "kit"), stores: false });
+  assert.equal(kit.name, "Dev site on IPv6");
+  assert.ok(reached.length && reached.every((line) => line.startsWith("::1 ")), reached.join("\n"));
+});
+
+test("MAKERSMCP_REFUSE_ADDRESSES holds where the kit's own lookup finds the address given, and the browser's own lookup, which finds it elsewhere, is never used",{ skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const trap = await counting(t);
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));

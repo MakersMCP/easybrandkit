@@ -223,10 +223,18 @@ function bare(url) {
   }
 }
 
+// This machine's loopback addresses, in the order a connection to
+// localhost tries them, ::1 first, as this machine's resolver and the
+// browser order them: with 127.0.0.1 first, a site under development that
+// listens on ::1 alone, as Node.js's own listen(port, "localhost") binds
+// on Ubuntu, was passed over for another program that listens on
+// 127.0.0.1 on the same port, whose pages the run then saved with no word.
+const LOOPBACK = ["::1", "127.0.0.1"];
+
 // The addresses of this machine that one of its own names for itself
 // stands for, for a host as it is judged (see bare): localhost both of its
-// loopback addresses, and 127.0.0.1 and ::1 themselves; null for any other
-// host. A name under localhost is none of them: a router on this machine,
+// loopback addresses (see LOOPBACK), and 127.0.0.1 and ::1 themselves; null
+// for any other host. A name under localhost is none of them: a router on this machine,
 // as Traefik or Caddy, serves each such name, as app1.localhost or
 // traefik.localhost, as a site of its own. Nor are another address of
 // 127.0.0.0/8, where another program can listen, as on 127.0.0.2 or
@@ -234,7 +242,7 @@ function bare(url) {
 // ::1 but a server there can tell apart by the name a request is for, and
 // an IPv6 form of 127.0.0.1, as ::ffff:127.0.0.1.
 function machineAddresses(host) {
-  if (host === "localhost") return ["127.0.0.1", "::1"];
+  if (host === "localhost") return [...LOOPBACK];
   return host === "127.0.0.1" || host === "::1" ? [host] : null;
 }
 
@@ -410,7 +418,7 @@ const LOOKUP_WAIT = 5_000;
 //
 // found(host): the addresses a host is at, by the same lookup: an IP
 // address is at itself, and localhost and the names under it are on this
-// machine's loopback. [] for a name not found.
+// machine's loopback, ::1 first (see LOOPBACK). [] for a name not found.
 //
 // inside(url): whether a host is not on the public internet, or cannot be
 // told to be, by the same lookup.
@@ -436,7 +444,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   };
   const found = async (host) => {
     if (net.isIP(host)) return [host];
-    if (localName(host)) return ["127.0.0.1", "::1"];
+    if (localName(host)) return [...LOOPBACK];
     return (await lookup(host)).list;
   };
   // On the scheme, host and port of the address given: its own pages; and
