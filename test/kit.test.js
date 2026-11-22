@@ -5472,6 +5472,46 @@ test("files of someone's that come into a folder made during the run are refused
   assert.deepEqual(fs.readdirSync(parent), ["kit"]);
 });
 
+test("the tests leave out of an exact comparison of a run's notes only the notes a busy machine gives, and a card.png only when such a note says the card was not drawn", () => {
+  const busy = [
+    "The page's headings and button labels were not read: the browser tab stopped answering.",
+    "Some of the page's headings and button labels were not read: the run's time ran out. Give it more time with --timeout.",
+    "The card could not be drawn: the browser tab stopped answering.",
+    "The card could not be drawn: the run's time ran out. Give it more time with --timeout.",
+    "The card could not be drawn: the browser did not open a tab in 30 s.",
+    "The card could not be drawn: the browser did not open a tab before the run's time ran out. Give it more time with --timeout.",
+    "The card could not be drawn: the browser did not answer the kit's connection to its tab in 30 s.",
+  ];
+  const other = [
+    "The card could not be drawn: the first screen could not be read.",
+    "The card could not be drawn: the browser gave back an empty picture.",
+    "The card could not be drawn: Cannot read properties of undefined (reading 'file').",
+    "The card could not be drawn: the kit's connection to its tab closed.",
+    "The card could not be drawn: the browser refused the kit's connection to its tab.",
+    "No logo was found on the page itself.",
+  ];
+  assert.deepEqual(withoutBusyNotes([...busy, ...other]), other);
+  const files = ["BRAND.md", "brand.json", "card.png"];
+  for (const note of busy.slice(2)) assert.deepEqual(withoutUndrawnCard(files, [note]), ["BRAND.md", "brand.json"], note);
+  for (const note of [...busy.slice(0, 2), ...other]) assert.deepEqual(withoutUndrawnCard(files, [note]), files, note);
+});
+
+test("the card of a kit with no logo, no solid colors, no fonts and no first screen is drawn, and says what it lacks", { skip: noBrowser }, async (t) => {
+  const { cardHtml } = require("../skills/easybrandkit/scripts/lib/card");
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const kit = { url: "https://www.acme.example/", name: "Acme", logos: [], colors: [], fonts: {}, screenshots: [] };
+  const html = cardHtml(kit, parent);
+  for (const words of ["No logo found on the page", "No solid colors found", "Not found", "acme.example"]) assert.ok(html.includes(words), words);
+  assert.doesNotMatch(html, /<img/);
+  setTimeLimit(120_000);
+  const browser = await launch({ width: 800, height: 600 });
+  t.after(() => browser.close());
+  const card = await renderCard(browser, kit, parent);
+  assert.deepEqual(card, { file: "card.png", width: 2400, height: 1350 });
+  assert.equal(fs.readFileSync(path.join(parent, "card.png")).readUInt32BE(0), 0x89504e47);
+});
+
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
