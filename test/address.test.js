@@ -162,31 +162,57 @@ test("an address the run was not given is opened on port 80 or 443 only, and the
   for (const [raw, port] of [["http://acme.com:8443/", "8443"], ["https://www.acme.com:8443/", "8443"], ["https://acme.com:444/", "444"], ["http://1.1.1.1:8080/", "8080"], ["https://1.1.1.1:22/", "22"], ["http://acme.com:25/", "25"], ["http://[2606:4700::1111]:8080/", "8080"]]) {
     assert.equal(await guard.judge(raw), `is on port ${port}, not 80 or 443`, raw);
   }
-  // A local site given is the user's own on its own port and nowhere else,
-  // this machine's names on that port counting as one host.
+  // A local site given is the user's own on its own port and nowhere else.
   // https on the host and port of an http address given is the same
   // program, which the browser asks over https by itself for a name that
   // takes only https (HSTS); http on those of an https address given is not.
   const local = guardFor("http://localhost:3000/");
-  for (const raw of ["http://localhost:3000/assets/app.css", "http://127.0.0.1:3000/", "http://[::1]:3000/", "http://app.localhost:3000/x", "https://localhost:3000/", "https://127.0.0.1:3000/x"]) assert.equal(await local.judge(raw), "", raw);
+  for (const raw of ["http://localhost:3000/assets/app.css", "http://127.0.0.1:3000/", "http://[::1]:3000/", "https://localhost:3000/", "https://127.0.0.1:3000/x", "http://127.1:3000/"]) assert.equal(await local.judge(raw), "", raw);
   for (const [raw, why] of [["http://localhost:3001/", "is on port 3001, not 80 or 443"], ["https://localhost:3001/", "is on port 3001, not 80 or 443"], ["http://localhost/", "is not on the public internet"], ["https://localhost/", "is not on the public internet"], ["http://10.0.0.5:3000/", "is on port 3000, not 80 or 443"], ["http://10.0.0.5/", "is not on the public internet"]]) {
     assert.equal(await local.judge(raw), why, raw);
   }
   assert.equal(await guardFor("https://localhost:3000/").judge("http://localhost:3000/"), "is on port 3000, not 80 or 443");
   assert.equal(await guardFor("https://acme.com:8443/").judge("http://acme.com:8443/"), "is on port 8443, not 80 or 443");
   assert.equal(await guardFor("http://acme.com:8443/").judge("https://acme.com:8443/x"), "");
-  // 127.0.0.1 as a URL writes it mapped into IPv6 is this machine's too; its
-  // other IPv6 forms are not names of this machine, and are judged.
-  assert.equal(await local.judge("http://[::ffff:127.0.0.1]:3000/"), "");
-  for (const raw of ["http://[::7f00:1]:3000/", "http://[::ffff:0:7f00:1]:3000/", "http://[2002:7f00:1::]:3000/", "http://[64:ff9b::7f00:1]:3000/"]) {
-    assert.equal(await local.judge(raw), "is on port 3000, not 80 or 443", raw);
-  }
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8080/")), true);
+  assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://[::1]:8080/")), true);
   assert.equal(sameHost(new URL("http://localhost:8080/"), new URL("http://127.0.0.1:8081/")), false);
-  // 0.0.0.0 and ::, which a connection takes for 127.0.0.1 and ::1, are this
-  // machine's own names too; the rest of 127/8 is not, as another program
-  // can listen on 127.0.0.2 or 127.0.0.53 on the same port.
-  for (const raw of ["http://0.0.0.0:3000/", "http://[::]:3000/x", "http://0:3000/", "http://127.1:3000/"]) assert.equal(await local.judge(raw), "", raw);
+  // On the port given, localhost, 127.0.0.1 and [::1] are the host given
+  // where it is one of them and they reach an address of it, and a
+  // connection there goes to that address alone: from 127.0.0.1, localhost
+  // is reached at 127.0.0.1, and [::1], which can be another program on
+  // that port, is another host; from [::1] the same the other way.
+  const four = guardFor("http://127.0.0.1:4000/");
+  assert.equal(await four.judge("http://localhost:4000/site.css"), "");
+  assert.deepEqual(await four.route("http://localhost:4000/site.css"), { why: "", addresses: ["127.0.0.1"] });
+  assert.equal(await four.judge("http://[::1]:4000/"), "is on port 4000, not 80 or 443");
+  const six = guardFor("http://[::1]:4000/");
+  assert.deepEqual(await six.route("http://localhost:4000/site.css"), { why: "", addresses: ["::1"] });
+  assert.equal(await six.judge("http://127.0.0.1:4000/"), "is on port 4000, not 80 or 443");
+  assert.equal(sameHost(new URL("http://127.0.0.1:8080/"), new URL("http://[::1]:8080/")), false);
+  // No other host is the host given, though it lead to the same address and
+  // port, as a program there serves many sites, each by its name: not a
+  // name under localhost, as a router of this machine serves
+  // traefik.localhost, nor 0.0.0.0 or ::, which a connection takes for
+  // 127.0.0.1 and ::1, nor an IPv6 form of 127.0.0.1 or 0.0.0.0. Each is held
+  // to the rule for an address the run was not given, on port 80 as well.
+  for (const raw of ["http://app.localhost:3000/x", "http://traefik.localhost:3000/", "http://0.0.0.0:3000/", "http://[::]:3000/x", "http://0:3000/", "http://[::ffff:127.0.0.1]:3000/", "http://[::ffff:0.0.0.0]:3000/", "http://[::7f00:1]:3000/", "http://[::ffff:0:7f00:1]:3000/", "http://[2002:7f00:1::]:3000/", "http://[64:ff9b::7f00:1]:3000/"]) {
+    assert.equal(await local.judge(raw), "is on port 3000, not 80 or 443", raw);
+    assert.deepEqual(await local.route(raw), { why: "is on port 3000, not 80 or 443", addresses: [] }, raw);
+  }
+  for (const raw of ["http://app.localhost/", "http://traefik.localhost/api/secret", "http://0.0.0.0/", "http://[::]/", "http://[::ffff:127.0.0.1]/"]) {
+    assert.equal(await guardFor("http://localhost/").judge(raw), "is not on the public internet", raw);
+  }
+  assert.equal(sameHost(new URL("http://app.localhost:8080/"), new URL("http://localhost:8080/")), false);
+  assert.equal(sameHost(new URL("http://0.0.0.0:8080/"), new URL("http://127.0.0.1:8080/")), false);
+  assert.equal(sameHost(new URL("http://0.0.0.0:8080/"), new URL("http://[::1]:8080/")), false);
+  // A name under localhost given is a host of its own, and localhost,
+  // 127.0.0.1, [::1] and the other names under localhost are not it.
+  const app = guardFor("http://app1.localhost/");
+  assert.equal(await app.judge("http://app1.localhost/pricing"), "");
+  for (const raw of ["http://traefik.localhost/", "http://localhost/", "http://127.0.0.1/", "http://[::1]/"]) assert.equal(await app.judge(raw), "is not on the public internet", raw);
+  // The rest of 127/8 is not this machine's own name either, as another
+  // program can listen on 127.0.0.2 or 127.0.0.53 on the same port.
   for (const raw of ["http://127.0.0.2:3000/other-loopback", "http://127.0.0.53:3000/", "http://[::ffff:127.0.0.2]:3000/", "http://127.255.255.254:3000/"]) {
     assert.equal(await local.judge(raw), "is on port 3000, not 80 or 443", raw);
   }
@@ -195,7 +221,46 @@ test("an address the run was not given is opened on port 80 or 443 only, and the
   assert.equal(await other.judge("http://127.0.0.2:3000/x"), "");
   assert.equal(await other.judge("http://localhost:3000/"), "is on port 3000, not 80 or 443");
   assert.equal(sameHost(new URL("http://127.0.0.2:8080/"), new URL("http://localhost:8080/")), false);
-  assert.equal(sameHost(new URL("http://0.0.0.0:8080/"), new URL("http://[::1]:8080/")), true);
+});
+
+// The cases of the host given that easybrandkit and easyscreenshotkit judge
+// alike (address-cases.json): the host given is its own name, and where it
+// is one of this machine's own names, localhost, 127.0.0.1 or [::1],
+// localhost and the others it reaches on its port (theHostGiven), each
+// connected to at an address of the host given. Nothing else is, though it
+// lead to an address of the host given (notTheHostGiven): many sites are
+// served at one address and port, a program there picking each by its
+// name, so counted as the host given, a name under localhost had a page of
+// http://localhost:3000/ load a frame, a picture and a fetch() of
+// http://traefik.localhost:3000/, another site of the same program. Each
+// is refused for a connection too.
+test("the shared table of the host given: this machine's own names on its port where they reach an address of it, and no other host that leads to an address of it", async (t) => {
+  let names = {};
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (!names[host]) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+    return names[host].map((address) => ({ address, family: address.includes(":") ? 6 : 4 }));
+  });
+  for (const { given, opened } of CASES.theHostGiven) {
+    const guard = guardFor(given);
+    const at = (await guard.route(given)).addresses;
+    assert.ok(at.length, given);
+    for (const raw of opened) {
+      assert.equal(await guard.judge(raw), "", `${given} ${raw}`);
+      const { why, addresses } = await guard.route(raw);
+      assert.equal(why, "", `${given} ${raw}`);
+      assert.ok(addresses.length && addresses.every((address) => at.includes(address)), `${given} ${raw} ${addresses}`);
+    }
+  }
+  for (const { given, names: table, refused } of CASES.notTheHostGiven) {
+    names = table;
+    const guard = guardFor(given);
+    assert.equal(await guard.judge(given), "", given);
+    for (const raw of refused) {
+      const why = await guard.judge(raw);
+      assert.match(why, /^is (on port \d+, not 80 or 443|not on the public internet|at [0-9a-f:.]+, an address not on the public internet)$/, `${given} ${raw}`);
+      assert.deepEqual(await guard.route(raw), { why, addresses: [] }, `${given} ${raw}`);
+    }
+  }
 });
 
 test("a run that has no address of its own, as one reading a site another source named, holds every address to the rule, this machine's and those on any port included", async (t) => {
@@ -337,7 +402,10 @@ test("an address written with http: or https: that the URL parser here cannot re
   await assert.rejects(guardFor("http://localhost:9222/").addressesFor("http://xn--a.localhost:9222/robots.txt"), (err) => err.code === "ENOTPUBLIC" && err.message === `http://xn--a.localhost:9222/robots.txt ${why}`);
   // A label that decodes is the name it stands for, and is judged.
   for (const raw of ["https://xn--bcher-kva.example/", "https://xn--80ak6aa92e.com/", "https://www.xn--zca.example/"]) assert.equal(await guardFor("https://acme.com/").judge(raw), "", raw);
-  assert.equal(await guardFor("http://localhost:9222/").judge("http://xn--bcher-kva.localhost:9222/"), "");
+  // Under localhost such a name is a host of its own, as any name there is,
+  // and is the host given when given.
+  assert.equal(await guardFor("http://localhost:9222/").judge("http://xn--bcher-kva.localhost:9222/"), "is on port 9222, not 80 or 443");
+  assert.equal(await guardFor("http://xn--bcher-kva.localhost:9222/").judge("http://xn--bcher-kva.localhost:9222/json/list"), "");
 });
 
 test("an address given whose host has a label of broken punycode is no web address, whatever Node.js reads it, and one whose labels decode is read", () => {

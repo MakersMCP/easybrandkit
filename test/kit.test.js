@@ -6433,6 +6433,73 @@ test("a page's pictures at a name under .local and at a name of one label have t
   assert.ok(!notes.some((note) => note.includes(`pic-${word}`)), notes.join("\n"));
 });
 
+test("a site of this machine given as localhost is read with what it takes from 127.0.0.1 and [::1] on its port, and no request reaches another site that the same program serves there by its name, under localhost, at 0.0.0.0 or at [::]", { skip: noBrowser || ownNamespaces }, (t) => {
+  // In namespaces of their own: the loopback alone, where one program
+  // listens on 127.0.0.1 and ::1 on port 80, as a router of this machine
+  // does, and answers each request by the name it is for: localhost, by
+  // that name or by 127.0.0.1 or [::1], gets the user's site, and any other
+  // name a dashboard of its own, whose data a fetch() of the site's page
+  // writes into a heading. The program keeps each request it gets with the
+  // name it was for.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-hosts-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  const page = brandPage("rgb(255,0,0)").replace(
+    "</body>",
+    `${["http://127.0.0.1/four.png", "http://[::1]/six.png", "http://traefik.localhost/pixel.png", "http://0.0.0.0/zero.png", "http://[::]/v6zero.png"].map((src) => `<img src="${src}" width="10" height="10">`).join("")}
+    <iframe src="http://app.localhost/frame" width="200" height="100"></iframe>
+    <script>fetch("http://traefik.localhost/api/secret").then((r) => r.text()).then((text) => { const h = document.createElement("h2"); h.textContent = text; document.querySelector("main").append(h); }).catch(() => {});</script></body>`,
+  );
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const keep = (line) => fs.appendFileSync(${JSON.stringify(asked)}, line + "\\n");`,
+      `const page = ${JSON.stringify(page)};`,
+      `const png = Buffer.from(${JSON.stringify(pngOf(10, 10, () => [0, 0, 255]).toString("base64"))}, "base64");`,
+      `const site = (req, res) => {`,
+      `  const host = String(req.headers.host || "");`,
+      `  keep(req.url + " " + host);`,
+      `  if (["localhost", "127.0.0.1", "[::1]"].includes(host)) {`,
+      `    if (req.url === "/") return res.writeHead(200, { "content-type": "text/html" }).end(page);`,
+      `    if (req.url.endsWith(".png")) return res.writeHead(200, { "content-type": "image/png" }).end(png);`,
+      `    return res.writeHead(404).end();`,
+      `  }`,
+      `  if (req.url === "/api/secret") return res.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "*" }).end("TRAEFIK-DASHBOARD-SECRET");`,
+      `  if (req.url.endsWith(".png")) return res.writeHead(200, { "content-type": "image/png" }).end(png);`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end("<h1>TRAEFIK-DASHBOARD</h1>");`,
+      `};`,
+      `for (const at of ["127.0.0.1", "::1"]) {`,
+      `  const server = http.createServer(site);`,
+      `  server.on("error", () => keep("no " + at));`,
+      `  server.listen(80, at, () => server.unref());`,
+      `}`,
+      ``,
+    ].join("\n"),
+  );
+  const script = 'ip link set lo up && exec "$1" --require "$2" "$3" http://localhost/ --no-stores --out "$4"';
+  const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /^Saved the Acme brand kit to /);
+  const lines = fs.readFileSync(asked, "utf8").trim().split("\n");
+  // The site's own pictures at 127.0.0.1 and [::1] came from it, so the
+  // others would have reached it.
+  assert.ok(lines.includes("/four.png 127.0.0.1"), lines.join("\n"));
+  if (!lines.includes("no ::1")) assert.ok(lines.includes("/six.png [::1]"), lines.join("\n"));
+  assert.deepEqual(lines.filter((line) => !/ (localhost|127\.0\.0\.1|\[::1\])$/.test(line) && !line.startsWith("no ")), [], "no request was for another name");
+  const kit = JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8"));
+  assert.ok(!JSON.stringify(kit.text).includes("TRAEFIK"), JSON.stringify(kit.text));
+  assert.ok(kit.notes.includes("http://localhost/ tried to open http://app.localhost/frame, which is not on the public internet: it was not opened."), kit.notes.join("\n"));
+  assert.ok(kit.notes.some((note) => /^While easybrandkit read http:\/\/localhost\/, the browser asked for http:\/\/traefik\.localhost\/(pixel\.png|api\/secret), which is not on the public internet: it was not reached\.$/.test(note)), kit.notes.join("\n"));
+});
+
 // What a program of the machine would be started for, recorded: stand-ins
 // of the test's own, first on PATH, as a backstop for the kit's own, so that
 // no real mail program starts here even where the kit has none, with no

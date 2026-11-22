@@ -223,21 +223,29 @@ function bare(url) {
   }
 }
 
-// Whether a host is one of this machine's own names for itself: localhost
-// and the names under it, 127.0.0.1 and ::1, and 0.0.0.0 and ::, which a
-// connection on Linux takes for 127.0.0.1 and ::1, 127.0.0.1 and 0.0.0.0
-// also mapped into IPv6 (::ffff:127.0.0.1), as a URL writes such an address. The
-// rest of 127/8 is not: a program of this machine can listen on 127.0.0.2
-// or 127.0.0.53 apart from the one on 127.0.0.1. Nor are the other IPv6
-// forms of 127.0.0.1 (::7f00:1, ::ffff:0:7f00:1, 2002:7f00:1::,
-// 64:ff9b::7f00:1), which are judged as any other address.
-function ownName(host) {
-  const groups = net.isIP(host) === 6 ? groupsOf(host) : null;
-  const mapped = Boolean(groups) && groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
-  const v4 = mapped ? heldIpv4(host) : host;
-  if (net.isIP(v4) === 4) return v4 === "127.0.0.1" || v4 === "0.0.0.0";
-  if (groups) return groups.slice(0, 7).every((group) => group === 0) && groups[7] <= 1;
-  return localName(v4);
+// The addresses of this machine that one of its own names for itself
+// stands for, for a host as it is judged (see bare): localhost both of its
+// loopback addresses, and 127.0.0.1 and ::1 themselves; null for any other
+// host. A name under localhost is none of them: a router on this machine,
+// as Traefik or Caddy, serves each such name, as app1.localhost or
+// traefik.localhost, as a site of its own. Nor are another address of
+// 127.0.0.0/8, where another program can listen, as on 127.0.0.2 or
+// 127.0.0.53, 0.0.0.0 and ::, which a connection takes for 127.0.0.1 and
+// ::1 but a server there can tell apart by the name a request is for, and
+// an IPv6 form of 127.0.0.1, as ::ffff:127.0.0.1.
+function machineAddresses(host) {
+  if (host === "localhost") return ["127.0.0.1", "::1"];
+  return host === "127.0.0.1" || host === "::1" ? [host] : null;
+}
+
+// The addresses of this machine that two hosts both stand for (see
+// machineAddresses), or null: localhost and 127.0.0.1 share 127.0.0.1, and
+// 127.0.0.1 and ::1 share none, as they can be two programs on one port.
+function sharedAddresses(one, two) {
+  const mine = machineAddresses(one);
+  const theirs = machineAddresses(two);
+  const both = mine && theirs ? mine.filter((address) => theirs.includes(address)) : [];
+  return both.length ? both : null;
 }
 
 // Whether an address is not on the public internet by its form alone: an IP
@@ -259,14 +267,23 @@ const webScheme = (raw) => /^https?:/i.test(String(raw).replace(/[\t\n\r]/g, "")
 // The ports an address the run was not given may be on.
 const WEB_PORTS = new Set(["80", "443"]);
 
-// Whether two web addresses are on the same host and port. A local site can
-// send its visitors from one name of this machine to another, as from
-// 127.0.0.1:8080 to localhost:8080, so two of this machine's own names for
-// itself on the same port count as one (see ownName).
+// Whether two web addresses are on the same host and port: the same host,
+// or two of this machine's own names for itself that reach an address of
+// each other's, on the same port (see sharedAddresses). A local site can
+// send its visitors from one of them to another, as from 127.0.0.1:8080 to
+// localhost:8080, which reaches the same program at 127.0.0.1. Any other
+// name is another host, though it lead to the same address and port: many
+// sites are served at one address and port, a program there picking each
+// by the name a request is for, as Laravel Valet or Herd serve *.test,
+// DDEV's router *.ddev.site, which the public DNS answers with 127.0.0.1,
+// Traefik or Caddy the names under localhost, and a web server its virtual
+// hosts. Counted as the host given, a name under localhost had a page of
+// http://localhost:3000/ load a frame, a picture and the data of a fetch()
+// from http://traefik.localhost:3000/, another site of the same program.
 function sameHost(a, b) {
   if (portOf(a) !== portOf(b)) return false;
   const [one, two] = [bare(a), bare(b)];
-  return one === two || (ownName(one) && ownName(two));
+  return one === two || Boolean(sharedAddresses(one, two));
 }
 
 // ---- MAKERSMCP_REFUSE_ADDRESSES ----
@@ -294,8 +311,8 @@ const SETTING = "MAKERSMCP_REFUSE_ADDRESSES";
 // site, with words that blamed each site's address, and a host can copy
 // such a range from a firewall's list of the IPv6 ranges it refuses whole.
 //
-// A connection to 0.0.0.0 goes to 127.0.0.1 and one to :: to ::1 (see
-// ownName), so the list judges each as the address it reaches as well: a
+// A connection to 0.0.0.0 goes to 127.0.0.1 and one to :: to ::1, on
+// Linux, so the list judges each as the address it reaches as well: a
 // list that refuses 127.0.0.1 refuses 0.0.0.0 and every IPv6 form of it, as
 // ::ffff:0.0.0.0, and one that refuses ::1 refuses ::, written so or found
 // for a name. Judged as written, each was opened as the address given, and
@@ -387,11 +404,13 @@ const LOOKUP_WAIT = 5_000;
 // a connection to it may go to, for one the run may open: every address
 // the lookup found for its host. For the address given they are looked up
 // too, and none, for a name not found, is no refusal but a connection that
-// cannot be made.
+// cannot be made. For another of this machine's names that is the host
+// given, as localhost from 127.0.0.1, they are the addresses the two share
+// alone (see sharedAddresses).
 //
 // found(host): the addresses a host is at, by the same lookup: an IP
-// address is at itself, and this machine's own names are on its loopback.
-// [] for a name not found.
+// address is at itself, and localhost and the names under it are on this
+// machine's loopback. [] for a name not found.
 //
 // inside(url): whether a host is not on the public internet, or cannot be
 // told to be, by the same lookup.
@@ -425,7 +444,10 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   // which the browser asks over https by itself for a name that takes only
   // https (HSTS), as every .dev and .app name, keeping the port. A move
   // from https down to http there is not the address given, nor https on
-  // port 443 of a host given on port 80, which is another program.
+  // port 443 of a host given on port 80, which is another program. The host
+  // given is its own name, and of this machine's own names only those that
+  // reach an address of it on its port (see sameHost).
+  const givenHost = given ? bare(given) : "";
   const own = (url) => Boolean(given) && sameHost(url, given) && (url.protocol === given.protocol || (given.protocol === "http:" && url.protocol === "https:"));
   // The rule for one address. resolve: whether the addresses of one the run
   // may open are wanted, as for a connection; without it, the address given
@@ -439,7 +461,11 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     const host = bare(url);
     if (!mine && (localName(host) || linkName(host) || (net.isIP(host) && !isPublicAddress(host)))) return { why: NOT_PUBLIC, addresses: [] };
     if (mine && !refused.size && !resolve) return { why: "", addresses: [] };
-    const addresses = await found(host);
+    // Another of this machine's names that is the host given goes to the
+    // addresses the two share alone: from http://127.0.0.1:4000/, a page's
+    // picture at http://localhost:4000/ comes from 127.0.0.1, never from
+    // ::1, which can be another program on that port.
+    const addresses = (mine && sharedAddresses(host, givenHost)) || (await found(host));
     if (!addresses.length) return { why: mine && !refused.size ? "" : UNRESOLVED, addresses: [] };
     if (!mine) for (const address of addresses) if (!isPublicAddress(address)) return { why: atNotPublic(plainIp(address)), addresses: [] };
     for (const address of addresses) if (refused.match(address)) return { why: atRefused(refused.match(address)), addresses: [] };

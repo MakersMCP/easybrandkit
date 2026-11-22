@@ -56,19 +56,24 @@ has and says so in the kit's notes. It fails instead when it has used up its
 downloaded either.
 
 The address given is opened whatever its host and port, and so are the pages
-on its scheme, host and port, localhost, 127.0.0.1 and [::1] counting as one
-host, and https on the host and port of an http address given. An http
-address is asked for over http, unless the browser takes its name only over
-https, as every .dev and .app name, and the page read for the brand, when it
-is one on port 80 that gives no answer, is read over https on port 443 in
-its place, as an address the kit was not given. Any other address the kit
-opens, as a page it chose, each hop of a redirect, a page's own move, a
-frame or a window it opens and robots.txt with --facts, is opened only on
-port 80 or 443, and only when every address the kit's own lookup finds for
-its name is on the public internet: a name it cannot look up is not opened,
-nor a name under .local or of one label, which it does not look up, nor an
-address it cannot read itself, as one whose host has a label of broken
-punycode (xn--a), which the browser reads.
+on its scheme, host and port, and https on the host and port of an http
+address given. The host given is its own name: on its port, localhost,
+127.0.0.1 and [::1] are the host given where it is one of them and they
+reach an address of it, and no other name is, though it lead to the same
+address, a name under localhost included. A site that moves on to another of
+its names that the kit does not open, as below, stops the run there, and is
+read when given that name. An http address is asked for over http, unless
+the browser takes its name only over https, as every .dev and .app name,
+and the page read for the brand, when it is one on port 80 that gives no
+answer, is read over https on port 443 in its place, as an address the kit
+was not given. Any other address the kit opens, as a page it chose, each hop
+of a redirect, a page's own move, a frame or a window it opens and
+robots.txt with --facts, is opened only on port 80 or 443, and only when
+every address the kit's own lookup finds for its name is on the public
+internet: a name it cannot look up is not opened, nor a name under .local or
+of one label, which it does not look up, nor an address it cannot read
+itself, as one whose host has a label of broken punycode (xn--a), which the
+browser reads.
 With --named-by, the site given is such an address too. Every request the
 browser makes as the kit starts it, a page's pictures, scripts and data and
 the browser's own among them, goes through a proxy of the kit's own on
