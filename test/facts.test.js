@@ -13,7 +13,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { findClaims, pageOf, regionOf } = require("../skills/easybrandkit/scripts/lib/claims");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { once, EventEmitter } = require("node:events");
 const { Readable } = require("node:stream");
 const { pickPages, robotsRules, robotsAllow, readRobots, pageLines, readModel, writeFacts, readFactPages, FACT_FILES } = require("../skills/easybrandkit/scripts/lib/facts");
@@ -24,6 +24,7 @@ const { guardFor } = require("../skills/easybrandkit/scripts/lib/address");
 const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { partedTemp, roomlessTemp } = require("./temp-skip");
 const { withoutBusyNotes } = require("./busy-notes");
+const { endsInTime } = require("./ends-in-time");
 
 const noBrowser = (!findChrome() && "no Chrome, Chromium, Edge or Brave installed") || partedTemp || roomlessTemp;
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
@@ -340,15 +341,6 @@ test("robots.txt: * stands for any run of characters, a last $ for the end of th
     assert.equal(blocked(rule, url), want, `${rule} on ${url}`);
   }
 });
-
-// Runs code in a process of its own, and fails when it has not ended in time:
-// a pattern stuck on a site's text cannot be interrupted from here.
-function endsInTime(code, ms = 20_000) {
-  const lib = path.resolve(__dirname, "../skills/easybrandkit/scripts/lib");
-  const done = spawnSync(process.execPath, ["-e", `const lib = ${JSON.stringify(lib)};\n${code}`], { encoding: "utf8", timeout: ms, killSignal: "SIGKILL" });
-  assert.equal(done.signal, null, `still running after ${ms} ms: ${code}`);
-  assert.equal(done.status, 0, done.stderr);
-}
 
 test("what a site writes in robots.txt and its links takes no more time than its size", () => {
   const require_ = `const { robotsRules, robotsAllow, pickPages, pageLines } = require(lib + "/facts.js");`;

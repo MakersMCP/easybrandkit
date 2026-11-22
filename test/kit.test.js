@@ -31,6 +31,7 @@ const dialLib = require("../skills/easybrandkit/scripts/lib/dial");
 const { storeAnswers } = require("./store-answers");
 const { partedTemp, roomlessTemp, roomlessIn } = require("./temp-skip");
 const { withoutBusyNotes, withoutUndrawnCard, withoutWordsNote, cardTimedOut, drawingCard } = require("./busy-notes");
+const { endsInTime } = require("./ends-in-time");
 
 const CLI = path.resolve(__dirname, "../skills/easybrandkit/scripts/easybrandkit.js");
 
@@ -290,16 +291,6 @@ test("text a site wrote: control characters out, line breaks kept only where ask
   assert.equal(noControls(null), "");
 });
 
-// Runs code in a process of its own, and fails when it has not ended in time:
-// a pattern stuck on a long run of one character cannot be interrupted from
-// here, and would hold up every test.
-function endsInTime(code, ms = 20_000) {
-  const done = spawnSync(process.execPath, ["-e", `const lib = ${JSON.stringify(LIB)};\n${code}`], { encoding: "utf8", timeout: ms, killSignal: "SIGKILL" });
-  assert.equal(done.signal, null, `still running after ${ms} ms: ${code}`);
-  assert.equal(done.status, 0, done.stderr);
-  return done.stdout;
-}
-
 // findLogos on a page that is one DOM snapshot, built from the elements given:
 // each string once, as a snapshot holds it, so a page can share a long one.
 const HOSTILE_PAGE = String.raw`
@@ -406,22 +397,31 @@ test("a page built to keep the read of its snapshot busy holds neither the threa
       ...many(40000, (i) => ({ name: "IMG", parent: 2, attrs: { alt: label + i, title: label, "aria-label": label } })),
     ]);
     setTimeLimit(1500);
-    let last = Date.now();
+    // The time the main thread itself works between two turns of a timer,
+    // and the time the process works, its threads together, so that a
+    // machine busy with other work, which only makes the turns come late,
+    // does not count (kit lesson 8.17). Node 22 before 22.19 tells only the
+    // time that passed for the thread.
+    const ms = ({ user, system }) => (user + system) / 1000;
+    const threadSpent = process.threadCpuUsage ? () => ms(process.threadCpuUsage()) : () => Date.now();
+    const spent = () => ms(process.cpuUsage());
+    let last = threadSpent();
     let longest = 0;
     const beat = setInterval(() => {
-      longest = Math.max(longest, Date.now() - last);
-      last = Date.now();
+      const now = threadSpent();
+      longest = Math.max(longest, now - last);
+      last = now;
     }, 20);
-    const started = Date.now();
+    const started = spent();
     readOf(snap).then(
-      () => { throw new Error("read to its end in " + (Date.now() - started) + " ms"); },
+      () => { throw new Error("read to its end in " + Math.round(spent() - started) + " ms of CPU time"); },
       (err) => {
         clearInterval(beat);
-        const took = Date.now() - started;
+        const took = spent() - started;
         if (err.message !== "The run's time ran out while the kit read https://acme.test/, so no kit was made. Try again, or give it more time with --timeout.") throw err;
         if (!err.outOfTime || err.pageFailed !== "took too long to read") throw new Error(JSON.stringify(err));
-        if (took > 8000) throw new Error("ended after " + took + " ms");
-        if (longest > 3000) throw new Error("the thread was held for " + longest + " ms");
+        if (took > 8000) throw new Error("ended after " + Math.round(took) + " ms of CPU time");
+        if (longest > 3000) throw new Error("the thread was held for " + Math.round(longest) + " ms");
       },
     );
   `);
