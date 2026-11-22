@@ -246,18 +246,29 @@ test("with 200 ms on each way of this machine's loopback, a site given as localh
 
 const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status === 0;
 
-test("the kit's own requests over https start TLS for their host: robots.txt with --facts, its redirect, and a store's lookup are read from a server whose certificate names that host, which is told it as the name the request is for", { skip: !openssl && "no openssl to make the test server's certificate" }, async (t) => {
+test("the kit's own requests over https start TLS for their host: robots.txt with --facts, its redirect, and a store's lookup are read from a server whose certificate names that host, which is told it as the name the request is for, and nothing is asked of one whose certificate this machine does not trust or names another host", { skip: !openssl && "no openssl to make the test server's certificate" }, async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-tls-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // A certificate of the test's own for the three hosts, which the program
   // below trusts (NODE_EXTRA_CA_CERTS) and no other program does.
-  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=site.test", "-addext", "subjectAltName=DNS:site.test,DNS:hop.test,DNS:itunes.apple.com"], { cwd: parent, encoding: "utf8" });
-  assert.equal(made.status, 0, made.stderr);
+  // A second certificate for the same hosts that nothing trusts, and a
+  // third that the program trusts but that names another host alone, as a
+  // network between this machine and a site can hand the kit.
+  const certificates = [
+    ["key.pem", "cert.pem", "subjectAltName=DNS:site.test,DNS:hop.test,DNS:itunes.apple.com"],
+    ["untrusted-key.pem", "untrusted-cert.pem", "subjectAltName=DNS:site.test,DNS:hop.test,DNS:itunes.apple.com"],
+    ["other-key.pem", "other-cert.pem", "subjectAltName=DNS:other.test"],
+  ];
+  for (const [key, cert, names] of certificates) {
+    const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", key, "-out", cert, "-days", "2", "-subj", "/CN=site.test", "-addext", names], { cwd: parent, encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+  }
+  fs.writeFileSync(path.join(parent, "trusted.pem"), ["cert.pem", "other-cert.pem"].map((cert) => fs.readFileSync(path.join(parent, cert), "utf8")).join(""));
   const start = path.join(parent, "start.js");
   // In a program of its own, as Node.js reads NODE_EXTRA_CA_CERTS as it
-  // starts: one https server of its own stands in for each host, every
-  // connection to the addresses the rule took going to it, and keeps the
-  // name each TLS connection was started for.
+  // starts: an https server of its own for each certificate stands in for
+  // each host in turn, every connection to the addresses the rule took
+  // going to it, and keeps the name each TLS connection was started for.
   fs.writeFileSync(
     start,
     [
@@ -266,30 +277,39 @@ test("the kit's own requests over https start TLS for their host: robots.txt wit
       `const dns = require("dns");`,
       `const fs = require("fs");`,
       `const os = require("os");`,
+      `const path = require("path");`,
       `const dialLib = require(${JSON.stringify(path.join(LIB, "dial.js"))});`,
       `const { guardFor } = require(${JSON.stringify(path.join(LIB, "address.js"))});`,
       `const { readRobots } = require(${JSON.stringify(path.join(LIB, "facts.js"))});`,
       `const stores = require(${JSON.stringify(path.join(LIB, "stores.js"))});`,
-      `const asked = [];`,
-      `const server = https.createServer({ key: fs.readFileSync(${JSON.stringify(path.join(parent, "key.pem"))}), cert: fs.readFileSync(${JSON.stringify(path.join(parent, "cert.pem"))}) }, (req, res) => {`,
-      `  asked.push(req.socket.servername + " " + req.headers.host + " " + req.url.split("?")[0]);`,
-      `  if (req.url === "/robots.txt") return res.writeHead(302, { location: "https://hop.test/robots-hop" }).end();`,
-      `  if (req.url === "/robots-hop") return res.writeHead(200, { "content-type": "text/plain" }).end("User-agent: *\\nDisallow: /private\\n");`,
-      `  res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ resultCount: 1, results: [{ wrapperType: "software", trackName: "Acme", sellerName: "Acme Inc." }] }));`,
-      `});`,
+      `const serve = (key, cert) => {`,
+      `  const asked = [];`,
+      `  const server = https.createServer({ key: fs.readFileSync(path.join(${JSON.stringify(parent)}, key)), cert: fs.readFileSync(path.join(${JSON.stringify(parent)}, cert)) }, (req, res) => {`,
+      `    asked.push(req.socket.servername + " " + req.headers.host + " " + req.url.split("?")[0]);`,
+      `    if (req.url === "/robots.txt") return res.writeHead(302, { location: "https://hop.test/robots-hop" }).end();`,
+      `    if (req.url === "/robots-hop") return res.writeHead(200, { "content-type": "text/plain" }).end("User-agent: *\\nDisallow: /private\\n");`,
+      `    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ resultCount: 1, results: [{ wrapperType: "software", trackName: "Acme", sellerName: "Acme Inc." }] }));`,
+      `  });`,
+      `  return { server, asked };`,
+      `};`,
       `dns.promises.lookup = async (host) => [{ address: host === "itunes.apple.com" ? "17.253.144.10" : "93.184.216.34", family: 4 }];`,
       `(async () => {`,
-      `  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));`,
-      `  dialLib.wire.dial = () => net.connect({ host: "127.0.0.1", port: server.address().port });`,
-      `  const robots = await readRobots("https://site.test", guardFor("https://site.test/"));`,
-      `  const listing = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), os.tmpdir());`,
-      `  console.log(JSON.stringify({ robots, listing: { ok: listing.ok, name: listing.name, error: listing.error || "" }, asked }));`,
-      `  server.close();`,
+      `  const said = {};`,
+      `  for (const [name, key, cert] of [["trusted", "key.pem", "cert.pem"], ["untrusted", "untrusted-key.pem", "untrusted-cert.pem"], ["other", "other-key.pem", "other-cert.pem"]]) {`,
+      `    const { server, asked } = serve(key, cert);`,
+      `    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));`,
+      `    dialLib.wire.dial = () => net.connect({ host: "127.0.0.1", port: server.address().port });`,
+      `    const robots = await readRobots("https://site.test", guardFor("https://site.test/"));`,
+      `    const listing = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), os.tmpdir());`,
+      `    said[name] = { robots, listing: { ok: listing.ok, name: listing.name, error: listing.error || "" }, asked };`,
+      `    server.close();`,
+      `  }`,
+      `  console.log(JSON.stringify(said));`,
       `})();`,
       ``,
     ].join("\n"),
   );
-  const child = spawn(process.execPath, [start], { env: { ...process.env, NODE_EXTRA_CA_CERTS: path.join(parent, "cert.pem"), TMPDIR: parent }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [start], { env: { ...process.env, NODE_EXTRA_CA_CERTS: path.join(parent, "trusted.pem"), TMPDIR: parent }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   let err = "";
   child.stdout.on("data", (chunk) => (out += chunk));
@@ -297,9 +317,19 @@ test("the kit's own requests over https start TLS for their host: robots.txt wit
   const [code] = await once(child, "close");
   assert.equal(code, 0, err);
   const said = JSON.parse(out.trim().split("\n").pop());
-  assert.deepEqual(said.robots, { rules: [{ allow: false, path: "/private" }], delay: 0 });
-  assert.deepEqual(said.listing, { ok: true, name: "Acme", error: "" });
-  assert.deepEqual(said.asked, ["site.test site.test /robots.txt", "hop.test hop.test /robots-hop", "itunes.apple.com itunes.apple.com /lookup"]);
+  assert.deepEqual(said.trusted.robots, { rules: [{ allow: false, path: "/private" }], delay: 0 });
+  assert.deepEqual(said.trusted.listing, { ok: true, name: "Acme", error: "" });
+  assert.deepEqual(said.trusted.asked, ["site.test site.test /robots.txt", "hop.test hop.test /robots-hop", "itunes.apple.com itunes.apple.com /lookup"]);
+  // A certificate this machine does not trust, or one for another host:
+  // robots.txt is not read, the listing fails with the certificate's error,
+  // and the server is asked nothing. Node.js 24 adds advice of its own after
+  // the first error.
+  for (const [name, error] of [["untrusted", /^self[- ]signed certificate\b/], ["other", /^Hostname\/IP does not match certificate's altnames: Host: itunes\.apple\.com\. is not in the cert's altnames: DNS:other\.test\b/]]) {
+    assert.deepEqual(said[name].robots, { error: "its robots.txt could not be read" }, name);
+    assert.equal(said[name].listing.ok, false, name);
+    assert.match(said[name].listing.error, error, name);
+    assert.deepEqual(said[name].asked, [], name);
+  }
 });
 
 // The environment of a program run with a proxy named the ways Node.js
