@@ -5970,12 +5970,14 @@ test("a browser behind a firewall that drops every connection on this machine's 
   assert.equal(fs.existsSync(path.join(parent, "kit")), false);
 });
 
-test("behind a firewall that drops UDP to this machine's loopback, where the kit's check of the browser's WebRTC hears nothing, the run stops before the site is opened, in words that say so, also for a browser whose WebRTC sends UDP", { skip: noBrowser || firewalled || (process.platform === "win32" && "a shell script stands in for the browser") }, (t) => {
+test("behind a firewall that drops UDP to this machine's loopback, where the kit's check of the browser's WebRTC hears nothing, the run stops before the site is opened, in words that say so, also for a browser whose WebRTC sends UDP, whether the datagram is dropped as it is sent or as it comes in", { skip: noBrowser || firewalled || (process.platform === "win32" && "a shell script stands in for the browser") }, (t) => {
   // In namespaces of its own, a network of its loopback alone, whose
   // firewall drops every UDP packet there, as a firewall can for this
   // machine's programs: the kit's STUN port hears nothing from the browser,
-  // whatever its WebRTC does. The site is served there, and keeps each
-  // request it gets.
+  // whatever its WebRTC does. Dropped as it is sent (an output hook), the
+  // kit's own datagram fails at once; dropped as it comes in (an input
+  // hook), it is sent and never comes, which only the kit's wait for it
+  // tells. The site is served there, and keeps each request it gets.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-udp-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // The run's temp folder is one deeper than this one.
@@ -6000,15 +6002,21 @@ test("behind a firewall that drops UDP to this machine's loopback, where the kit
   const loud = path.join(parent, "loud-chrome");
   fs.writeFileSync(loud, `#!/bin/sh\nexec ${sh(findChrome())} "$@" --webrtc-ip-handling-policy=default\n`, { mode: 0o755 });
   const said = "easybrandkit: easybrandkit could not check that the browser's WebRTC sends no UDP past its proxy, as a datagram it sent to a port of its own on 127.0.0.1 did not come there, as a firewall of this machine that drops UDP to 127.0.0.1 makes it do, so no kit was made: a browser whose WebRTC sends UDP, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own can make it do, could have a page send UDP to an address easybrandkit does not open without easybrandkit judging that address. Let this machine's programs send UDP to 127.0.0.1.";
-  const script = `ip link set lo up && nft add table inet t && nft add chain inet t out "{ type filter hook output priority 0; }" && nft add rule inet t out oif lo meta l4proto udp drop && exec "$1" --require "$2" "$3" http://127.0.0.1:8000/ --no-stores --out "$4" --timeout 60`;
-  for (const browser of [undefined, loud]) {
-    const env = { ...process.env, TMPDIR: parent };
-    if (browser) env.CHROME_PATH = browser;
-    const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env });
-    assert.equal(cli.status, 1, cli.stderr);
-    assert.equal(cli.stderr.trim().split("\n").pop(), said, browser || "the browser as the kit starts it");
-    assert.equal(fs.existsSync(path.join(parent, "kit")), false);
-    assert.equal(fs.existsSync(asked), false, "the site was not opened");
+  for (const [hook, device] of [["output", "oif"], ["input", "iif"]]) {
+    const script = `ip link set lo up && nft add table inet t && nft add chain inet t c "{ type filter hook ${hook} priority 0; }" && nft add rule inet t c ${device} lo meta l4proto udp drop && exec "$1" --require "$2" "$3" http://127.0.0.1:8000/ --no-stores --out "$4" --timeout 60`;
+    for (const browser of [undefined, loud]) {
+      const env = { ...process.env, TMPDIR: parent };
+      if (browser) env.CHROME_PATH = browser;
+      const what = `${hook}: ${browser || "the browser as the kit starts it"}`;
+      const started = Date.now();
+      const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env });
+      assert.equal(cli.status, 1, `${what}: ${cli.stderr}`);
+      assert.equal(cli.stderr.trim().split("\n").pop(), said, what);
+      // Well within the run's own --timeout of 60 s.
+      assert.ok(Date.now() - started < 50_000, `${what}: ${Date.now() - started} ms`);
+      assert.equal(fs.existsSync(path.join(parent, "kit")), false, what);
+      assert.equal(fs.existsSync(asked), false, `${what}: the site was not opened`);
+    }
   }
 });
 
