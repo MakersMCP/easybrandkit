@@ -18,7 +18,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
-const { isPublicAddress, atRefused, guardFor } = require("./address");
+const { isPublicAddress, atRefused, awayWhy, guardFor } = require("./address");
 const { judgedRequest } = require("./dial");
 
 const MAX_BYTES = 15 * 1024 * 1024;
@@ -95,8 +95,9 @@ function classify(raw) {
 
 // The address of a store's page or picture, refused unless it is a plain
 // HTTPS address on a listed host, at addresses that are all on the public
-// internet, none of them one the run's rule refuses (guard, see address.js),
-// with the addresses its host was found at, which its request connects to
+// internet, none of them this machine's own or one the run's rule refuses
+// (guard, see address.js), with the addresses its host was found at, which
+// its request connects to
 // (see get). The host is looked up by the run's own lookup, which asks the
 // DNS once a run for each name (guard.found): a name a page, a listing's
 // picture or a redirect names again is not looked up again.
@@ -111,9 +112,10 @@ async function judgedFetch(raw, guard = null) {
   if (!addresses.length) throw new Error(`host ${host} could not be looked up`);
   const refused = addresses.map((address) => rule.refused.match(address)).find(Boolean);
   if (refused) throw new Error(`host ${host} ${atRefused(refused)}`);
-  if (!addresses.every((address) => isPublicAddress(address))) {
-    throw new Error(`host does not resolve to a public address: ${host}`);
-  }
+  // Each address is on the public internet and none is this machine's own,
+  // as for any address the run was not given (see address.js awayWhy).
+  const away = awayWhy(addresses);
+  if (away) throw new Error(`host ${host} ${away}`);
   return { url, addresses };
 }
 

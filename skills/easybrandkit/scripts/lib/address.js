@@ -8,10 +8,11 @@
 // site another source named, a menu page with --facts), each hop of a
 // redirect, a page's own move, a frame or a window a page opens, and
 // robots.txt with each of its redirects. Such an address is opened only on
-// port 80 or 443 and only on the public internet: no document the browser
-// loads and no request the kit makes itself goes to another program of this
-// machine or of a private network, to another port of a public host, or to
-// a router's page or a cloud server's metadata. The same rule holds for
+// port 80 or 443 and only on the public internet, and not at an address of
+// this machine's own there (see ownIp): no document the browser loads and
+// no request the kit makes itself goes to another program of this machine
+// or of a private network, to another port of a public host, or to a
+// router's page or a cloud server's metadata. The same rule holds for
 // every request the browser makes, whatever makes it: a page's pictures,
 // scripts and data, its WebSockets, a service worker's fetch, a prefetch,
 // the fetch of a certificate's issuer and a page's WebAuthn check all go
@@ -29,6 +30,7 @@
 
 const net = require("net");
 const dns = require("dns");
+const os = require("os");
 const { domainToASCII, domainToUnicode } = require("url");
 
 // The ranges that are not on the public internet, as MakersMCP's worker
@@ -160,6 +162,90 @@ function isPublicAddress(raw) {
   return !blocked6.check(address, "ipv6");
 }
 
+// Whether an IP address is this machine's own: "machine" for one of the
+// addresses its network interfaces hold, "network" for one of the IPv6
+// network of such an address, the prefix its interface gives it, /48 or
+// longer, else "". A machine on an IPv6 network holds global addresses of
+// its own (SLAAC), temporary ones among them that come and go, and a server
+// can hold a public IPv4 address on an interface: such an address is on the
+// public internet by its range, so a site that read it off the kit's own
+// connection had the browser load a frame, a picture or a fetch() from a
+// service of this machine that listens on all its addresses, and a site
+// that sent its visitors there had the kit saved as that service's, with no
+// word. A global IPv6 network is mostly the user's own, whose router and
+// other machines answer there, and on a server whose provider puts other
+// customers' servers in it, as a DigitalOcean droplet's /64, theirs, which
+// are refused all the same (the README's Limits say so); the rest of a
+// public IPv4 range on an interface is other people's servers, so in IPv4
+// the address alone. An IPv6 form of an IPv4 address of the machine's is
+// judged by that address (see heldIpv4). An address that leads into this
+// machine or its network from outside, as the public IPv4 address of a
+// router that turns a connection back inside, is no address of its
+// interfaces, and cannot be told from any other: MAKERSMCP_REFUSE_ADDRESSES
+// is for those. As easyscreenshotkit reads them.
+function ownIp(raw) {
+  const address = plainIp(raw);
+  const family = net.isIP(address);
+  if (!family) return "";
+  const held = family === 6 ? heldIpv4(address) : address;
+  const { mine, networks, some } = machineNow();
+  if (!some) return "";
+  if (held) return mine.check(held, "ipv4") ? "machine" : "";
+  if (mine.check(address, "ipv6")) return "machine";
+  return networks.check(address, "ipv6") ? "network" : "";
+}
+
+// This machine's own addresses (mine) and the IPv6 networks of them
+// (networks), as its network interfaces hold them, and whether it holds any
+// (some), read again once INTERFACES_WAIT has passed since the last reading,
+// or the clock went back, or the function that reads them is another, as a
+// test puts one in its place. The proxy judges every address of every
+// request the browser makes, and each reading takes longer the more
+// interfaces the machine has, as a Docker host has one for each container:
+// read at each judgement, as easyscreenshotkit first read them, they were
+// read 4001 times for one load of a news site's home page, and with 200
+// interfaces such a page loaded 3 to 5 times more slowly, the main thread
+// busy reading them.
+const INTERFACES_WAIT = 1_000;
+let machine = null;
+
+function machineNow() {
+  const now = Date.now();
+  if (machine && machine.read === os.networkInterfaces && now >= machine.at && now - machine.at < INTERFACES_WAIT) return machine;
+  const read = os.networkInterfaces;
+  let interfaces = {};
+  try {
+    interfaces = read.call(os);
+  } catch {
+    // None to read.
+  }
+  const mine = new net.BlockList();
+  const networks = new net.BlockList();
+  let some = false;
+  for (const list of Object.values(interfaces || {})) {
+    for (const one of list || []) {
+      const at = plainIp(one && one.address);
+      const kind = net.isIP(at);
+      if (!kind) continue;
+      some = true;
+      mine.addAddress(at, kind === 4 ? "ipv4" : "ipv6");
+      const bits = Number(String(one.cidr || "").split("/")[1]);
+      if (kind === 6 && bits >= 48 && bits < 128) networks.addSubnet(at, bits, "ipv6");
+    }
+  }
+  machine = { at: now, read, mine, networks, some };
+  return machine;
+}
+
+// Where an IP address stands for a run away from the address given: "" for
+// one on the public internet that is not this machine's own, else "not
+// public", or "machine" or "network" for one on the public internet that
+// is this machine's (see ownIp). Each such address is refused there.
+function standingOf(raw) {
+  if (!isPublicAddress(raw)) return "not public";
+  return ownIp(raw);
+}
+
 // The names a browser takes for this machine without asking the DNS:
 // localhost, and any name under it.
 const localName = (host) => /(^|\.)localhost$/i.test(host);
@@ -256,12 +342,13 @@ function sharedAddresses(one, two) {
   return both.length ? both : null;
 }
 
-// Whether an address is not on the public internet by its form alone: an IP
-// address that is not, a name of this machine's own, or a name the system
-// looks up on this machine's own networks (see linkName).
+// Whether an address is not on the public internet by its form alone, or
+// is this machine's own: an IP address that is not on it or is one of
+// this machine's (see standingOf), a name of this machine's own, or a name
+// the system looks up on this machine's own networks (see linkName).
 function notPublicByForm(url) {
   const host = bare(url);
-  return net.isIP(host) ? !isPublicAddress(host) : localName(host) || linkName(host);
+  return net.isIP(host) ? Boolean(standingOf(host)) : localName(host) || linkName(host);
 }
 
 // The port a web address is served on, the scheme's own when it names none.
@@ -385,6 +472,26 @@ const UNREADABLE = "is not an address easybrandkit can read";
 const onPort = (port) => `is on port ${port}, not 80 or 443`;
 const atNotPublic = (address) => `is at ${address}, an address not on the public internet`;
 const atRefused = (address) => `is at ${address}, an address ${SETTING} refuses`;
+// An address on the public internet that is this machine's own, or on the
+// IPv6 network of one of its own (see ownIp), as easyscreenshotkit names it.
+const atMachine = (address) => `is at ${address}, an address of this machine`;
+const atNetwork = (address) => `is at ${address}, on a network of this machine`;
+
+// Why an address is refused away from the address given, by where it
+// stands (see standingOf).
+const insideWhy = (address, standing) => (standing === "machine" ? atMachine(address) : standing === "network" ? atNetwork(address) : atNotPublic(address));
+
+// Why a host found at these addresses is refused away from the address
+// given, as said after "it" or "which", or "" for one every address of
+// which is on the public internet and none this machine's own: named by
+// its first address that is not (see standingOf).
+function awayWhy(addresses) {
+  for (const address of addresses) {
+    const standing = standingOf(address);
+    if (standing) return insideWhy(plainIp(address), standing);
+  }
+  return "";
+}
 
 // ---- The rule for a run ----
 
@@ -420,8 +527,9 @@ const LOOKUP_WAIT = 5_000;
 // address is at itself, and localhost and the names under it are on this
 // machine's loopback, ::1 first (see LOOPBACK). [] for a name not found.
 //
-// inside(url): whether a host is not on the public internet, or cannot be
-// told to be, by the same lookup.
+// inside(url): whether a host is not on the public internet or is this
+// machine's own, by the same lookup, or cannot be told by it, as a name
+// not found.
 //
 // addressesFor(raw): the addresses a request the kit makes itself to raw
 // connects to (see dial.js), those route gives; it fails for one the rule
@@ -467,7 +575,13 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     const mine = own(url);
     if (!mine && !WEB_PORTS.has(portOf(url))) return { why: onPort(portOf(url)), addresses: [] };
     const host = bare(url);
-    if (!mine && (localName(host) || linkName(host) || (net.isIP(host) && !isPublicAddress(host)))) return { why: NOT_PUBLIC, addresses: [] };
+    if (!mine && (localName(host) || linkName(host))) return { why: NOT_PUBLIC, addresses: [] };
+    // An IP address away from the address given that is not on the public
+    // internet, by its form, or that is this machine's own.
+    if (!mine && net.isIP(host)) {
+      const standing = standingOf(host);
+      if (standing) return { why: standing === "not public" ? NOT_PUBLIC : insideWhy(host, standing), addresses: [] };
+    }
     if (mine && !refused.size && !resolve) return { why: "", addresses: [] };
     // Another of this machine's names that is the host given goes to the
     // addresses the two share alone: from http://127.0.0.1:4000/, a page's
@@ -475,7 +589,8 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     // ::1, which can be another program on that port.
     const addresses = (mine && sharedAddresses(host, givenHost)) || (await found(host));
     if (!addresses.length) return { why: mine && !refused.size ? "" : UNRESOLVED, addresses: [] };
-    if (!mine) for (const address of addresses) if (!isPublicAddress(address)) return { why: atNotPublic(plainIp(address)), addresses: [] };
+    const away = mine ? "" : awayWhy(addresses);
+    if (away) return { why: away, addresses: [] };
     for (const address of addresses) if (refused.match(address)) return { why: atRefused(refused.match(address)), addresses: [] };
     return { why: "", addresses: addresses.map(plainIp) };
   }
@@ -483,7 +598,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const route = (raw) => rule(raw, true);
   async function inside(url) {
     const addresses = await found(bare(url));
-    return !addresses.length || addresses.some((address) => !isPublicAddress(address));
+    return !addresses.length || addresses.some((address) => Boolean(standingOf(address)));
   }
   async function addressesFor(raw) {
     const { why, addresses } = await route(raw);
@@ -493,4 +608,4 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   return { given: given ? given.href : "", refused, judge, route, found, inside, addressesFor };
 }
 
-module.exports = { isPublicAddress, heldIpv4, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, UNRESOLVED };
+module.exports = { isPublicAddress, heldIpv4, ownIp, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, UNRESOLVED };

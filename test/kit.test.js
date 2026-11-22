@@ -6543,6 +6543,81 @@ test("a site of this machine given as localhost is read with what it takes from 
   assert.ok(kit.notes.some((note) => /^While easybrandkit read http:\/\/localhost\/, the browser asked for http:\/\/traefik\.localhost\/(pixel\.png|api\/secret), which is not on the public internet: it was not reached\.$/.test(note)), kit.notes.join("\n"));
 });
 
+// Namespaces with a network of their own whose interface holds an IPv4 and
+// an IPv6 address of the test's choosing, as a machine's own interfaces do.
+const ownAddresses = ownNamespaces || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "ip link add dm0 type dummy && ip link set dm0 up && ip addr add 93.184.216.34/32 dev dm0 && ip addr add 2001:470:1:2::5/64 dev dm0 nodad"]).status !== 0 && "no dummy network that takes an IPv4 and an IPv6 address");
+
+test("an address of this machine's own on the public internet, as its interfaces hold it, is not opened away from the address given: a frame and pictures there are not, and a site that leads there gets no kit, and the service there is asked nothing", { skip: noBrowser || ownAddresses }, (t) => {
+  // In namespaces of their own: the loopback, and a network whose interface
+  // holds 93.184.216.34 and 2001:470:1:2::5/64, as a server's or a machine
+  // on an IPv6 network holds addresses of its own on the public internet.
+  // The site, site.example at 93.184.216.34 by the hosts file, is this
+  // machine's own and given as the address; its page holds a frame and a
+  // picture at 2001:470:1:2::5, where a service of this machine listens on
+  // port 80, and a picture at 93.184.216.34 itself, another host of it.
+  // Each server keeps each request it gets.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-own-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", "127.0.0.1 localhost\n93.184.216.34 site.example\n"]]) fs.writeFileSync(path.join(parent, name), text);
+  const start = path.join(parent, "start.js");
+  const page = brandPage("rgb(255,0,0)").replace("</body>", `<iframe src="http://[2001:470:1:2::5]/admin" width="200" height="100"></iframe><img src="http://[2001:470:1:2::5]/pixel.png" width="10" height="10"><img src="http://93.184.216.34/server-status" width="10" height="10"></body>`);
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const keep = (line) => fs.appendFileSync(process.env.ASKED_FILE, line + "\\n");`,
+      `const page = ${JSON.stringify(page)};`,
+      `const site = http.createServer((req, res) => {`,
+      `  keep("site " + req.url + " " + req.headers.host);`,
+      `  if (req.url === "/" && process.env.SITE_LEADS) return res.writeHead(302, { location: "http://[2001:470:1:2::5]/" }).end();`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end(page);`,
+      `});`,
+      `site.listen(80, "93.184.216.34", () => site.unref());`,
+      `const machine = http.createServer((req, res) => {`,
+      `  keep("machine " + req.url + " " + req.headers.host);`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end("<title>Machine admin</title><h1>THIS-MACHINE-ADMIN-PANEL</h1>");`,
+      `});`,
+      `machine.listen(80, "2001:470:1:2::5", () => machine.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = [
+    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 93.184.216.34/32 dev dm0 && ip addr add 2001:470:1:2::5/64 dev dm0 nodad",
+    'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    'exec "$2" --require "$3" "$4" http://site.example/ --no-stores --out "$5"',
+  ].join(" && ");
+  const run = (leads) => {
+    const asked = path.join(parent, leads ? "asked-leads.txt" : "asked.txt");
+    const env = { ...process.env, TMPDIR: parent, ASKED_FILE: asked };
+    if (leads) env.SITE_LEADS = "1";
+    const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, path.join(parent, leads ? "kit-leads" : "kit")], { encoding: "utf8", timeout: 120_000, env });
+    return { cli, lines: (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean) };
+  };
+  const { cli, lines } = run(false);
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /^Saved the Acme brand kit to /);
+  assert.ok(lines.includes("site / site.example"), lines.join("\n"));
+  assert.deepEqual(lines.filter((line) => line.startsWith("machine ") || !line.endsWith(" site.example")), [], "no request reached the machine's service or the site's address as another host");
+  const notes = JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8")).notes;
+  assert.ok(notes.includes("http://site.example/ tried to open http://[2001:470:1:2::5]/admin, which is at 2001:470:1:2::5, an address of this machine: it was not opened."), notes.join("\n"));
+  for (const [what, at] of [["http://[2001:470:1:2::5]/pixel.png", "2001:470:1:2::5"], ["http://93.184.216.34/server-status", "93.184.216.34"]]) {
+    assert.ok(notes.includes(`While easybrandkit read http://site.example/, the browser asked for ${what}, which is at ${at}, an address of this machine: it was not reached.`), `${what}: ${notes.join("\n")}`);
+  }
+  // A site that sends its visitors there gets no kit, and the service there
+  // is asked nothing.
+  const leads = run(true);
+  assert.equal(leads.cli.status, 1, leads.cli.stderr);
+  assert.equal(leads.cli.stderr.trim().split("\n").pop(), "easybrandkit: http://site.example/ led to http://[2001:470:1:2::5]/, which is at 2001:470:1:2::5, an address of this machine, so no kit was made.");
+  assert.deepEqual(leads.lines.filter((line) => line.startsWith("machine ")), [], "no request reached the machine's service");
+  assert.equal(fs.existsSync(path.join(parent, "kit-leads")), false);
+});
+
 // What a program of the machine would be started for, recorded: stand-ins
 // of the test's own, first on PATH, as a backstop for the kit's own, so that
 // no real mail program starts here even where the kit has none, with no

@@ -6,9 +6,23 @@
 
 const assert = require("node:assert/strict");
 const dns = require("node:dns");
+const os = require("node:os");
 const test = require("node:test");
-const { isPublicAddress, heldIpv4, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
+const { isPublicAddress, heldIpv4, ownIp, notPublicByForm, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
 const CASES = require("./address-cases.json");
+
+// This machine's network interfaces as a server's, whose interface holds a
+// public IPv4 address in a range of other people's servers and global IPv6
+// addresses in a /64, beside its loopback.
+const LOOPBACK = { lo: [{ address: "127.0.0.1", netmask: "255.0.0.0", family: "IPv4", internal: true, cidr: "127.0.0.1/8" }, { address: "::1", netmask: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", family: "IPv6", internal: true, cidr: "::1/128", scopeid: 0 }] };
+const SERVER = {
+  ...LOOPBACK,
+  eth0: [
+    { address: "81.2.69.160", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "81.2.69.160/24" },
+    { address: "2a02:1205:5000::1", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6", internal: false, cidr: "2a02:1205:5000::1/64", scopeid: 0 },
+    { address: "2a02:1205:5000:0:5c1b:2e:9a4f:11d0", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6", internal: false, cidr: "2a02:1205:5000:0:5c1b:2e:9a4f:11d0/64", scopeid: 0 },
+  ],
+};
 
 test("an IP address is on the public internet as the table shared with the other kits and MakersMCP-Api says", () => {
   for (const address of CASES.notPublic) assert.equal(isPublicAddress(address), false, address);
@@ -281,6 +295,118 @@ test("a run that has no address of its own, as one reading a site another source
   assert.deepEqual(await none.addressesFor("https://acme.com/robots.txt"), ["93.184.216.34"]);
   await assert.rejects(none.addressesFor("http://localhost:3000/robots.txt"), (err) => err.code === "ENOTPUBLIC" && err.message === "http://localhost:3000/robots.txt is on port 3000, not 80 or 443");
   assert.deepEqual(await guardFor("http://localhost:3000/").addressesFor("http://localhost:3000/robots.txt"), ["::1", "127.0.0.1"]);
+});
+
+// This machine's own addresses, as its network interfaces hold them, and
+// the IPv6 network of each, are not opened away from the address given,
+// though their ranges are on the public internet: a machine on an IPv6
+// network holds a global address of its own, and a server can hold a
+// public IPv4 address, and a site that read one off the kit's connection
+// had the browser load a frame, a picture or a fetch() from a service of
+// this machine there, and a site that sent its visitors there had the kit
+// saved as that service's. The rest of a public IPv4 range on an interface
+// is other people's servers. The interfaces are read as the run goes, at
+// most once a second; and an address of this machine given is the user's
+// own choice, as localhost is.
+test("an address this machine's network interfaces hold, a public one included, and the IPv6 network of one are not opened away from the address given", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  let interfaces = SERVER;
+  t.mock.method(os, "networkInterfaces", () => interfaces);
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    const known = { "own-machine.example": ["81.2.69.160"], "own-machine6.example": ["2a02:1205:5000::1"], "own-lan6.example": ["2a02:1205:5000::77"], "own-site.example": ["93.184.215.14"] }[host];
+    if (!known) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+    return known.map((address) => ({ address, family: address.includes(":") ? 6 : 4 }));
+  });
+  const guard = guardFor("https://own-site.example/");
+  for (const [raw, why] of [
+    ["http://81.2.69.160/", "is at 81.2.69.160, an address of this machine"],
+    ["http://81.2.69.160/server-status", "is at 81.2.69.160, an address of this machine"],
+    ["http://[2a02:1205:5000::1]/frame", "is at 2a02:1205:5000::1, an address of this machine"],
+    ["https://[2a02:1205:5000:0:5c1b:2e:9a4f:11d0]/", "is at 2a02:1205:5000:0:5c1b:2e:9a4f:11d0, an address of this machine"],
+    ["http://[::ffff:81.2.69.160]/", "is at ::ffff:5102:45a0, an address of this machine"],
+    ["http://[64:ff9b::81.2.69.160]/", "is at 64:ff9b::5102:45a0, an address of this machine"],
+    ["http://1359103392/", "is at 81.2.69.160, an address of this machine"],
+    ["http://[2a02:1205:5000::77]/api", "is at 2a02:1205:5000::77, on a network of this machine"],
+    ["http://own-machine.example/robots.txt", "is at 81.2.69.160, an address of this machine"],
+    ["http://own-machine6.example/", "is at 2a02:1205:5000::1, an address of this machine"],
+    ["https://own-lan6.example/", "is at 2a02:1205:5000::77, on a network of this machine"],
+    // Other people's servers in the public IPv4 range of the interface,
+    // and another IPv6 network.
+    ["http://81.2.69.161/", ""],
+    ["http://[2a02:1205:5001::1]/", ""],
+    ["https://own-site.example/pricing", ""],
+  ]) {
+    assert.equal(await guard.judge(raw), why, raw);
+    // A connection to one is not made either.
+    if (why) assert.deepEqual(await guard.route(raw), { why, addresses: [] }, raw);
+  }
+  await assert.rejects(guard.addressesFor("http://own-machine.example/robots.txt"), (err) => err.code === "ENOTPUBLIC" && err.message === "http://own-machine.example/robots.txt is at 81.2.69.160, an address of this machine");
+  assert.equal(ownIp("81.2.69.160"), "machine");
+  assert.equal(ownIp("[2a02:1205:5000::77]"), "network");
+  assert.equal(ownIp("93.184.215.14"), "");
+  // Read as the run goes: once a second has passed, an address the machine
+  // no longer holds is any other.
+  interfaces = LOOPBACK;
+  assert.equal(await guard.judge("http://81.2.69.160/"), "is at 81.2.69.160, an address of this machine");
+  t.mock.timers.tick(1_000);
+  assert.equal(await guard.judge("http://81.2.69.160/"), "");
+  assert.equal(await guard.judge("http://[2a02:1205:5000::77]/"), "");
+  interfaces = SERVER;
+  t.mock.timers.tick(1_000);
+  // Given as the address, it is the user's own choice, as localhost is:
+  // that host and port are opened, and no other address of the machine;
+  // https on port 443 of it given on port 80 is another program, as for
+  // any host.
+  const given = guardFor("http://81.2.69.160:8080/");
+  assert.equal(await given.judge("http://81.2.69.160:8080/"), "");
+  assert.deepEqual(await given.route("http://81.2.69.160:8080/app.js"), { why: "", addresses: ["81.2.69.160"] });
+  assert.equal(await given.judge("http://[2a02:1205:5000::1]/"), "is at 2a02:1205:5000::1, an address of this machine");
+  assert.equal(await guardFor("http://own-machine.example/").judge("http://own-machine.example/pricing"), "");
+  assert.equal(await guardFor("http://own-machine.example/").judge("https://own-machine.example/"), "is at 81.2.69.160, an address of this machine");
+  // Such an address given is no site the system's proxy settings stand in
+  // front of, as one of this machine's (see kit.js notThroughProxy).
+  assert.equal(notPublicByForm(new URL("http://81.2.69.160:8080/")), true);
+  assert.equal(notPublicByForm(new URL("http://[2a02:1205:5000::77]/")), true);
+  assert.equal(notPublicByForm(new URL("http://81.2.69.161/")), false);
+});
+
+// The machine's network interfaces are read once a second at most, however
+// many addresses the run judges meanwhile, and again where the clock went
+// back or the function that reads them is another, as a test puts one in
+// its place.
+test("this machine's network interfaces are read once a second at most, whatever the run judges meanwhile", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 5_000_000 });
+  t.mock.method(dns.promises, "lookup", async () => [1, 2, 3, 4].map((n) => ({ address: `93.184.216.${n}`, family: 4 })));
+  let reads = 0;
+  let interfaces = LOOPBACK;
+  const reader = () => {
+    reads++;
+    return interfaces;
+  };
+  t.mock.method(os, "networkInterfaces", reader);
+  const guard = guardFor(null);
+  for (let n = 0; n < 50; n++) {
+    assert.equal(await guard.judge(`https://four.example/${n}`), "");
+    assert.equal((await guard.route(`https://four.example/${n}`)).addresses.length, 4);
+  }
+  assert.equal(reads, 1);
+  t.mock.timers.tick(999);
+  interfaces = { eth0: [{ address: "93.184.216.2", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "93.184.216.2/24" }] };
+  assert.equal(await guard.judge("https://four.example/"), "");
+  assert.equal(reads, 1);
+  t.mock.timers.tick(1);
+  assert.equal(await guard.judge("https://four.example/"), "is at 93.184.216.2, an address of this machine");
+  assert.equal(reads, 2);
+  interfaces = {};
+  t.mock.timers.setTime(4_000_000);
+  assert.equal(await guard.judge("https://four.example/"), "");
+  assert.equal(reads, 3);
+  t.mock.method(os, "networkInterfaces", () => {
+    reads++;
+    return { eth1: [{ address: "93.184.216.3", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "93.184.216.3/24" }] };
+  });
+  assert.equal(await guard.judge("https://four.example/"), "is at 93.184.216.3, an address of this machine");
+  assert.equal(reads, 4);
 });
 
 test("an address the run was not given is opened only on the public internet, by its form and by every address its name is found at, and never where its name is not found in time", async (t) => {

@@ -185,7 +185,17 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   const { guardFor, refusedAddresses } = require("../skills/easybrandkit/scripts/lib/address");
   let at = "2001:0:7f00:1::1";
   t.mock.method(dns.promises, "lookup", async () => [{ address: at, family: net.isIP(at) }]);
-  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890"), (err) => err.message === "host does not resolve to a public address: apps.apple.com");
+  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890"), (err) => err.message === "host apps.apple.com is at 2001:0:7f00:1::1, an address not on the public internet");
+  // An address of this machine's own on the public internet, and one of the
+  // IPv6 network of such an address, are not taken either.
+  const os = require("node:os");
+  t.mock.method(os, "networkInterfaces", () => ({ lo: [{ address: "127.0.0.1", family: "IPv4", internal: true, cidr: "127.0.0.1/8" }], eth0: [{ address: "17.253.144.10", family: "IPv4", internal: false, cidr: "17.253.144.10/24" }, { address: "2620:149:a44::5", family: "IPv6", internal: false, cidr: "2620:149:a44::5/64" }] }));
+  for (const [address, why] of [["17.253.144.10", "is at 17.253.144.10, an address of this machine"], ["2620:149:a44::10", "is at 2620:149:a44::10, on a network of this machine"]]) {
+    at = address;
+    await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/")), (err) => err.message === `host apps.apple.com ${why}`, address);
+  }
+  t.mock.restoreAll();
+  t.mock.method(dns.promises, "lookup", async () => [{ address: at, family: net.isIP(at) }]);
   at = "17.253.144.10";
   const guard = guardFor("https://apps.apple.com/us/app/acme/id1234567890", { refused: refusedAddresses("17.253.144.0/24") });
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
