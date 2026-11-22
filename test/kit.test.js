@@ -5927,8 +5927,11 @@ const withoutThreads = (env) => Object.fromEntries(Object.entries(env).filter(([
 
 // Namespaces in which the browser can run as this user, with its sandbox:
 // this user mapped to itself, keeping the capabilities the namespaces give,
-// so that the network and its addresses can be set up there. Older
-// unshare, as Ubuntu 22.04's, has no way to map this user to itself.
+// so that the network and its addresses can be set up there. The check
+// needs an unshare that maps this user to itself and keeps those
+// capabilities (--map-current-user and --keep-caps), and ip and mount in
+// the namespaces; where one of them is missing, the tests that need them
+// skip with these words.
 const ownNamespaces =
   namespaces ||
   (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", 'ip link set lo up && ip addr add 8.8.8.8/32 dev lo && mount --bind "$0" "$0"', __filename]).status !== 0 && "no namespaces that keep this user, as unshare --map-current-user --keep-caps makes");
