@@ -6618,6 +6618,71 @@ test("an address of this machine's own on the public internet, as its interfaces
   assert.equal(fs.existsSync(path.join(parent, "kit-leads")), false);
 });
 
+test("a site given whose name answers both with an address on the public internet and with 127.0.0.1 stops the run before any work, whichever answer the system gives first, and this machine's service there is asked nothing, nor by a page's picture, which is named in the same words", { skip: noBrowser || ownNamespaces }, (t) => {
+  // In namespaces of their own: the loopback alone, and a hosts file that
+  // answers mixed.example with 127.0.0.1 and with a public address, which
+  // the system puts first as it does here, and mixed6.example with a public
+  // IPv6 address first and 127.0.0.1, where the public address cannot be
+  // reached, as one that has stopped answering. A service of this machine
+  // listens on 127.0.0.1 on port 80, and a site the user runs on port 8000,
+  // whose page has a picture at mixed.example. Each keeps each request it
+  // gets.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-mixed-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  const hosts = ["127.0.0.1 localhost", "127.0.0.1 mixed.example", "93.184.216.34 mixed.example", "2606:2800:220:1:248:1893:25c8:1946 mixed6.example", "127.0.0.1 mixed6.example", ""].join("\n");
+  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", hosts]]) fs.writeFileSync(path.join(parent, name), text);
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  const page = brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://mixed.example/m.png" width="10" height="10"></body>`);
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const keep = (line) => fs.appendFileSync(${JSON.stringify(asked)}, line + "\\n");`,
+      `const page = ${JSON.stringify(page)};`,
+      `const service = http.createServer((req, res) => {`,
+      `  keep("service " + req.url + " " + req.headers.host);`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end("<title>Loopback admin</title><h1>LOOPBACK-ADMIN-PANEL</h1>");`,
+      `});`,
+      `service.listen(80, "127.0.0.1", () => service.unref());`,
+      `const site = http.createServer((req, res) => {`,
+      `  keep("site " + req.url);`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end(page);`,
+      `});`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = [
+    "ip link set lo up",
+    'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    'exec "$2" --require "$3" "$4" "$5" --no-stores --out "$6"',
+  ].join(" && ");
+  const run = (given, out) => spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, given, path.join(parent, out)], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  const lines = () => (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
+  for (const [given, outside] of [["http://mixed.example/", "93.184.216.34"], ["http://mixed6.example/", "2606:2800:220:1:248:1893:25c8:1946"]]) {
+    const cli = run(given, "kit");
+    assert.equal(cli.status, 1, cli.stderr);
+    // Its one line is the last: nothing was opened before it.
+    assert.equal(cli.stderr, `easybrandkit: ${given} is on a host whose name answers with an address on the public internet, ${outside}, and with one that is not, 127.0.0.1, so no kit was made.\n`);
+    assert.deepEqual(lines(), [], `${given}: nothing was asked of the service or the site`);
+    assert.equal(fs.existsSync(path.join(parent, "kit")), false);
+  }
+  // Away from the address given, the picture is not reached, and the note
+  // names it in the same words.
+  const cli = run("http://127.0.0.1:8000/", "site-kit");
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(lines().filter((line) => line.startsWith("service ")), [], "nothing was asked of the service");
+  const notes = JSON.parse(fs.readFileSync(path.join(parent, "site-kit", "brand.json"), "utf8")).notes;
+  assert.ok(notes.includes("While easybrandkit read http://127.0.0.1:8000/, the browser asked for http://mixed.example/m.png, which is on a host whose name answers with an address on the public internet, 93.184.216.34, and with one that is not, 127.0.0.1: it was not reached."), notes.join("\n"));
+});
+
 // What a program of the machine would be started for, recorded: stand-ins
 // of the test's own, first on PATH, as a backstop for the kit's own, so that
 // no real mail program starts here even where the kit has none, with no

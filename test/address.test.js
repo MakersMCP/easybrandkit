@@ -395,7 +395,7 @@ test("this machine's network interfaces are read once a second at most, whatever
   assert.equal(await guard.judge("https://four.example/"), "");
   assert.equal(reads, 1);
   t.mock.timers.tick(1);
-  assert.equal(await guard.judge("https://four.example/"), "is at 93.184.216.2, an address of this machine");
+  assert.equal(await guard.judge("https://four.example/"), "is on a host whose name answers with an address on the public internet, 93.184.216.1, and with one of this machine's, 93.184.216.2");
   assert.equal(reads, 2);
   interfaces = {};
   t.mock.timers.setTime(4_000_000);
@@ -405,15 +405,101 @@ test("this machine's network interfaces are read once a second at most, whatever
     reads++;
     return { eth1: [{ address: "93.184.216.3", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "93.184.216.3/24" }] };
   });
-  assert.equal(await guard.judge("https://four.example/"), "is at 93.184.216.3, an address of this machine");
+  assert.equal(await guard.judge("https://four.example/"), "is on a host whose name answers with an address on the public internet, 93.184.216.1, and with one of this machine's, 93.184.216.3");
   assert.equal(reads, 4);
+});
+
+// A name that answers both with an address on the public internet and with
+// one that is not, or that is this machine's own or on one of its
+// networks, is not opened wherever it is met, the address given included,
+// which a run then refuses before any work (see kit.js makeKit): taken for
+// the user's own, as one of its answers was, its every answer was opened,
+// so a site whose name answered with its public address and with
+// 127.0.0.1 had every request of the run go to a service of this machine on
+// 127.0.0.1 where the system put that address first, or once the public
+// address had stopped answering, and that service's page was saved as the
+// site's. Away from the address given such a name is named in the same
+// words, not as one off the public internet, which it is not alone. A name
+// all of whose answers are inside is the user's own, as a dev name at
+// 127.0.0.1 is.
+test("a name that answers both on the public internet and off it, or at this machine, is refused wherever it is met, the address given included, in the same words, and one all of whose answers are inside is the user's own when given", async (t) => {
+  t.mock.method(os, "networkInterfaces", () => SERVER);
+  const names = {
+    "mixed.example": ["93.184.216.34", "127.0.0.1"],
+    "mixed6.example": ["2606:2800:220:1:248:1893:25c8:1946", "::1"],
+    "first.example": ["127.0.0.1", "93.184.216.34"],
+    "private.example": ["93.184.216.34", "192.168.1.1"],
+    "metadata.example": ["93.184.216.34", "169.254.169.254"],
+    "evil-own.example": ["93.184.216.34", "81.2.69.160"],
+    "evil-lan.example": ["93.184.216.34", "2a02:1205:5000::77"],
+    "evil-fake.example": ["2606:2800:220:1::99", "198.18.0.5"],
+    "mixdev.example": ["127.0.0.1", "::1"],
+    "site.example": ["93.184.216.34"],
+  };
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (!names[host]) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+    return names[host].map((address) => ({ address, family: address.includes(":") ? 6 : 4 }));
+  });
+  const mix = (outside, kind, inside) => `is on a host whose name answers with an address on the public internet, ${outside}, and with ${kind}, ${inside}`;
+  for (const [given, why] of [
+    ["http://mixed.example/", mix("93.184.216.34", "one that is not", "127.0.0.1")],
+    ["http://mixed6.example/", mix("2606:2800:220:1:248:1893:25c8:1946", "one that is not", "::1")],
+    ["http://first.example/", mix("93.184.216.34", "one that is not", "127.0.0.1")],
+    ["https://private.example/", mix("93.184.216.34", "one that is not", "192.168.1.1")],
+    ["https://metadata.example/", mix("93.184.216.34", "one that is not", "169.254.169.254")],
+    ["https://evil-own.example/", mix("93.184.216.34", "one of this machine's", "81.2.69.160")],
+    ["https://evil-lan.example/", mix("93.184.216.34", "one on a network of this machine", "2a02:1205:5000::77")],
+    ["http://evil-fake.example/", mix("2606:2800:220:1::99", "one in the range a proxy in fake-ip mode gives every name, 198.18.0.0/15", "198.18.0.5")],
+  ]) {
+    // Given, the address itself, its own pages and https on its host, and
+    // every connection for them, with MAKERSMCP_REFUSE_ADDRESSES set or not.
+    const { hostname } = new URL(given);
+    for (const guard of [guardFor(given), guardFor(given, { refused: refusedAddresses("127.0.0.0/8,::1") })]) {
+      for (const raw of [given, `http://${hostname}/api/data`, `https://${hostname}/`, `http://${hostname}./x`]) {
+        assert.equal(await guard.judge(raw), why, raw);
+        assert.deepEqual(await guard.route(raw), { why, addresses: [] }, raw);
+      }
+      await assert.rejects(guard.addressesFor(`http://${hostname}/robots.txt`), (err) => err.code === "ENOTPUBLIC" && err.message === `http://${hostname}/robots.txt ${why}`, given);
+    }
+    // Away from the address given, in the same words, from a public site,
+    // from a site of this machine and with no address given.
+    for (const other of [guardFor("https://site.example/"), guardFor("http://localhost:4000/"), guardFor(null)]) {
+      assert.equal(await other.judge(`https://${hostname}/logo.png`), why, given);
+      assert.deepEqual(await other.route(`https://${hostname}/logo.png`), { why, addresses: [] }, given);
+    }
+    // The README's Limits, SKILL.md and --help quote it in its general form.
+    assert.match(why, /^is on a host whose name answers with an address on the public internet, [0-9a-f:.]+, and with one /, given);
+  }
+  // All its answers inside: the user's own, every answer for a connection.
+  const dev = guardFor("http://mixdev.example:4000/");
+  assert.equal(await dev.judge("http://mixdev.example:4000/"), "");
+  assert.deepEqual(await dev.route("http://mixdev.example:4000/app.js"), { why: "", addresses: ["127.0.0.1", "::1"] });
+  // And all of them public: any site.
+  assert.equal(await guardFor("https://site.example/").judge("https://site.example/pricing"), "");
+  // The texts say the rule once each, in that general form, with the way
+  // out that works.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { spawnSync } = require("node:child_process");
+  const general = '"on a host whose name answers with an address on the public internet, <address>, and with one ..."';
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const limits = readme.slice(readme.indexOf("\n## Limits\n"));
+  for (const [where, text] of [
+    ["the README's Limits", limits.slice(0, limits.indexOf("\n## ", 2))],
+    ["SKILL.md", fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8")],
+    ["--help", spawnSync(process.execPath, [path.join(__dirname, "..", "skills", "easybrandkit", "scripts", "easybrandkit.js"), "--help"], { encoding: "utf8" }).stdout],
+  ]) {
+    const flat = text.replace(/\s+/g, " ");
+    assert.ok(flat.includes(general), where);
+    assert.match(flat.slice(flat.indexOf(general) + general.length), /^[^.]*answers? (?:its|that) name with the address (?:you|the user) means? alone, as a line in its hosts file does\./, where);
+  }
 });
 
 test("an address the run was not given is opened only on the public internet, by its form and by every address its name is found at, and never where its name is not found in time", async (t) => {
   const asked = [];
   t.mock.method(dns.promises, "lookup", async (host) => {
     asked.push(host);
-    if (host === "intranet.acme.com") return [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.5", family: 4 }];
+    if (host === "intranet.acme.com") return [{ address: "10.0.0.5", family: 4 }, { address: "10.0.0.6", family: 4 }];
     if (host === "teredo.acme.com") return [{ address: "2001:0:7f00:1::1", family: 6 }];
     if (host === "fake.acme.com") return [{ address: "198.18.0.12", family: 4 }];
     if (host === "nat64.acme.com") return [{ address: "64:ff9b::5db8:d822", family: 6 }];
@@ -461,9 +547,12 @@ test("an address the run was not given is opened only on the public internet, by
   assert.equal(await guard.judge("https://intranet.acme.com/other"), "is at 10.0.0.5, an address not on the public internet");
   assert.equal(asked.filter((host) => host === "intranet.acme.com").length, 1);
   // The address given is the user's own whatever its host, as a site on
-  // this machine is, and asks no lookup.
-  assert.equal(await guardFor("http://intranet.acme.com:8080/").judge("http://intranet.acme.com:8080/x"), "");
-  assert.equal(asked.filter((host) => host === "intranet.acme.com").length, 1);
+  // this machine is. Its name is looked up too, once a run, as one whose
+  // answers mix is not opened even given (see the test of such names).
+  const given = guardFor("http://intranet.acme.com:8080/");
+  assert.equal(await given.judge("http://intranet.acme.com:8080/x"), "");
+  assert.equal(await given.judge("http://intranet.acme.com:8080/y"), "");
+  assert.equal(asked.filter((host) => host === "intranet.acme.com").length, 2);
   // https on port 443 of a host given on port 80 is another program, held
   // to the rule as any address the run was not given.
   assert.equal(await guardFor("http://intranet.acme.com/").judge("https://intranet.acme.com/"), "is at 10.0.0.5, an address not on the public internet");
@@ -589,9 +678,16 @@ test("route gives the addresses a connection may go to, every address the lookup
   // refuses it there.
   assert.deepEqual(await guardFor("https://gone.acme.com/").route("https://gone.acme.com/"), { why: "", addresses: [] });
   assert.deepEqual(await guardFor("https://gone.acme.com/", { refused: refusedAddresses("10.0.0.0/8") }).route("https://gone.acme.com/"), { why: "is on a host whose name could not be looked up", addresses: [] });
-  // judge asks no lookup for the address given, route does, once.
-  assert.equal(await guardFor("https://other.acme.com/").judge("https://other.acme.com/"), "");
-  assert.equal(asked.filter((host) => host === "other.acme.com").length, 0);
+  // judge and route of the address given ask the name once between them;
+  // judge asks none for an IP address or a name of this machine's own.
+  const other = guardFor("https://other.acme.com/");
+  assert.equal(await other.judge("https://other.acme.com/"), "");
+  assert.deepEqual(await other.route("https://other.acme.com/x"), { why: "", addresses: both });
+  assert.equal(asked.filter((host) => host === "other.acme.com").length, 1);
+  const before = asked.length;
+  assert.equal(await guardFor("http://93.184.216.34:8080/").judge("http://93.184.216.34:8080/"), "");
+  assert.equal(await guardFor("http://app.localhost:3000/").judge("http://app.localhost:3000/"), "");
+  assert.equal(asked.length, before);
   assert.deepEqual(await guard.found("www.acme.com"), both);
   assert.deepEqual(await guard.found("93.184.216.34"), ["93.184.216.34"]);
   assert.deepEqual(await guard.found("app.localhost"), ["::1", "127.0.0.1"]);

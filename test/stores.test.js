@@ -195,7 +195,11 @@ test("a store's addresses are judged as every address the kit opens is: by the t
     await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/")), (err) => err.message === `host apps.apple.com ${why}`, address);
   }
   t.mock.restoreAll();
-  t.mock.method(dns.promises, "lookup", async () => [{ address: at, family: net.isIP(at) }]);
+  t.mock.method(dns.promises, "lookup", async () => [at].flat().map((address) => ({ address, family: net.isIP(address) })));
+  // A host whose name answers both with an address on the public internet
+  // and with one that is not is refused in the words a page gets for it.
+  at = ["17.253.144.10", "127.0.0.1"];
+  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/")), (err) => err.message === "host apps.apple.com is on a host whose name answers with an address on the public internet, 17.253.144.10, and with one that is not, 127.0.0.1");
   at = "17.253.144.10";
   const guard = guardFor("https://apps.apple.com/us/app/acme/id1234567890", { refused: refusedAddresses("17.253.144.0/24") });
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");

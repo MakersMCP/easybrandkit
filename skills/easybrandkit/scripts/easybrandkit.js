@@ -89,6 +89,13 @@ used.
 MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and ranges such as
 10.0.0.0/8, refuses those for every address opened and every request the kit
 or its proxy makes, the one given included.
+A host whose name answers both with an address on the public internet and
+with one the kit does not open away from the address given is not opened
+wherever the kit meets it, the address given included, which stops the run
+before any work, with "on a host whose name answers with an address on the
+public internet, <address>, and with one ...": to read such a site, have the
+machine answer its name with the address you mean alone, as a line in its
+hosts file does.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On

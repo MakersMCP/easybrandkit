@@ -481,11 +481,49 @@ const atNetwork = (address) => `is at ${address}, on a network of this machine`;
 // stands (see standingOf).
 const insideWhy = (address, standing) => (standing === "machine" ? atMachine(address) : standing === "network" ? atNetwork(address) : atNotPublic(address));
 
+// Behind a proxy in fake-ip mode, as Clash, Surge or sing-box run with a
+// TUN device, every name answers in 198.18.0.0/15, which is not on the
+// public internet: an IPv4 address there or an IPv6 form of one.
+const FAKE_IP = new net.BlockList();
+FAKE_IP.addSubnet("198.18.0.0", 15, "ipv4");
+function inFakeRange(raw) {
+  const address = plainIp(raw);
+  const v4 = net.isIP(address) === 6 ? heldIpv4(address) : address;
+  return net.isIP(v4) === 4 && FAKE_IP.check(v4, "ipv4");
+}
+
+// Why a name whose addresses mix is refused, as said after "it" or
+// "which", or "": one that answers both with an address on the public
+// internet and with one that is not, or that is this machine's own or on
+// one of its networks (see standingOf), named by its first answer of each
+// kind. Such a name is refused wherever the run meets it, the address given
+// included, before any work: taken for the user's own, as one of its
+// answers was, its every answer was opened, so a site whose name answered
+// with its public address and with 127.0.0.1 had every request of the run
+// go to a service of this machine on 127.0.0.1, where the system put that
+// address first, as glibc can by the order of RFC 6724, or once the public
+// address had stopped answering, and that service's page was saved as the site's with
+// no note. Away from the address given, such a name is named in the same
+// words, never as one not on the public internet, which it is not alone. As
+// easyscreenshotkit words it.
+function mixedWhy(addresses) {
+  const standings = addresses.map((address) => [plainIp(address), standingOf(address)]);
+  const outside = standings.find(([, standing]) => !standing);
+  const inside = standings.find(([, standing]) => standing);
+  if (!outside || !inside) return "";
+  const [at, standing] = inside;
+  const kind = standing === "network" ? "one on a network of this machine" : standing === "machine" ? "one of this machine's" : inFakeRange(at) ? "one in the range a proxy in fake-ip mode gives every name, 198.18.0.0/15" : "one that is not";
+  return `is on a host whose name answers with an address on the public internet, ${outside[0]}, and with ${kind}, ${at}`;
+}
+
 // Why a host found at these addresses is refused away from the address
 // given, as said after "it" or "which", or "" for one every address of
-// which is on the public internet and none this machine's own: named by
-// its first address that is not (see standingOf).
+// which is on the public internet and none this machine's own: a name whose
+// answers mix by both (see mixedWhy), else by its first address that is not
+// (see standingOf).
 function awayWhy(addresses) {
+  const mixed = mixedWhy(addresses);
+  if (mixed) return mixed;
   for (const address of addresses) {
     const standing = standingOf(address);
     if (standing) return insideWhy(plainIp(address), standing);
@@ -567,7 +605,8 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   const own = (url) => Boolean(given) && sameHost(url, given) && (url.protocol === given.protocol || (given.protocol === "http:" && url.protocol === "https:"));
   // The rule for one address. resolve: whether the addresses of one the run
   // may open are wanted, as for a connection; without it, the address given
-  // is looked up only to check it against the refused addresses.
+  // is looked up only to check its answers, at a name, and to check them
+  // against the refused addresses.
   async function rule(raw, resolve) {
     const url = readUrl(raw);
     if (!url) return { why: webScheme(raw) ? UNREADABLE : "", addresses: [] };
@@ -582,14 +621,19 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
       const standing = standingOf(host);
       if (standing) return { why: standing === "not public" ? NOT_PUBLIC : insideWhy(host, standing), addresses: [] };
     }
-    if (mine && !refused.size && !resolve) return { why: "", addresses: [] };
+    // The address given at an IP address or a name of this machine's own
+    // needs no lookup to be judged: no such host has answers that mix.
+    const name = !net.isIP(host) && !localName(host);
+    if (mine && !refused.size && !resolve && !name) return { why: "", addresses: [] };
     // Another of this machine's names that is the host given goes to the
     // addresses the two share alone: from http://127.0.0.1:4000/, a page's
     // picture at http://localhost:4000/ comes from 127.0.0.1, never from
     // ::1, which can be another program on that port.
     const addresses = (mine && sharedAddresses(host, givenHost)) || (await found(host));
     if (!addresses.length) return { why: mine && !refused.size ? "" : UNRESOLVED, addresses: [] };
-    const away = mine ? "" : awayWhy(addresses);
+    // A name whose answers mix is refused wherever it is, the address given
+    // and its own pages included (see mixedWhy).
+    const away = mine ? (name ? mixedWhy(addresses) : "") : awayWhy(addresses);
     if (away) return { why: away, addresses: [] };
     for (const address of addresses) if (refused.match(address)) return { why: atRefused(refused.match(address)), addresses: [] };
     return { why: "", addresses: addresses.map(plainIp) };
