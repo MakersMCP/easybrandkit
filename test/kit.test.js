@@ -4337,7 +4337,7 @@ test("a proxy that HTTPS_PROXY or another such setting names is not used, and a 
   const settings = ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"];
   setEnv(t, Object.fromEntries(settings.map((name) => [name, undefined])));
   t.mock.method(dns.promises, "lookup", async (host) => {
-    if (host === "gone.test" || host === "itunes.apple.com") throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+    if (["gone.test", "itunes.apple.com", "gone.local", "gone"].includes(host)) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
     return [{ address: "93.184.216.34", family: 4 }];
   });
   await dialHere(t, () => 9);
@@ -4370,6 +4370,16 @@ test("a proxy that HTTPS_PROXY or another such setting names is not used, and a 
   gone.close();
   await once(gone, "close");
   await assert.rejects(makeKit(down, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open ${down}: net::ERR_CONNECTION_REFUSED`);
+  // Nor is a site at a name under .local or of one label, as a server under
+  // development on this machine's own network or a service of Docker
+  // Compose, that takes no connection or is not found, whatever the lookup
+  // here finds for it: such a name is not on the public internet by its
+  // form either.
+  for (const name of ["devbox.local", "devbox", "gone.local", "gone"]) {
+    const local = `http://${name}:3000/`;
+    const word = name.startsWith("gone") ? "NAME_NOT_RESOLVED" : "CONNECTION_REFUSED";
+    await assert.rejects(makeKit(local, { dir: path.join(parent, "kit"), stores: false }), (err) => err.message === `Could not open ${local}: net::ERR_${word}`, name);
+  }
   // A site it reaches is read, and the setting changes nothing there.
   const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "kit"), stores: false });
   assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png"]);

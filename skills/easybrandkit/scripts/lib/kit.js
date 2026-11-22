@@ -512,7 +512,8 @@ const STORE_UNREACHED = /could not be looked up|did not answer in|connect E(CONN
 // word, when one of those settings is given, that the kit does not use the
 // proxy it names; the setting's value is not said, as it can hold a
 // password. An address of this machine or of a private network by its form,
-// as a server under development that is not running, gets no such word.
+// a name under .local or of one label among them, as a server under
+// development that is not running, gets no such word.
 function notThroughProxy(message, unreached) {
   const name = PROXY_SETTINGS.find((one) => process.env[one]);
   if (!name || !unreached) return message;
@@ -549,8 +550,9 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   const asked = normalizeUrl(rawUrl);
   // Written with no scheme, which reads as https:// (see normalizeUrl).
   const bare = !/^[a-z][a-z0-9+.-]*:\/\//i.test(String(rawUrl || "").trim());
-  // On this machine or a private network by its form, which no proxy of
-  // the system's stands in front of (see notThroughProxy).
+  // On this machine or a private network by its form, a name under .local
+  // or of one label among them, which no proxy of the system's stands in
+  // front of (see notThroughProxy).
   const local = notPublicByForm(new URL(asked));
   const source = namedBy ? normalizeUrl(namedBy) : "";
   const host = new URL(asked).hostname.toLowerCase();

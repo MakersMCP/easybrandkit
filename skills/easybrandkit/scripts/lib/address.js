@@ -241,10 +241,11 @@ function ownName(host) {
 }
 
 // Whether an address is not on the public internet by its form alone: an IP
-// address that is not, or a name of this machine's own.
+// address that is not, a name of this machine's own, or a name the system
+// looks up on this machine's own networks (see linkName).
 function notPublicByForm(url) {
   const host = bare(url);
-  return net.isIP(host) ? !isPublicAddress(host) : localName(host);
+  return net.isIP(host) ? !isPublicAddress(host) : localName(host) || linkName(host);
 }
 
 // The port a web address is served on, the scheme's own when it names none.
