@@ -738,10 +738,13 @@ async function launch({ width, height }, { guard = null } = {}) {
   };
   // A new tab, waited for ms at most: its id. One opened in the background
   // leaves the tab in front as it was: a page there is not told that it is
-  // hidden, which it can answer by moving on.
-  const newTab = async (ms, { background = false } = {}) => {
+  // hidden, which it can answer by moving on. One opened in a window of its
+  // own (window) is the tab in front of that window, which the browser draws
+  // as it draws any tab in front; with background, the window in front
+  // stays so.
+  const newTab = async (ms, { background = false, window = false } = {}) => {
     try {
-      const { targetId } = await pipe.send("Target.createTarget", { url: "about:blank", ...(background ? { background: true } : {}) }, ms);
+      const { targetId } = await pipe.send("Target.createTarget", { url: "about:blank", ...(background ? { background: true } : {}), ...(window ? { newWindow: true } : {}) }, ms);
       return targetId;
     } catch (err) {
       if (err.timedOut) throw noAnswer("The browser did not open a tab", ms);

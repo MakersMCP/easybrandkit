@@ -5547,6 +5547,52 @@ test("the card of a kit with no logo, no solid colors, no fonts and no first scr
   assert.equal(fs.readFileSync(path.join(parent, "card.png")).readUInt32BE(0), 0x89504e47);
 });
 
+test("the card is drawn in a window of its own, in the background: its tab is the one in front there and draws, its capture is waited for 30 s at most, and the page's tab is told nothing", { skip: noBrowser }, async (t) => {
+  // A page that keeps what it is told of its tab.
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", `<script>
+    window.told = [];
+    document.addEventListener("visibilitychange", () => window.told.push(document.visibilityState));
+    window.addEventListener("blur", () => window.told.push("blur"));
+  </script></body>`)));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  setTimeLimit(120_000);
+  const url = `${site.origin}/`;
+  const browser = await launch({ width: 800, height: 600 }, { guard: guardFor(url) });
+  t.after(() => browser.close());
+  const page = await openPage(browser, { width: 800, height: 600 });
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  await navigate(page, url);
+  // What the card's tab shows as its capture is asked for, and how long the
+  // capture is waited for. A tab the browser draws runs the page's
+  // animation frames; a hidden one runs none, and its capture can go
+  // unanswered.
+  let seen = null;
+  const attach = browser.attach;
+  browser.attach = async (targetId, ms) => {
+    const tab = await attach(targetId, ms);
+    const send = tab.send;
+    tab.send = async (method, params, wait) => {
+      if (method === "Page.captureScreenshot") {
+        const state = (await send("Runtime.evaluate", { expression: "document.visibilityState", returnByValue: true })).result.value;
+        const frame = (await send("Runtime.evaluate", { expression: "new Promise((done) => { requestAnimationFrame(() => done('drawn')); setTimeout(() => done('none in 2 s'), 2000); })", awaitPromise: true, returnByValue: true })).result.value;
+        seen = { state, frame, wait };
+      }
+      return send(method, params, wait);
+    };
+    return tab;
+  };
+  const kit = { url: "https://www.acme.example/", name: "Acme", logos: [], colors: [{ hex: "#ff0000", role: "button" }], fonts: {}, screenshots: [] };
+  const card = await renderCard(browser, kit, parent);
+  assert.deepEqual(card, { file: "card.png", width: 2400, height: 1350 });
+  assert.deepEqual(seen, { state: "visible", frame: "drawn", wait: 30_000 });
+  const told = await page.send("Runtime.evaluate", { expression: "window.told", returnByValue: true });
+  assert.deepEqual(told.result.value, [], "the page's tab was told nothing");
+});
+
 test("a browser killed while the card is drawn fails the run and keeps the earlier kit; a card that cannot be drawn otherwise is told in the notes", { skip: noBrowser }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
