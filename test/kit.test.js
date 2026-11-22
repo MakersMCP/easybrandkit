@@ -5938,6 +5938,71 @@ test("a page's WebRTC has the browser look no name up itself: neither a name und
   assert.deepEqual(lines.filter((line) => line.startsWith("joined ")), [], "nothing but the test joined the group of multicast DNS");
 });
 
+test("a page's pictures at a name under .local and at a name of one label have the kit look neither up, and the kit's notes name them as not on the public internet", { skip: noBrowser || ownNamespaces }, (t) => {
+  // In namespaces of their own: the loopback alone, a DNS server of the
+  // test's own on 127.0.0.1 that keeps each question and answers none, and
+  // the name service's own files, which send every name to it, a name under
+  // .local too, so that no name reaches the machine's own resolver or
+  // multicast DNS daemon. Looked up, either name would come to that server,
+  // as the third picture's does.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-link-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  const word = crypto.randomBytes(4).toString("hex");
+  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:2 attempts:1\n"], ["nsswitch.conf", "hosts: files dns\n"], ["hosts", "127.0.0.1 localhost\n"]]) fs.writeFileSync(path.join(parent, name), text);
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  const pictures = [`http://printer-${word}.local/a.png`, `http://intranet-${word}/b.png`, `http://pic-${word}.test/c.png`];
+  const page = brandPage("rgb(255,0,0)").replace("</body>", `${pictures.map((src) => `<img src="${src}" width="10" height="10">`).join("")}</body>`);
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const dgram = require("dgram");`,
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const keep = (line) => fs.appendFileSync(${JSON.stringify(asked)}, line + "\\n");`,
+      `const nameOf = (message) => {`,
+      `  let at = 12;`,
+      `  const labels = [];`,
+      `  while (at < message.length && message[at] && message[at] < 64) {`,
+      `    labels.push(message.subarray(at + 1, at + 1 + message[at]).toString("latin1"));`,
+      `    at += message[at] + 1;`,
+      `  }`,
+      `  return labels.join(".").toLowerCase();`,
+      `};`,
+      `const dns = dgram.createSocket("udp4");`,
+      `dns.on("message", (query) => keep("dns " + nameOf(query)));`,
+      `dns.bind(53, "127.0.0.1", () => dns.unref());`,
+      `const page = ${JSON.stringify(page)};`,
+      `const site = http.createServer((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = [
+    "ip link set lo up",
+    'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    "for dir in /run/avahi-daemon /run/systemd/resolve; do if [ -d $dir ]; then mount -t tmpfs none $dir || exit 1; fi; done",
+    'exec "$2" --require "$3" "$4" http://127.0.0.1:8000/ --no-stores --out "$5"',
+  ].join(" && ");
+  const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /^Saved the Acme brand kit to /);
+  const lines = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
+  // The third picture's name was asked, so the others would have been.
+  assert.ok(lines.includes(`dns pic-${word}.test`), lines.join("\n"));
+  assert.deepEqual(lines.filter((line) => line.includes(`printer-${word}`) || line.includes(`intranet-${word}`)), [], "neither name was looked up");
+  const notes = JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8")).notes;
+  for (const src of pictures.slice(0, 2)) assert.ok(notes.includes(`While easybrandkit read http://127.0.0.1:8000/, the browser asked for ${src}, which is not on the public internet: it was not reached.`), `${src}: ${notes.join("\n")}`);
+  // One its name was not found for is not named, as the browser would not
+  // have reached it either.
+  assert.ok(!notes.some((note) => note.includes(`pic-${word}`)), notes.join("\n"));
+});
+
 // What a program of the machine would be started for, recorded: stand-ins
 // of the test's own, first on PATH, as a backstop for the kit's own, so that
 // no real mail program starts here even where the kit has none, with no

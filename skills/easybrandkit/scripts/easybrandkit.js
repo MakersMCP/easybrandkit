@@ -66,8 +66,9 @@ opens, as a page it chose, each hop of a redirect, a page's own move, a
 frame or a window it opens and robots.txt with --facts, is opened only on
 port 80 or 443, and only when every address the kit's own lookup finds for
 its name is on the public internet: a name it cannot look up is not opened,
-nor an address it cannot read itself, as one whose host has a label of
-broken punycode (xn--a), which the browser reads.
+nor a name under .local or of one label, which it does not look up, nor an
+address it cannot read itself, as one whose host has a label of broken
+punycode (xn--a), which the browser reads.
 With --named-by, the site given is such an address too. Every request the
 browser makes, a page's pictures, scripts and data and the browser's own
 among them, goes through a proxy of the kit's own on 127.0.0.1, which holds

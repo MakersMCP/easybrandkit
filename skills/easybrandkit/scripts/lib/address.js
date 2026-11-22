@@ -164,6 +164,17 @@ function isPublicAddress(raw) {
 // localhost, and any name under it.
 const localName = (host) => /(^|\.)localhost$/i.test(host);
 
+// The names the system can look up on this machine's own networks, by
+// multicast: a name under .local, which goes to multicast DNS on each of
+// them (RFC 6762), as nss-mdns hands it to avahi on a Linux desktop, and a
+// name of one label, which goes to LLMNR where the system has it on, as
+// Windows and systemd-resolved can. Looked up for a page, a picture at
+// such a name put a question of the page's choosing on the user's own
+// networks, and how soon it failed told the page whether a device there
+// answers to that name. Neither is a name on the public internet, so one
+// the run was not given is refused by its form, before any lookup.
+const linkName = (host) => !net.isIP(host) && (/(^|\.)local$/i.test(host) || !host.includes("."));
+
 // Whether a host has a label of broken punycode: one that starts with xn--
 // and does not decode to a name that is written back as that label, as
 // xn--a, xn--, xn--zz, or xn--a-, which decodes to a. The URL parser of
@@ -425,7 +436,7 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
     const mine = own(url);
     if (!mine && !WEB_PORTS.has(portOf(url))) return { why: onPort(portOf(url)), addresses: [] };
     const host = bare(url);
-    if (!mine && (localName(host) || (net.isIP(host) && !isPublicAddress(host)))) return { why: NOT_PUBLIC, addresses: [] };
+    if (!mine && (localName(host) || linkName(host) || (net.isIP(host) && !isPublicAddress(host)))) return { why: NOT_PUBLIC, addresses: [] };
     if (mine && !refused.size && !resolve) return { why: "", addresses: [] };
     const addresses = await found(host);
     if (!addresses.length) return { why: mine && !refused.size ? "" : UNRESOLVED, addresses: [] };

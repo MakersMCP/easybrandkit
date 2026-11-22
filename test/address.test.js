@@ -282,6 +282,35 @@ test("an address the run was not given is opened only on the public internet, by
   assert.ok(Date.now() - started >= 4_900, `${Date.now() - started} ms`);
 });
 
+test("a name under .local or of one label that the run was not given is not on the public internet by its form and is not looked up, as the system can look it up on this machine's own networks; given, it is looked up", async (t) => {
+  const asked = [];
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    asked.push(host);
+    return [{ address: host.startsWith("devbox") ? "192.168.1.20" : "93.184.216.34", family: 4 }];
+  });
+  const guard = guardFor("https://acme.com/");
+  for (const raw of ["http://printer.local/", "https://nas.home.local/x.png", "http://PRINTER.LOCAL./", "http://printer.local../", "http://local/", "http://intranet/", "http://intranet./", "https://intranet:443/", "http://xn--bcher-kva/", "http://devbox.local/"]) {
+    assert.equal(await guard.judge(raw), "is not on the public internet", raw);
+    assert.deepEqual(await guard.route(raw), { why: "is not on the public internet", addresses: [] }, raw);
+    await assert.rejects(guard.addressesFor(raw), (err) => err.code === "ENOTPUBLIC", raw);
+  }
+  assert.deepEqual(asked, [], "no such name was looked up");
+  // Names that only end in local, or hold more than one label, are judged
+  // by where they are found.
+  for (const raw of ["https://local.acme.com/", "https://notlocal.example/x", "https://acme.locale/"]) assert.equal(await guard.judge(raw), "", raw);
+  assert.deepEqual(asked, ["local.acme.com", "notlocal.example", "acme.locale"]);
+  // Given, such a name is the user's own, looked up for a connection to it
+  // and its own pages, and another port of it is not.
+  asked.length = 0;
+  for (const given of ["http://devbox.local:3000/", "http://devbox:3000/"]) {
+    const own = guardFor(given);
+    assert.deepEqual(await own.route(`${given}app.js`), { why: "", addresses: ["192.168.1.20"] }, given);
+    assert.equal(await own.judge(given.replace(":3000", ":3001")), "is on port 3001, not 80 or 443", given);
+    assert.equal(await own.judge(given.replace(":3000", "")), "is not on the public internet", given);
+  }
+  assert.deepEqual(asked, ["devbox.local", "devbox"]);
+});
+
 test("an address written with http: or https: that the URL parser here cannot read is not opened, as the browser can read it and go where its host leads", async (t) => {
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const why = "is not an address easybrandkit can read";
