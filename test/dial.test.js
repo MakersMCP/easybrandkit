@@ -124,6 +124,39 @@ test("an attempt that fails starts the next at once, and a connection whose ever
   await assert.rejects(dialFirst(["93.184.216.34"], 80), (err) => err.code === "ECONNABORTED");
 });
 
+test("an attempt that fails while an earlier one is still under way starts no other at once: the next waits for its turn", { timeout: 30_000 }, async (t) => {
+  const server = await site(t);
+  const port = server.address().port;
+  // A clock of the test's own, which moves only as the test moves it.
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const attempts = [];
+  // The first address never answers; the second is refused as soon as it
+  // is tried, while the first is still under way; the third connects.
+  t.mock.method(dialLib.wire, "dial", (address) => {
+    const socket = new net.Socket();
+    attempts.push({ address, when: Date.now(), socket });
+    if (attempts.length === 2) process.nextTick(() => socket.destroy(Object.assign(new Error(`connect ECONNREFUSED ${address}:80`), { code: "ECONNREFUSED" })));
+    if (attempts.length === 3) socket.connect(port, "127.0.0.1");
+    return socket;
+  });
+  const started = Date.now();
+  const dialing = dialFirst(["93.184.216.34", "93.184.216.35", "93.184.216.36"], 80, { name: "acme.test" });
+  // 10 ms at a time, the refusal and what follows it let through after
+  // each move of the clock.
+  for (let ms = 0; ms < 2 * ATTEMPT_DELAY && attempts.length < 3; ms += 10) {
+    t.mock.timers.tick(10);
+    for (let turn = 0; turn < 5; turn++) await new Promise((resolve) => setImmediate(resolve));
+  }
+  const socket = await dialing;
+  t.after(() => socket.destroy());
+  assert.deepEqual(attempts.map(({ address }) => address), ["93.184.216.34", "93.184.216.35", "93.184.216.36"]);
+  // The third started a turn after the second, not when the second failed,
+  // as the first was still under way.
+  assert.deepEqual(attempts.map(({ when }) => when - started), [0, ATTEMPT_DELAY, 2 * ATTEMPT_DELAY]);
+  assert.equal(socket, attempts[2].socket);
+  assert.ok(attempts[0].socket.destroyed, "the first attempt was ended");
+});
+
 test("a connection given up ends every attempt under way", { timeout: 30_000 }, async (t) => {
   const attempts = [];
   t.mock.method(dialLib.wire, "dial", () => {
@@ -209,6 +242,64 @@ test("with 200 ms on each way of this machine's loopback, a site given as localh
   assert.deepEqual(said.asked, { status: 200, body: "the page" }, cli.stdout);
   assert.deepEqual(said.robots, { rules: [{ allow: false, path: "/private" }], delay: 0 }, cli.stdout);
   assert.deepEqual(said.failed, []);
+});
+
+const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status === 0;
+
+test("the kit's own requests over https start TLS for their host: robots.txt with --facts, its redirect, and a store's lookup are read from a server whose certificate names that host, which is told it as the name the request is for", { skip: !openssl && "no openssl to make the test server's certificate" }, async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-tls-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // A certificate of the test's own for the three hosts, which the program
+  // below trusts (NODE_EXTRA_CA_CERTS) and no other program does.
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-subj", "/CN=site.test", "-addext", "subjectAltName=DNS:site.test,DNS:hop.test,DNS:itunes.apple.com"], { cwd: parent, encoding: "utf8" });
+  assert.equal(made.status, 0, made.stderr);
+  const start = path.join(parent, "start.js");
+  // In a program of its own, as Node.js reads NODE_EXTRA_CA_CERTS as it
+  // starts: one https server of its own stands in for each host, every
+  // connection to the addresses the rule took going to it, and keeps the
+  // name each TLS connection was started for.
+  fs.writeFileSync(
+    start,
+    [
+      `const https = require("https");`,
+      `const net = require("net");`,
+      `const dns = require("dns");`,
+      `const fs = require("fs");`,
+      `const os = require("os");`,
+      `const dialLib = require(${JSON.stringify(path.join(LIB, "dial.js"))});`,
+      `const { guardFor } = require(${JSON.stringify(path.join(LIB, "address.js"))});`,
+      `const { readRobots } = require(${JSON.stringify(path.join(LIB, "facts.js"))});`,
+      `const stores = require(${JSON.stringify(path.join(LIB, "stores.js"))});`,
+      `const asked = [];`,
+      `const server = https.createServer({ key: fs.readFileSync(${JSON.stringify(path.join(parent, "key.pem"))}), cert: fs.readFileSync(${JSON.stringify(path.join(parent, "cert.pem"))}) }, (req, res) => {`,
+      `  asked.push(req.socket.servername + " " + req.headers.host + " " + req.url.split("?")[0]);`,
+      `  if (req.url === "/robots.txt") return res.writeHead(302, { location: "https://hop.test/robots-hop" }).end();`,
+      `  if (req.url === "/robots-hop") return res.writeHead(200, { "content-type": "text/plain" }).end("User-agent: *\\nDisallow: /private\\n");`,
+      `  res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ resultCount: 1, results: [{ wrapperType: "software", trackName: "Acme", sellerName: "Acme Inc." }] }));`,
+      `});`,
+      `dns.promises.lookup = async (host) => [{ address: host === "itunes.apple.com" ? "17.253.144.10" : "93.184.216.34", family: 4 }];`,
+      `(async () => {`,
+      `  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));`,
+      `  dialLib.wire.dial = () => net.connect({ host: "127.0.0.1", port: server.address().port });`,
+      `  const robots = await readRobots("https://site.test", guardFor("https://site.test/"));`,
+      `  const listing = await stores.readSource(stores.classify("https://apps.apple.com/us/app/acme/id1234567890"), os.tmpdir());`,
+      `  console.log(JSON.stringify({ robots, listing: { ok: listing.ok, name: listing.name, error: listing.error || "" }, asked }));`,
+      `  server.close();`,
+      `})();`,
+      ``,
+    ].join("\n"),
+  );
+  const child = spawn(process.execPath, [start], { env: { ...process.env, NODE_EXTRA_CA_CERTS: path.join(parent, "cert.pem"), TMPDIR: parent }, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (chunk) => (out += chunk));
+  child.stderr.on("data", (chunk) => (err += chunk));
+  const [code] = await once(child, "close");
+  assert.equal(code, 0, err);
+  const said = JSON.parse(out.trim().split("\n").pop());
+  assert.deepEqual(said.robots, { rules: [{ allow: false, path: "/private" }], delay: 0 });
+  assert.deepEqual(said.listing, { ok: true, name: "Acme", error: "" });
+  assert.deepEqual(said.asked, ["site.test site.test /robots.txt", "hop.test hop.test /robots-hop", "itunes.apple.com itunes.apple.com /lookup"]);
 });
 
 // The environment of a program run with a proxy named the ways Node.js
