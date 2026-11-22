@@ -13,9 +13,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const dgram = require("dgram");
+const crypto = require("crypto");
 const { spawn } = require("child_process");
 const { timeLeft, outOfTime, sleep, LONGEST_TIMER } = require("./time");
-const { browserPlace, wrongWith, couldNotStart, endedEarly, closedEarly, systemWords, ownSandbox } = require("./program");
+const { browserPlace, wrongWith, couldNotStart, endedEarly, closedEarly, systemWords, moreFiles, ownSandbox } = require("./program");
 const { startProxy, keyOf, OWN_NAME } = require("./proxy");
 const { UNRESOLVED } = require("./address");
 
@@ -871,7 +872,8 @@ const plainWords = (text) => String(text || "").replace(/[\u0000-\u001f\u007f-\u
 // a program that starts the browser with switches of its own can make it do
 // that. Then, in the same tab, the browser's WebRTC is to send no UDP (see
 // udpPastProxy). null when all of it holds, else the first that did not:
-// its number and what the browser said of it, or { udp }.
+// its number and what the browser said of it, { udp }, or { deaf } for a
+// check of the browser's WebRTC that could not be made.
 async function throughProxy(pipe, proxy, ms) {
   const addresses = [`http://${OWN_NAME}/${proxy.token}/1`, `http://127.0.0.1:${proxy.port}/${proxy.token}/2`, `http://localhost:${proxy.port}/${proxy.token}/3`, `http://[::1]:${proxy.port}/${proxy.token}/4`];
   let targetId;
@@ -910,7 +912,7 @@ async function throughProxy(pipe, proxy, ms) {
       }
       if (!proxy.through.has(n)) return { n, errorText: told.answer.errorText || "" };
     }
-    return (await udpPastProxy(cdp, ms)) ? { udp: true } : null;
+    return await udpPastProxy(cdp, ms);
   } finally {
     cdp.close();
   }
@@ -920,6 +922,10 @@ async function throughProxy(pipe, proxy, ms) {
 // once it has asked for the first address of the kit's check.
 const PROXY_CONNECT_WAIT = 15_000;
 
+// How long a datagram the kit sends its own STUN port is waited for: one on
+// this machine's loopback comes at once.
+const OWN_DATAGRAM_WAIT = 2_000;
+
 // Whether the browser's WebRTC sends UDP, which goes around a proxy: asked
 // in the tab of throughProxy, with a STUN server of this machine that the
 // kit listens for itself, for as long as the browser gathers its ways to
@@ -928,23 +934,38 @@ const PROXY_CONNECT_WAIT = 15_000;
 // a Chrome policy (WebRtcIPHandling) or a program that starts it with
 // switches of its own can turn that back, and then its first STUN packet
 // comes at once, and it gathers until its STUN request runs out, as the
-// kit does not answer it. Where no socket can be had to listen with, or a
-// firewall keeps the packet from it, nothing is told.
+// kit does not answer it. The check hears only what reaches that port, so
+// a datagram of the kit's own is sent there first, from a socket of its
+// own: one that does not come, as behind a firewall that drops UDP to
+// 127.0.0.1, would leave it deaf to the browser's packets too, where it
+// told nothing and the browser was used. { udp } for a browser that sends
+// UDP, { deaf } for a check that could not be made, the error of a socket
+// that could not listen or true, else null.
 async function udpPastProxy(cdp, ms) {
   const udp = dgram.createSocket("udp4");
+  const mark = crypto.randomBytes(16);
   let packets = 0;
-  udp.on("message", () => packets++);
+  let own = false;
+  let came;
+  const ownCame = new Promise((resolve) => (came = resolve));
+  udp.on("message", (message) => {
+    if (message.equals(mark)) {
+      own = true;
+      came();
+    } else packets++;
+  });
   try {
     await new Promise((resolve, reject) => {
       udp.once("error", reject);
       udp.bind(0, "127.0.0.1", resolve);
     });
-  } catch {
+  } catch (err) {
     udp.close();
-    return false;
+    return { deaf: err };
   }
   udp.on("error", () => {});
   try {
+    if (!(await ownDatagram(udp.address().port, mark, ownCame, () => own, Math.min(OWN_DATAGRAM_WAIT, ms)))) return { deaf: true };
     const expression = `(async () => {
       if (typeof RTCPeerConnection === "undefined") return "none";
       const peer = new RTCPeerConnection({ iceServers: [{ urls: "stun:127.0.0.1:${udp.address().port}" }] });
@@ -960,16 +981,37 @@ async function udpPastProxy(cdp, ms) {
     })()`;
     await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, ms);
     if (!packets) await sleep(50);
-    return packets > 0;
+    return packets > 0 ? { udp: true } : null;
   } finally {
     udp.close();
   }
 }
 
+// Whether mark, sent to port on 127.0.0.1 from a socket of its own, came
+// (came resolves then, and own() says so) within ms. A datagram that has
+// come by the time ms runs out is read before that is decided: on a busy
+// machine the timer and the datagram can be due at once, and the timer's
+// turn comes first.
+function ownDatagram(port, mark, came, own, ms) {
+  const sender = dgram.createSocket("udp4");
+  sender.on("error", () => {});
+  let timer;
+  const late = new Promise((resolve) => (timer = setTimeout(resolve, ms))).then(() => new Promise((resolve) => setImmediate(resolve)));
+  const sent = new Promise((resolve) => sender.send(mark, port, "127.0.0.1", (err) => (err ? resolve() : null)));
+  return Promise.race([came, late, sent]).then(() => {
+    clearTimeout(timer);
+    sender.close();
+    return own();
+  });
+}
+
 // The end of a run whose browser does not send a request of the kit's
-// check through the kit's proxy (see throughProxy).
-function missedProxy({ n, errorText, udp, unanswered }, proxy) {
+// check through the kit's proxy, or whose WebRTC the kit could not check
+// (see throughProxy).
+function missedProxy({ n, errorText, udp, deaf, unanswered }, proxy) {
   const helps = "Lift that policy, or point CHROME_PATH at the browser's own program or at another browser.";
+  if (deaf === true) return "easybrandkit could not check that the browser's WebRTC sends no UDP past its proxy, as a datagram it sent to a port of its own on 127.0.0.1 did not come there, as a firewall of this machine that drops UDP to 127.0.0.1 makes it do, so no kit was made: a browser whose WebRTC sends UDP, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own can make it do, could have a page send UDP to an address easybrandkit does not open without easybrandkit judging that address. Let this machine's programs send UDP to 127.0.0.1.";
+  if (deaf) return `easybrandkit could not check that the browser's WebRTC sends no UDP past its proxy, as it could not listen for UDP on 127.0.0.1: ${systemWords(deaf)}, so no kit was made.${moreFiles(deaf) || " Try again."}`;
   if (udp) return `The browser's WebRTC sends UDP past easybrandkit's proxy, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own makes it do, so no kit was made: a page could have it send UDP to an address easybrandkit does not open without easybrandkit judging that address. ${helps}`;
   // One that gave up on its connection to the proxy, as a browser can on
   // one that gets no answer, before any reached the proxy, could not

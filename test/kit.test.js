@@ -4347,6 +4347,39 @@ test("a browser that does not send every request through the kit's proxy, as one
   assert.deepEqual(filesOf(dir), before);
 });
 
+test("a run where the kit cannot listen for UDP on 127.0.0.1, which it checks the browser's WebRTC with, stops before the site is opened, and says why and what to do", { skip: noBrowser }, async (t) => {
+  const dgram = require("node:dgram");
+  let asked = 0;
+  const site = await serve((req, res) => {
+    asked++;
+    res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)"));
+  });
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  let failing = null;
+  const bind = dgram.Socket.prototype.bind;
+  t.mock.method(dgram.Socket.prototype, "bind", function (...args) {
+    if (!failing) return bind.apply(this, args);
+    process.nextTick(() => this.emit("error", failing));
+    return this;
+  });
+  for (const [err, said] of [
+    [Object.assign(new Error("bind EMFILE 127.0.0.1"), { code: "EMFILE", errno: -24, syscall: "bind" }), "easybrandkit could not check that the browser's WebRTC sends no UDP past its proxy, as it could not listen for UDP on 127.0.0.1: too many open files (EMFILE), so no kit was made. This process has as many files open as it may: raise that limit, as ulimit -n does, and run it again."],
+    [Object.assign(new Error("bind EPERM 127.0.0.1"), { code: "EPERM", errno: -1, syscall: "bind" }), "easybrandkit could not check that the browser's WebRTC sends no UDP past its proxy, as it could not listen for UDP on 127.0.0.1: operation not permitted (EPERM), so no kit was made. Try again."],
+  ]) {
+    failing = err;
+    await assert.rejects(makeKit(site.origin, { dir, stores: false }), (got) => got.message === said && got.earlierKit === dir, err.code);
+  }
+  assert.equal(asked, 0, "the site was not opened");
+  assert.deepEqual(filesOf(dir), before);
+});
+
 // A port of this machine whose connections get no answer, as behind a
 // firewall that drops them: a listener whose queue of connections is full,
 // held by a process that takes none, so the system drops the next one.
@@ -5757,6 +5790,48 @@ test("a browser behind a firewall that drops every connection on this machine's 
   assert.match(cli.stderr.trim().split("\n").pop(), /^easybrandkit: The browser could not connect to the proxy its requests go through \(its connection to 127\.0\.0\.1:\d+ got no answer in 15 s\), so no kit was made\. /);
   assert.ok(Date.now() - started < 50_000, `${Date.now() - started} ms`);
   assert.equal(fs.existsSync(path.join(parent, "kit")), false);
+});
+
+test("behind a firewall that drops UDP to this machine's loopback, where the kit's check of the browser's WebRTC hears nothing, the run stops before the site is opened, in words that say so, also for a browser whose WebRTC sends UDP", { skip: noBrowser || firewalled || (process.platform === "win32" && "a shell script stands in for the browser") }, (t) => {
+  // In namespaces of its own, a network of its loopback alone, whose
+  // firewall drops every UDP packet there, as a firewall can for this
+  // machine's programs: the kit's STUN port hears nothing from the browser,
+  // whatever its WebRTC does. The site is served there, and keeps each
+  // request it gets.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-udp-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  const asked = path.join(parent, "asked.txt");
+  const start = path.join(parent, "start.js");
+  fs.writeFileSync(
+    start,
+    [
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const page = ${JSON.stringify(brandPage("rgb(255,0,0)"))};`,
+      `const site = require("http").createServer((req, res) => {`,
+      `  require("fs").appendFileSync(${JSON.stringify(asked)}, req.url + "\\n");`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end(page);`,
+      `});`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  // A browser whose WebRTC sends UDP, as a program that starts it with
+  // switches of its own can make it.
+  const loud = path.join(parent, "loud-chrome");
+  fs.writeFileSync(loud, `#!/bin/sh\nexec ${sh(findChrome())} "$@" --webrtc-ip-handling-policy=default\n`, { mode: 0o755 });
+  const said = "easybrandkit: easybrandkit could not check that the browser's WebRTC sends no UDP past its proxy, as a datagram it sent to a port of its own on 127.0.0.1 did not come there, as a firewall of this machine that drops UDP to 127.0.0.1 makes it do, so no kit was made: a browser whose WebRTC sends UDP, as a Chrome policy (WebRtcIPHandling) or a program that starts it with switches of its own can make it do, could have a page send UDP to an address easybrandkit does not open without easybrandkit judging that address. Let this machine's programs send UDP to 127.0.0.1.";
+  const script = `ip link set lo up && nft add table inet t && nft add chain inet t out "{ type filter hook output priority 0; }" && nft add rule inet t out oif lo meta l4proto udp drop && exec "$1" --require "$2" "$3" http://127.0.0.1:8000/ --no-stores --out "$4" --timeout 60`;
+  for (const browser of [undefined, loud]) {
+    const env = { ...process.env, TMPDIR: parent };
+    if (browser) env.CHROME_PATH = browser;
+    const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", process.execPath, start, CLI, path.join(parent, "kit")], { encoding: "utf8", timeout: 120_000, env });
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.equal(cli.stderr.trim().split("\n").pop(), said, browser || "the browser as the kit starts it");
+    assert.equal(fs.existsSync(path.join(parent, "kit")), false);
+    assert.equal(fs.existsSync(asked), false, "the site was not opened");
+  }
 });
 
 test("the browser asks no DNS over HTTPS server of its own past the kit's proxy, where the system's resolver is one Chrome takes as such a provider", { skip: noBrowser || ownNamespaces }, (t) => {
