@@ -1507,6 +1507,63 @@ test("a profile whose Local State cannot be written, which turns the browser's o
   }
 });
 
+test("what the browser is started with, that cannot be made as this process or the system has as many files open as they may, stops the run before the browser starts, saying to raise that limit or close some programs, where another temp folder would not help", { skip: (process.platform === "win32" && "a shell script stands in for the browser") || partedTemp }, async (t) => {
+  const net = require("node:net");
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  const temp = path.join(parent, "temp");
+  fs.mkdirSync(temp);
+  // A browser that keeps it was started, and then waits.
+  const started = path.join(parent, "started");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${sh(started)}\nexec sleep 60\n`, { mode: 0o755 });
+  setEnv(t, { TMPDIR: temp, CHROME_PATH: chrome });
+  t.after(() => {
+    killBrowsers();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  const short = (code) => Object.assign(new Error(`${code}: x`), { code, errno: code === "EMFILE" ? -24 : -23, syscall: "open" });
+  const raise = "This process has as many files open as it may: raise that limit, as ulimit -n does, and run it again.";
+  const close = "The system has as many files open as it may: close some programs and run it again.";
+  let failing = "";
+  const inTemp = (file) => String(file).startsWith(temp);
+  const write = fs.writeFileSync;
+  t.mock.method(fs, "writeFileSync", function (file, ...rest) {
+    if (inTemp(file) && ((failing === "Local State" && path.basename(String(file)) === "Local State") || (failing === "downloads" && path.basename(String(file)) === "user-dirs.dirs"))) throw short(failing === "downloads" ? "ENFILE" : "EMFILE");
+    return write.call(this, file, ...rest);
+  });
+  const symlink = fs.symlinkSync;
+  t.mock.method(fs, "symlinkSync", function (target, file, ...rest) {
+    if (failing === "stand-ins" && inTemp(file) && path.basename(path.dirname(String(file))) === "stand-ins") throw short("EMFILE");
+    return symlink.call(this, target, file, ...rest);
+  });
+  const listen = net.Server.prototype.listen;
+  t.mock.method(net.Server.prototype, "listen", function (...args) {
+    if (failing !== "proxy") return listen.apply(this, args);
+    process.nextTick(() => this.emit("error", short("EMFILE")));
+    return this;
+  });
+  const linux = !["darwin", "win32"].includes(process.platform);
+  for (const [what, said] of [
+    ["Local State", `chrome was not started: easybrandkit could not write the browser's Local State, which turns its own DNS over HTTPS off, in ${temp}: too many open files (EMFILE). ${raise}`],
+    ...(linux
+      ? [
+          ["stand-ins", `chrome was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: too many open files (EMFILE). ${raise}`],
+          ["downloads", `chrome was not started: easybrandkit could not make the folder the browser's downloads go into in ${temp}, which keeps the first bytes of a download out of your Downloads folder: file table overflow (ENFILE). ${close}`],
+        ]
+      : []),
+    ["proxy", `chrome was not started: easybrandkit could not start the proxy that every request of the browser goes through, on 127.0.0.1: too many open files (EMFILE). ${raise}`],
+  ]) {
+    failing = what;
+    await assert.rejects(makeKit("https://acme.example/", { dir, stores: false }), (got) => got.message === said && got.earlierKit === dir, what);
+    assert.equal(fs.existsSync(started), false, `${what}: the browser was not started`);
+    assert.deepEqual(fs.readdirSync(temp), [], `${what}: the profile is removed`);
+    assert.deepEqual(filesOf(dir), before);
+  }
+});
+
 test("a profile whose folder for the browser's downloads cannot be made stops the run before the browser starts: with no room, told as the temp folder's, and in any other way, in words that name it", { skip: (["darwin", "win32"].includes(process.platform) && "the folder is made on Linux and the like only") || partedTemp }, async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   const temp = path.join(parent, "temp");

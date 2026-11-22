@@ -466,7 +466,7 @@ async function launch({ width, height }, { guard = null } = {}) {
   } catch (err) {
     const full = room(err, localState);
     if (full) throw full;
-    throw new Error(`${place.name} was not started: easybrandkit could not write the browser's Local State, which turns its own DNS over HTTPS off, in ${temp}: ${systemWords(err)}.`);
+    throw new Error(`${place.name} was not started: easybrandkit could not write the browser's Local State, which turns its own DNS over HTTPS off, in ${temp}: ${systemWords(err)}.${moreFiles(err)}`);
   }
   // Chrome on Linux has its crash handler write the reports of its processes
   // into the user's own browser's folder (~/.config/google-chrome/Crash
@@ -495,14 +495,14 @@ async function launch({ width, height }, { guard = null } = {}) {
     } catch (err) {
       const full = room(err, path.join(profile, "stand-ins"));
       if (full) throw full;
-      throw new Error(`${place.name} was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: ${systemWords(err)}.`);
+      throw new Error(`${place.name} was not started: easybrandkit could not make the stand-ins it starts the browser with in ${temp}, which keep a site from starting a program of this machine: ${systemWords(err)}.${moreFiles(err)}`);
     }
     try {
       env.XDG_CONFIG_HOME = downloadsIn(profile, linked);
     } catch (err) {
       const full = room(err, path.join(profile, "config"));
       if (full) throw full;
-      throw new Error(`${place.name} was not started: easybrandkit could not make the folder the browser's downloads go into in ${temp}, which keeps the first bytes of a download out of your Downloads folder: ${systemWords(err)}.`);
+      throw new Error(`${place.name} was not started: easybrandkit could not make the folder the browser's downloads go into in ${temp}, which keeps the first bytes of a download out of your Downloads folder: ${systemWords(err)}.${moreFiles(err)}`);
     }
     env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busPath(path.join(profile, "no-bus"))}`;
     env.WAYLAND_DISPLAY = path.join(profile, "no-display");
@@ -530,7 +530,7 @@ async function launch({ width, height }, { guard = null } = {}) {
   } catch (err) {
     fs.closeSync(printing);
     dropProfile();
-    throw new Error(`${place.name} was not started: easybrandkit could not start the proxy that every request of the browser goes through, on 127.0.0.1: ${systemWords(err)}.`);
+    throw new Error(`${place.name} was not started: easybrandkit could not start the proxy that every request of the browser goes through, on 127.0.0.1: ${systemWords(err)}.${moreFiles(err)}`);
   }
   // --remote-debugging-pipe: the browser takes the DevTools protocol on its
   // file descriptors 3 and 4, which only this process holds, and opens no
