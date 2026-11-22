@@ -2573,7 +2573,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   await assert.rejects(makeKit(listing, { dir: earlier, stores: false, timeLimit: 45_000 }), (err) => err.message === `${seller} shows no content yet and the run has no time left to wait for it, so nothing was read. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
   assert.deepEqual(filesOf(earlier), kept, "no time left to wait");
   answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", "<script>alert(1)</script></body>"));
-  await assert.rejects(makeKit(listing, { dir: earlier, stores: false, timeLimit: 12_000 }), (err) => err.message === `The browser tab stopped answering while it read ${seller}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
+  await assert.rejects(makeKit(listing, { dir: earlier, stores: false, log: limitFromOpening(12_000) }), (err) => err.message === `The browser tab stopped answering while it read ${seller}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
   assert.deepEqual(filesOf(earlier), kept, "a tab that stops answering at the end of the run's time");
 
   // The note says what came of the listing.
@@ -3115,7 +3115,7 @@ test("an https address read in the place of an http one that fails is told with 
   writeFiles(dir, EARLIER);
   const before = filesOf(dir);
   // The https address takes what the run has left, and that runs out.
-  await assert.rejects(makeKit("http://slow.test/", { dir, stores: false, timeLimit: 15_000 }), (err) => err.message === "http://slow.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and https://slow.test/, tried in its place, did not answer, so no kit was made. Try again, or give it more time with --timeout." && err.earlierKit === dir);
+  await assert.rejects(makeKit("http://slow.test/", { dir, stores: false, log: limitFromOpening(15_000) }), (err) => err.message === "http://slow.test/ could not be opened (net::ERR_EMPTY_RESPONSE), and https://slow.test/, tried in its place, did not answer, so no kit was made. Try again, or give it more time with --timeout." && err.earlierKit === dir);
   assert.ok(held.length >= 1, "the https address was asked for");
   assert.deepEqual(filesOf(dir), before);
   // The tab stops answering once the https address is read.
@@ -3597,6 +3597,20 @@ function reloadedKit() {
   return reloaded;
 }
 
+// A short time limit for a run, set once its browser is up and its first
+// page is being opened, where makeKit's own, set as the run starts, also
+// has to cover the browser's start and the kit's checks of it before any
+// page, which on a busy machine can take most of a short limit. Gives the
+// log option of makeKit that sets it.
+function limitFromOpening(ms) {
+  let set = false;
+  return (line) => {
+    if (set || !line.startsWith("Opening ")) return;
+    set = true;
+    setTimeLimit(ms);
+  };
+}
+
 // kit.js with a browser tab whose calls of method time out, for the first
 // stalled tabs opened or for all: a real wait for one takes half a minute.
 function withStalledTab(t, method, stalled = Infinity) {
@@ -3637,7 +3651,7 @@ test("a tab that stops answering is told in words, and more time is advised only
   // A page that stops the tab with a dialog, in a run that has no time left
   // for the next call.
   html = dialog;
-  await assert.rejects(makeKit(site.origin, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
+  await assert.rejects(makeKit(site.origin, { dir, stores: false, log: limitFromOpening(12_000) }), (err) => err.message === `The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before, "the run's own limit");
 
   // A home page that stalls the tab is a page that failed like any other.
@@ -4943,7 +4957,13 @@ test("a robots.txt rule built to keep a matcher busy cannot keep a run from bein
   const dir = path.join(parent, "kit");
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let child;
-  t.after(() => {
+  t.after(async () => {
+    // A run the test did not stop is stopped as a user stops one first, so
+    // that it removes its browser's profile, and killed only after.
+    if (child && child.exitCode === null && child.signalCode === null) {
+      process.kill(child.pid, "SIGTERM");
+      await Promise.race([once(child, "exit"), wait(5_000)]);
+    }
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch {
@@ -4958,7 +4978,12 @@ test("a robots.txt rule built to keep a matcher busy cannot keep a run from bein
   const closed = once(child, "close");
   let said = "";
   child.stderr.on("data", (chunk) => (said += chunk));
-  for (let waited = 0; waited < 60_000 && !robots; waited += 50) await wait(50);
+  // With --facts robots.txt is asked once the card is drawn, which a busy
+  // machine can hold for the card's 30 s: the run is waited for as long as
+  // its own --timeout, until it asks or ends.
+  let over = false;
+  closed.then(() => (over = true));
+  for (let waited = 0; waited < 130_000 && !robots && !over; waited += 50) await wait(50);
   assert.ok(robots, `the run got as far as the site's robots.txt: ${said}`);
   // By now the rule has been tried on the link, or the run is past it.
   await wait(300);
@@ -5079,7 +5104,7 @@ test("a browser killed while the page is read fails the run at once and says so,
   await assert.rejects(makeKit(site.origin, { dir, stores: false, log: (line) => line === "Reading the page" && killBrowsers() }), (err) => err.message === "The browser was closed or crashed before the kit was done, so no kit was made. Try again." && err.earlierKit === dir);
   assert.ok(Date.now() - started < 15_000, `told after ${Date.now() - started} ms`);
   assert.deepEqual(filesOf(dir), before, "a browser killed");
-  await assert.rejects(makeKit(silent.origin, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `${silent.origin}/ did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
+  await assert.rejects(makeKit(silent.origin, { dir, stores: false, log: limitFromOpening(12_000) }), (err) => err.message === `${silent.origin}/ did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before, "a server that never answers");
   // One call's own limit passed, with time to spare: more time would not help.
   const stalled = withStalledTab(t, "Page.navigate");
@@ -5105,7 +5130,7 @@ test("a home page the run used up its time on ends the run, with the advice to g
   const before = filesOf(dir);
   const home = `${site.origin}/`;
   const deeper = `${home}project/`;
-  await assert.rejects(makeKit(deeper, { dir, stores: false, timeLimit: 12_000 }), (err) => err.message === `${home} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
+  await assert.rejects(makeKit(deeper, { dir, stores: false, log: limitFromOpening(12_000) }), (err) => err.message === `${home} did not answer before the run's time ran out, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
   assert.deepEqual(asked.filter((url) => url !== "/favicon.ico"), ["/"]);
   assert.deepEqual(filesOf(dir), before);
   // With time to spare, a home page that does not answer is a page that failed.
@@ -5782,7 +5807,7 @@ const namespaces =
   (process.platform !== "linux" && "the namespaces of Linux") ||
   (spawnSync("unshare", ["-rmn", "sh", "-c", 'ip link set lo up && mount --bind "$0" "$0"', __filename]).status !== 0 && "no user, mount and network namespace here, or no ip command");
 
-test("a run where the kit's proxy cannot listen on 127.0.0.1 stops before the browser starts, says why, and leaves nothing in the temp folder", { skip: namespaces }, (t) => {
+test("a run where the kit's proxy cannot listen on 127.0.0.1 stops before the browser starts, says why, and leaves nothing in the temp folder", { skip: namespaces || partedTemp }, (t) => {
   // In a network namespace of its own whose loopback has no 127.0.0.1.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-noloop-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
