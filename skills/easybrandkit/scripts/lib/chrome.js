@@ -5,9 +5,10 @@
 // protocol through a pipe of its own. It opens no port, so no other program
 // on the machine, another user's run among them, can reach it. Every
 // request it makes goes through the kit's own proxy (see proxy.js), which
-// judges it by the run's rule, and it looks no name up itself, unless a
-// Chrome policy turns on the DNS over HTTPS the kit turns off (see
-// launch). Nothing is downloaded.
+// judges it by the run's rule, and it looks no name up itself: every name
+// fails in its own lookup but 127.0.0.1, so a Chrome policy that turns on
+// the DNS over HTTPS the kit turns off has it reach that server only where
+// the policy names it at 127.0.0.1 (see launch). Nothing is downloaded.
 
 const fs = require("fs");
 const os = require("os");
@@ -454,12 +455,14 @@ async function launch({ width, height }, { guard = null } = {}) {
   // HTTPS, as 8.8.8.8, 1.1.1.1 or 9.9.9.9 are, it asked the resolver for
   // that provider's server, as dns.google, and connected to it on port 443
   // itself, as Chrome sends what it asks such a server past any proxy, the
-  // kit's too. No page chooses that server. A Chrome policy
-  // (DnsOverHttpsMode) can turn it on again, which the kit cannot tell.
-  // Nothing else turns it off, and no check of the kit's tells it, so a
-  // browser whose Local State could not be written is not started: one
-  // that failed in another way than for room, as on a failing disk, started
-  // the browser with Chrome's default.
+  // kit's too. No page chooses that server. The browser's own lookup, which
+  // fails every name but 127.0.0.1 (see --host-resolver-rules below), holds
+  // that as well: a Chrome policy (DnsOverHttpsMode), which can turn it on
+  // again and which the kit cannot tell, has the browser reach its server
+  // only where the policy names it at 127.0.0.1. No check of the kit's
+  // tells the setting, so a browser whose Local State could not be written
+  // is not started: one that failed in another way than for room, as on a
+  // failing disk, started the browser with Chrome's default.
   const localState = path.join(profile, "Local State");
   try {
     fs.writeFileSync(localState, JSON.stringify({ dns_over_https: { mode: "off" } }));
@@ -601,7 +604,9 @@ async function launch({ width, height }, { guard = null } = {}) {
         // page's WebRTC had it look up the names the page gave as the
         // remote addresses of a connection, past the proxy: a name under
         // .local by mDNS on each of this machine's networks, in a packet of
-        // the page's choosing, and any other by the system's resolver.
+        // the page's choosing, and any other by the system's resolver. The
+        // server of DNS over HTTPS a Chrome policy names fails the same way,
+        // by its name or its address, unless that is 127.0.0.1.
         // ^NOTFOUND fails a name; ~NOTFOUND only changes it, which still had
         // the browser ask the network for ~NOTFOUND.
         "--host-resolver-rules=MAP * ^NOTFOUND, EXCLUDE 127.0.0.1",

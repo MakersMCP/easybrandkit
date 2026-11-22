@@ -74,8 +74,8 @@ browser makes, a page's pictures, scripts and data and the browser's own
 among them, goes through a proxy of the kit's own on 127.0.0.1, which holds
 it to the same rule, so the browser needs to connect to 127.0.0.1. A browser
 that sends its requests past it is not used, but for one whose DNS over
-HTTPS a Chrome policy turns on, which the README names. A proxy the system
-or a setting such as HTTPS_PROXY names is not used.
+HTTPS a Chrome policy points at 127.0.0.1, which the README names. A proxy
+the system or a setting such as HTTPS_PROXY names is not used.
 MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and ranges such as
 10.0.0.0/8, refuses those for every address opened and every request made,
 the one given included.

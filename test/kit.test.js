@@ -5970,6 +5970,109 @@ test("the browser asks no DNS over HTTPS server of its own past the kit's proxy,
   assert.deepEqual(lines.filter((line) => line.startsWith("tcp ")), [], "nothing connected to port 443 of this network");
 });
 
+// Google Chrome on Linux reads the policies of the machine from
+// /etc/opt/chrome, which a mount namespace can put a folder of a test's own
+// in place of.
+const chromePolicies =
+  ownNamespaces ||
+  (!fs.existsSync("/etc/opt") && "no /etc/opt to put a policy of the test's own in") ||
+  (!fs.realpathSync(findChrome() || "/").startsWith("/opt/google/chrome/") && "the policies of a browser other than Google Chrome are read from elsewhere");
+
+test("a Chrome policy that turns the browser's DNS over HTTPS on has it reach its server only where the policy names it at 127.0.0.1: one named by a name or at another address, and the one Chrome takes for the system's resolver, are reached nowhere", { skip: noBrowser || chromePolicies }, (t) => {
+  // In namespaces of their own: a network of its loopback alone, which holds
+  // Google's public DNS addresses too, a resolver of 8.8.8.8, which Chrome
+  // takes as a provider of DNS over HTTPS, and /etc/opt as a folder of the
+  // test's own, which holds the policy. A DNS server of the test's on
+  // 8.8.8.8 keeps each question and answers dns.google at those addresses;
+  // on port 443 of each of them, and on 127.0.0.1:8443, a server of the
+  // test's keeps each connection.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-pol-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  const resolv = path.join(parent, "resolv.conf");
+  const opt = path.join(parent, "opt");
+  const managed = path.join(opt, "chrome", "policies", "managed");
+  fs.mkdirSync(managed, { recursive: true });
+  const start = path.join(parent, "start.js");
+  fs.writeFileSync(resolv, "nameserver 8.8.8.8\noptions timeout:2 attempts:1\n");
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const dgram = require("dgram");`,
+      `const net = require("net");`,
+      `const http = require("http");`,
+      `const fs = require("fs");`,
+      `const keep = (line) => fs.appendFileSync(process.env.ASKED_FILE, line + "\\n");`,
+      `const dns = dgram.createSocket("udp4");`,
+      `dns.on("message", (query, from) => {`,
+      `  let at = 12;`,
+      `  const labels = [];`,
+      `  while (at < query.length && query[at]) {`,
+      `    labels.push(query.subarray(at + 1, at + 1 + query[at]).toString());`,
+      `    at += query[at] + 1;`,
+      `  }`,
+      `  const name = labels.join(".").toLowerCase();`,
+      `  const type = query.readUInt16BE(at + 1);`,
+      `  keep("dns " + name);`,
+      `  if (name !== "dns.google" || (type !== 1 && type !== 28)) return;`,
+      `  const head = Buffer.from(query.subarray(0, 12));`,
+      `  head.writeUInt16BE(0x8180, 2);`,
+      `  head.writeUInt16BE(1, 6);`,
+      `  const data = type === 1 ? Buffer.from([8, 8, 8, 8]) : Buffer.from("20014860486000000000000000008888", "hex");`,
+      `  const record = Buffer.alloc(12);`,
+      `  record.writeUInt16BE(0xc00c, 0);`,
+      `  record.writeUInt16BE(type, 2);`,
+      `  record.writeUInt16BE(1, 4);`,
+      `  record.writeUInt16BE(data.length, 10);`,
+      `  dns.send(Buffer.concat([head, query.subarray(12, at + 5), record, data]), from.port, from.address);`,
+      `});`,
+      `dns.bind(53, "8.8.8.8", () => dns.unref());`,
+      `for (const [host, port] of [["8.8.8.8", 443], ["8.8.4.4", 443], ["2001:4860:4860::8888", 443], ["127.0.0.1", 8443]]) {`,
+      `  const server = net.createServer((socket) => {`,
+      `    keep("tcp " + host + " " + port);`,
+      `    socket.on("error", () => {});`,
+      `    socket.destroy();`,
+      `  });`,
+      `  server.listen(port, host, () => server.unref());`,
+      `}`,
+      `const page = ${JSON.stringify(brandPage("rgb(255,0,0)"))};`,
+      `const site = http.createServer((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = `ip link set lo up && ip addr add 8.8.8.8/32 dev lo && ip addr add 8.8.4.4/32 dev lo && ip -6 addr add 2001:4860:4860::8888/128 dev lo && mount --bind "$1" /etc/resolv.conf && mount --bind "$2" /etc/opt && exec "$3" --require "$4" "$5" http://127.0.0.1:8000/ --no-stores --out "$6"`;
+  const policies = [
+    ["by a name", { DnsOverHttpsMode: "secure", DnsOverHttpsTemplates: "https://dns.google/dns-query" }],
+    ["at an IPv4 address", { DnsOverHttpsMode: "secure", DnsOverHttpsTemplates: "https://8.8.8.8/dns-query" }],
+    ["at an IPv6 address", { DnsOverHttpsMode: "secure", DnsOverHttpsTemplates: "https://[2001:4860:4860::8888]/dns-query" }],
+    ["the system's resolver's", { DnsOverHttpsMode: "automatic" }],
+    ["at 127.0.0.1", { DnsOverHttpsMode: "secure", DnsOverHttpsTemplates: "https://127.0.0.1:8443/dns-query" }],
+  ];
+  for (const [n, [what, policy]] of policies.entries()) {
+    fs.writeFileSync(path.join(managed, "doh.json"), JSON.stringify(policy));
+    const asked = path.join(parent, `asked-${n}.txt`);
+    const kit = path.join(parent, `kit-${n}`);
+    const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", resolv, opt, process.execPath, start, CLI, kit], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent, ASKED_FILE: asked } });
+    assert.equal(cli.status, 0, `${what}: ${cli.stderr}`);
+    assert.match(cli.stdout, /^Saved the Acme brand kit to /, what);
+    const lines = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
+    assert.deepEqual(lines.filter((line) => line === "dns dns.google"), [], `${what}: the resolver was asked for no server of DNS over HTTPS`);
+    if (what === "at 127.0.0.1") {
+      // The one address every name but it fails in the browser's own lookup
+      // for, the kit's proxy's: reached past the proxy, as the README says.
+      assert.ok(lines.includes("tcp 127.0.0.1 8443"), `${what}: ${lines.join("\n")}`);
+      assert.deepEqual(lines.filter((line) => line.startsWith("tcp ") && line !== "tcp 127.0.0.1 8443"), [], what);
+    } else {
+      assert.deepEqual(lines.filter((line) => line.startsWith("tcp ")), [], `${what}: nothing connected to a server of DNS over HTTPS`);
+    }
+  }
+});
+
 // Namespaces with a network of their own that takes multicast, as a
 // machine's own networks do, beside the loopback.
 const multicast = ownNamespaces || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "ip link add dm0 type dummy && ip link set dm0 multicast on && ip link set dm0 up"]).status !== 0 && "no dummy network to give the namespace a network with multicast");

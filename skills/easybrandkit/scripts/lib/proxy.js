@@ -5,18 +5,18 @@
 // started with it as its proxy for every address, this machine's own among
 // them, with every name failing in its own lookup and with its own DNS over
 // HTTPS off (see chrome.js launch). So the browser looks no name up and
-// connects nowhere itself, unless a Chrome policy turns its DNS over HTTPS
-// on again: whatever asks for an address, a page, a frame, a picture, a
-// script, the data a page fetches, a WebSocket, a service worker, a
-// prefetch, the fetch of a site certificate's issuer or a page's WebAuthn
-// check, the request comes here. It takes plain http requests, which the
-// browser sends with the whole address, and CONNECT tunnels, which it opens
-// for https and for WebSockets, and nothing else. Each is judged by the
-// run's rule (see address.js guardFor, route), which looks each name up once
-// a run, and is connected only to an address that rule took for it,
+// connects nowhere itself, but to a server of DNS over HTTPS that a Chrome
+// policy names at 127.0.0.1: whatever asks for an address, a page, a frame,
+// a picture, a script, the data a page fetches, a WebSocket, a service
+// worker, a prefetch, the fetch of a site certificate's issuer or a page's
+// WebAuthn check, the request comes here. It takes plain http requests,
+// which the browser sends with the whole address, and CONNECT tunnels, which
+// it opens for https and for WebSockets, and nothing else. Each is judged by
+// the run's rule (see address.js guardFor, route), which looks each name up
+// once a run, and is connected only to an address that rule took for it,
 // without asking the DNS again. What the rule refuses gets a 403 and no
-// connection, and is kept with its address and why for the kit's notes
-// (see chrome.js proxyNotes).
+// connection, and is kept with its address and why for the kit's notes (see
+// chrome.js proxyNotes).
 //
 // It listens on 127.0.0.1 alone, on a port the system picks, for as long as
 // its browser runs. A request it gets that is not one of these, as one
