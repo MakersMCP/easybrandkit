@@ -440,11 +440,20 @@ async function launch({ width, height }, { guard = null } = {}) {
   // holds to the rule now as well, and show what the exchange holds under
   // another address than the one it came from. A browser that asks for them
   // all the same is told by the first document it asks for (see
-  // holdDocuments).
+  // holdDocuments). Its WebRTC sends UDP to a proxy's alone
+  // (webrtc.ip_handling_policy, as the switch below says too), and has no
+  // handling of its own for any site (webrtc.ip_handling_url, an empty
+  // list): a Chrome policy that recommends WebRTC's handling for some sites
+  // alone (WebRtcIPHandlingUrl) comes before the switch for those sites, so
+  // a page of such a site had the browser send UDP to any address, past the
+  // proxy and past the kit's check of its WebRTC, which asks at an address
+  // of its own (see udpPastProxy). A user's own setting, which this profile
+  // is, comes before a recommended policy; a managed one comes before it,
+  // which the README says.
   const preferences = path.join(profile, "Default", "Preferences");
   try {
     fs.mkdirSync(path.join(profile, "Default"));
-    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 }, web_package: { signed_exchange: { enabled: false } }, webrtc: { ip_handling_policy: "disable_non_proxied_udp" } }));
+    fs.writeFileSync(preferences, JSON.stringify({ download: { default_directory: path.join(profile, "Downloads"), prompt_for_download: false }, net: { network_prediction_options: 2 }, web_package: { signed_exchange: { enabled: false } }, webrtc: { ip_handling_policy: "disable_non_proxied_udp", ip_handling_url: [] } }));
   } catch (err) {
     // For anything but no room, the refusal still holds.
     if (NO_ROOM.has(err.code)) throw room(err, preferences);
@@ -615,9 +624,11 @@ async function launch({ width, height }, { guard = null } = {}) {
         // (<-loopback> takes them off its list of addresses that go past
         // it). WebRTC sends UDP around a proxy, so it may send none that
         // does not go through one, and this proxy takes none: the switch
-        // and the profile's webrtc.ip_handling_policy (see Preferences
-        // above) hold that, as the kit checks before any page is opened
-        // (see udpPastProxy), and its TURN over TCP goes through the proxy.
+        // and the profile's webrtc settings (see Preferences above) hold
+        // that, as the kit checks before any page is opened (see
+        // udpPastProxy), but for a site a managed Chrome policy sets
+        // WebRTC's handling for, and its TURN over TCP goes through the
+        // proxy.
         `--proxy-server=http://127.0.0.1:${proxy.port}`,
         "--proxy-bypass-list=<-loopback>",
         "--webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -943,9 +954,14 @@ const OWN_DATAGRAM_WAIT = 2_000;
 // a datagram of the kit's own is sent there first, from a socket of its
 // own: one that does not come, as behind a firewall that drops UDP to
 // 127.0.0.1, would leave it deaf to the browser's packets too, where it
-// told nothing and the browser was used. { udp } for a browser that sends
-// UDP, { deaf } for a check that could not be made, the error of a socket
-// that could not listen or true, else null.
+// told nothing and the browser was used. A Chrome policy that sets
+// WebRTC's handling for some sites alone (WebRtcIPHandlingUrl) holds for a
+// tab while it shows a page of such a site, not this page of the kit's own,
+// so the check does not tell it: the profile comes before such a policy set
+// as a recommendation (see Preferences), and a managed one is named in the
+// README's Limits. { udp } for a browser that sends UDP, { deaf } for a
+// check that could not be made, the error of a socket that could not listen
+// or true, else null.
 async function udpPastProxy(cdp, ms) {
   const udp = dgram.createSocket("udp4");
   const mark = crypto.randomBytes(16);

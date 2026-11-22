@@ -70,15 +70,19 @@ nor a name under .local or of one label, which it does not look up, nor an
 address it cannot read itself, as one whose host has a label of broken
 punycode (xn--a), which the browser reads.
 With --named-by, the site given is such an address too. Every request the
-browser makes, a page's pictures, scripts and data and the browser's own
-among them, goes through a proxy of the kit's own on 127.0.0.1, which holds
-it to the same rule, so the browser needs to connect to 127.0.0.1. A browser
-that sends its requests past it is not used, but for one whose DNS over
-HTTPS a Chrome policy points at 127.0.0.1, which the README names. A proxy
-the system or a setting such as HTTPS_PROXY names is not used.
+browser makes as the kit starts it, a page's pictures, scripts and data and
+the browser's own among them, goes through a proxy of the kit's own on
+127.0.0.1, which holds it to the same rule, so the browser needs to connect
+to 127.0.0.1. Before any page is opened, a browser that sends the kit's test
+requests past that proxy, or whose WebRTC sends UDP, is not used. The README
+names what that check does not tell: a Chrome policy for a DNS over HTTPS
+server at 127.0.0.1, a managed one for WebRTC on some sites alone, and a
+program that starts the browser with switches that send some hosts past the
+proxy. A proxy the system or a setting such as HTTPS_PROXY names is not
+used.
 MAKERSMCP_REFUSE_ADDRESSES, a comma list of IP addresses and ranges such as
-10.0.0.0/8, refuses those for every address opened and every request made,
-the one given included.
+10.0.0.0/8, refuses those for every address opened and every request the kit
+or its proxy makes, the one given included.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On

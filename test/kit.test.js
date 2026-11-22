@@ -6238,6 +6238,72 @@ test("a page's WebRTC has the browser look no name up itself: neither a name und
   assert.deepEqual(lines.filter((line) => line.startsWith("joined ")), [], "nothing but the test joined the group of multicast DNS");
 });
 
+test("a Chrome policy that sets WebRTC's handling for some sites alone (WebRtcIPHandlingUrl) is overridden by the browser's profile when it is a recommendation, so a page of such a site sends no UDP, and is not told when it is managed, as the README says", { skip: noBrowser || chromePolicies || multicast }, (t) => {
+  // In namespaces of their own: the loopback, a network of the test's own
+  // with a route out, as a machine's own networks have, and /etc/opt as a
+  // folder of the test's own, which holds the policy, for the site's
+  // address alone, with WebRTC's default handling there. STUN servers of the
+  // test's on that network and on 127.0.0.2 keep each datagram they get,
+  // and the site's page asks both for its address. The kit's own check of
+  // the browser's WebRTC asks at an address of its own, which the policy
+  // does not name.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-rtc-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  const opt = path.join(parent, "opt");
+  const start = path.join(parent, "start.js");
+  const page = brandPage("rgb(255,0,0)").replace("</body>", `<script>
+    const peer = new RTCPeerConnection({ iceServers: [{ urls: ["stun:10.9.9.9:3478", "stun:127.0.0.2:3478"] }] });
+    peer.createDataChannel("x");
+    peer.createOffer().then((offer) => peer.setLocalDescription(offer));
+  </script></body>`);
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const dgram = require("dgram");`,
+      `const fs = require("fs");`,
+      `for (const host of ["10.9.9.9", "127.0.0.2"]) {`,
+      `  const stun = dgram.createSocket("udp4");`,
+      `  stun.on("message", () => fs.appendFileSync(process.env.ASKED_FILE, "udp " + host + "\\n"));`,
+      `  stun.bind(3478, host, () => stun.unref());`,
+      `}`,
+      `const page = ${JSON.stringify(page)};`,
+      `const site = require("http").createServer((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(page));`,
+      `site.listen(8000, "127.0.0.1", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = [
+    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 10.9.9.1/24 dev dm0 && ip addr add 10.9.9.9/24 dev dm0 && ip route add default dev dm0",
+    'mount --bind "$1" /etc/opt',
+    'exec "$2" --require "$3" "$4" http://127.0.0.1:8000/ --no-stores --out "$5"',
+  ].join(" && ");
+  const policy = JSON.stringify({ WebRtcIPHandlingUrl: [{ url: "http://127.0.0.1:8000", handling: "default" }] });
+  const runs = {};
+  for (const level of ["recommended", "managed"]) {
+    fs.rmSync(path.join(opt, "chrome"), { recursive: true, force: true });
+    fs.mkdirSync(path.join(opt, "chrome", "policies", level), { recursive: true });
+    fs.writeFileSync(path.join(opt, "chrome", "policies", level, "webrtc.json"), policy);
+    const asked = path.join(parent, `asked-${level}.txt`);
+    const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", opt, process.execPath, start, CLI, path.join(parent, `kit-${level}`)], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent, ASKED_FILE: asked } });
+    assert.equal(cli.status, 0, `${level}: ${cli.stderr}`);
+    assert.match(cli.stdout, /^Saved the Acme brand kit to /, level);
+    runs[level] = (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
+  }
+  // The profile's own setting for some sites, an empty list, comes before a
+  // recommended one.
+  assert.deepEqual(runs.recommended, [], "no UDP reached either STUN server");
+  // A managed policy comes before the profile, and the kit's check, at an
+  // address of its own, does not tell it: the page sent UDP past the proxy,
+  // which is what the README's Limits say, and which shows that the STUN
+  // servers hear a page's WebRTC.
+  assert.ok(runs.managed.includes("udp 10.9.9.9") && runs.managed.includes("udp 127.0.0.2"), runs.managed.join("\n"));
+});
+
 test("a page's pictures at a name under .local and at a name of one label have the kit look neither up, and the kit's notes name them as not on the public internet", { skip: noBrowser || ownNamespaces }, (t) => {
   // In namespaces of their own: the loopback alone, a DNS server of the
   // test's own on 127.0.0.1 that keeps each question and answers none, and
