@@ -702,8 +702,10 @@ test("a lock left by a run that has ended that cannot be removed ends the wait a
       discardRun(run);
     }
     assert.ok(outcome instanceof SaveError, `${how}: ${outcome.message}`);
-    const said = /^The new kit was not put in (.+): (.+) is a lock left by a run that has ended, and it could not be removed \((\w+)\)\. Remove it and run again\. The kit already there is as it was\.$/.exec(outcome.message);
-    assert.ok(said && said[1] === dir && said[2] === lock && code.test(said[3]), `${how}: ${outcome.message}`);
+    // The paths as they are, as a temp folder's path can hold ": " itself.
+    const named = `The new kit was not put in ${dir}: ${lock} is a lock left by a run that has ended, and it could not be removed (`;
+    const said = outcome.message.startsWith(named) && /^(\w+)\)\. Remove it and run again\. The kit already there is as it was\.$/.exec(outcome.message.slice(named.length));
+    assert.ok(said && code.test(said[1]), `${how}: ${outcome.message}`);
     assert.ok(Date.now() - started < 2_000, `${how}: refused after ${Date.now() - started} ms`);
     assert.deepEqual(filesOf(dir), before, how);
   }
