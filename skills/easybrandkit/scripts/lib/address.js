@@ -365,13 +365,13 @@ const LOOPBACK = ["::1", "127.0.0.1"];
 // The addresses of this machine that one of its own names for itself
 // stands for, for a host as it is judged (see bare): localhost both of its
 // loopback addresses (see LOOPBACK), and 127.0.0.1 and ::1 themselves; null
-// for any other host. A name under localhost is none of them: a router on this machine,
-// as Traefik or Caddy, serves each such name, as app1.localhost or
-// traefik.localhost, as a site of its own. Nor are another address of
-// 127.0.0.0/8, where another program can listen, as on 127.0.0.2 or
-// 127.0.0.53, 0.0.0.0 and ::, which a connection takes for 127.0.0.1 and
-// ::1 but a server there can tell apart by the name a request is for, and
-// an IPv6 form of 127.0.0.1, as ::ffff:127.0.0.1.
+// for any other host. A name under localhost is none of them: a router on
+// this machine, as Traefik or Caddy, serves each such name, as
+// app1.localhost or traefik.localhost, as a site of its own. Nor are
+// another address of 127.0.0.0/8, where another program can listen, as on
+// 127.0.0.2 or 127.0.0.53, 0.0.0.0 and ::, which a connection takes for
+// 127.0.0.1 and ::1 but a server there can tell apart by the name a
+// request is for, and an IPv6 form of 127.0.0.1, as ::ffff:127.0.0.1.
 function machineAddresses(host) {
   if (host === "localhost") return [...LOOPBACK];
   return host === "127.0.0.1" || host === "::1" ? [host] : null;
@@ -547,10 +547,10 @@ function inFakeRange(raw) {
 // with its public address and with 127.0.0.1 had every request of the run
 // go to a service of this machine on 127.0.0.1, where the system put that
 // address first, as glibc can by the order of RFC 6724, or once the public
-// address had stopped answering, and that service's page was saved as the site's with
-// no note. Away from the address given, such a name is named in the same
-// words, never as one not on the public internet, which it is not alone. As
-// easyscreenshotkit words it.
+// address had stopped answering, and that service's page was saved as the
+// site's with no note. Away from the address given, such a name is named
+// in the same words, never as one not on the public internet, which it is
+// not alone. As easyscreenshotkit words it.
 function mixedWhy(addresses) {
   const standings = addresses.map((address) => [plainIp(address), standingOf(address)]);
   const outside = standings.find(([, standing]) => !standing);

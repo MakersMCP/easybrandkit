@@ -226,13 +226,12 @@ const LONG_WORDS = 400;
 // same site: web pages only, on the home page's host, and on its port too
 // when that host is not on the public internet (local, which readFactPages
 // works out by what the host's name is found at too), where another port is
-// another program. A port is compared as a browser uses it,
-// so http://127.0.0.1/ is on port 80 and https://127.0.0.1/ on 443, and two
-// of this machine's own names on one port that reach an address of each
+// another program. A port is compared as a browser uses it, so
+// http://127.0.0.1/ is on port 80 and https://127.0.0.1/ on 443, and two of
+// this machine's own names on one port that reach an address of each
 // other's, as localhost and 127.0.0.1, are one host (see address.js
-// sameHost). A link
-// whose words and address both fit wins, then one in the menu or the footer,
-// then the shorter address.
+// sameHost). A link whose words and address both fit wins, then one in the
+// menu or the footer, then the shorter address.
 function pickPages(model, home, { local = notPublicByForm(new URL(home)) } = {}) {
   const page = pageOf({ model });
   const homeUrl = new URL(home);

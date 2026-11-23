@@ -3475,7 +3475,7 @@ test("a site given as localhost that listens on ::1 alone is read, and not anoth
   assert.ok(reached.length && reached.every((line) => line.startsWith("::1 ")), reached.join("\n"));
 });
 
-test("MAKERSMCP_REFUSE_ADDRESSES holds where the kit's own lookup finds the address given, and the browser's own lookup, which finds it elsewhere, is never used",{ skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
+test("MAKERSMCP_REFUSE_ADDRESSES holds where the kit's own lookup finds the address given, and the browser's own lookup, which finds it elsewhere, is never used", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)")));
   const trap = await counting(t);
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
