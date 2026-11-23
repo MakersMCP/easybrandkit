@@ -337,6 +337,10 @@ test("an address this machine's network interfaces hold, a public one included, 
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
   let interfaces = SERVER;
   t.mock.method(os, "networkInterfaces", () => interfaces);
+  // The kernel's lists of this machine's own, which on a machine of many
+  // routes are read less often than once a second (see the test of them
+  // below), are none here.
+  t.mock.method(kernel, "read", () => "");
   t.mock.method(dns.promises, "lookup", async (host) => {
     const known = { "own-machine.example": ["81.2.69.160"], "own-machine6.example": ["2a02:1205:5000::1"], "own-lan6.example": ["2a02:1205:5000::77"], "own-site.example": ["93.184.215.14"] }[host];
     if (!known) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
@@ -415,6 +419,8 @@ test("the IPv6 network of an address of this machine's is the prefix its interfa
   // a netmask that is not one, is held alone, at /128.
   let interfaces = { ...LOOPBACK, eth0: [{ address: "192.168.1.20", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "192.168.1.20/24" }, v6("2001:470:1:2::5", 128), v6("fe80::5", 64)], tun0: [{ ...v6("2001:470:9:9::5", 0), cidr: null }] };
   t.mock.method(os, "networkInterfaces", () => interfaces);
+  // The kernel's lists, none here, as above.
+  t.mock.method(kernel, "read", () => "");
   const names = { "router.example": ["2001:470:1:2::1"], "nas.example": ["192.168.1.50", "2001:470:1:2::50"], "site.example": ["93.184.216.34"] };
   t.mock.method(dns.promises, "lookup", async (host) => {
     if (!names[host]) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
