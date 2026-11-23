@@ -182,8 +182,10 @@ function isPublicAddress(raw) {
 // machine's is judged by that address (see heldIpv4). An address that leads
 // into this machine or its network from outside, as the public IPv4
 // address of a router that turns a connection back inside, is no address
-// of its interfaces, and cannot be told from any other:
-// MAKERSMCP_REFUSE_ADDRESSES is for those.
+// of its interfaces, and cannot be told from any other, nor can the rest of
+// the user's own network at addresses on the public internet outside the
+// networks of the interfaces, as another IPv6 network of the same site:
+// MAKERSMCP_REFUSE_ADDRESSES is for those (the README's Limits say so).
 function ownIp(raw) {
   const address = plainIp(raw);
   const family = net.isIP(address);

@@ -432,7 +432,21 @@ test("the IPv6 network of an address of this machine's is the prefix its interfa
   interfaces = { ...LOOPBACK, eth0: [v6("2001:470:1:2::5", 64)] };
   t.mock.timers.tick(1_000);
   assert.equal(await site.judge("http://[2001:470:1:2::1]/"), "is at 2001:470:1:2::1, on a network of this machine");
+  // Another network of the same site, as a router's guest network in its
+  // /56, cannot be told from the public internet: the README's Limits and
+  // SKILL.md say so, and that MAKERSMCP_REFUSE_ADDRESSES can name its
+  // ranges, which it then refuses as the address given too.
   assert.equal(await site.judge("http://[2001:470:1:3::1]/"), "");
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const limits = readme.slice(readme.indexOf("\n## Limits\n")).replace(/\s+/g, " ");
+  assert.match(limits, /Nor can it tell the rest of your own network where it is at public addresses outside the networks of this machine's interfaces, [^.]*: a page can have the browser reach a device there too\. On such a network, name its ranges in `MAKERSMCP_REFUSE_ADDRESSES`, which then refuses them as the address you give too\./);
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  assert.match(skill, /The kit takes the rest of the user's own network for the public internet where it is at public addresses outside the networks of the machine's interfaces, [^.]*\. When the user says their network is such, tell them that `MAKERSMCP_REFUSE_ADDRESSES` can name its ranges, which are then refused as the address given too\./);
+  const guest = guardFor("https://site.example/", { refused: refusedAddresses("2001:470:1::/56") });
+  assert.equal(await guest.judge("http://[2001:470:1:3::1]/"), "is at 2001:470:1:3::1, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
+  assert.equal(await guardFor("http://[2001:470:1:3::9]:3000/", { refused: refusedAddresses("2001:470:1::/56") }).judge("http://[2001:470:1:3::9]:3000/"), "is at 2001:470:1:3::9, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
 });
 
 // The machine's network interfaces are read once a second at most, however
