@@ -6761,15 +6761,18 @@ test("a device of the IPv6 network of an address this machine holds at /128, as 
   assert.equal(fs.existsSync(path.join(parent, "kit-leads")), false);
 });
 
-test("a site given whose name answers both with an address on the public internet and with 127.0.0.1 stops the run before any work, whichever answer the system gives first, and this machine's service there is asked nothing, nor by a page's picture, which is named in the same words", { skip: noBrowser || ownNamespaces }, (t) => {
-  // In namespaces of their own: the loopback alone, and a hosts file that
-  // answers mixed.example with 127.0.0.1 and with a public address, which
-  // the system puts first as it does here, and mixed6.example with a public
-  // IPv6 address first and 127.0.0.1, where the public address cannot be
-  // reached, as one that has stopped answering. A service of this machine
-  // listens on 127.0.0.1 on port 80, and a site the user runs on port 8000,
-  // whose page has a picture at mixed.example. Each keeps each request it
-  // gets.
+test("a site given whose name answers both with an address on the public internet and with 127.0.0.1 stops the run before any work, whichever answer the system gives first, and this machine's service there is asked nothing, nor by a page's picture, which is named in the same words", { skip: noBrowser || ownAddresses }, (t) => {
+  // In namespaces of their own: the loopback, a network whose interface
+  // holds an IPv6 address and has the default IPv6 route, where nothing
+  // answers, and a hosts file that answers mixed.example with 127.0.0.1
+  // and with a public IPv4 address, which the system puts last as it has no
+  // route there, and mixed6.example with a public IPv6 address and with
+  // 127.0.0.1, which the system puts the public address first for, as it
+  // has a route there, where it cannot be reached, as an address that has
+  // stopped answering. A service of this machine listens on 127.0.0.1 on
+  // port 80, and a site the user runs on port 8000, whose page has a
+  // picture at mixed.example. Each keeps each request it gets, and the
+  // order the system's lookup gives each name in is kept too.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-mixed-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // The run's temp folder is one deeper than this one.
@@ -6778,6 +6781,9 @@ test("a site given whose name answers both with an address on the public interne
   for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", hosts]]) fs.writeFileSync(path.join(parent, name), text);
   const asked = path.join(parent, "asked.txt");
   const start = path.join(parent, "start.js");
+  const order = path.join(parent, "order.js");
+  // The kit's own lookup: every answer, in the order the system gives them.
+  fs.writeFileSync(order, `(async () => { for (const host of ["mixed.example", "mixed6.example"]) console.log(host, (await require("dns").promises.lookup(host, { all: true, verbatim: true })).map((one) => one.address).join(" ")); })();\n`);
   const page = brandPage("rgb(255,0,0)").replace("</body>", `<img src="http://mixed.example/m.png" width="10" height="10"></body>`);
   fs.writeFileSync(
     start,
@@ -6803,14 +6809,18 @@ test("a site given whose name answers both with an address on the public interne
     ].join("\n"),
   );
   const script = [
-    "ip link set lo up",
+    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 2001:470:1:2::5/64 dev dm0 nodad && ip -6 route add default dev dm0",
     'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    '"$2" "$1/order.js" > "$1/order-$7.txt"',
     'exec "$2" --require "$3" "$4" "$5" --no-stores --out "$6"',
   ].join(" && ");
-  const run = (given, out) => spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, given, path.join(parent, out)], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  const run = (given, out) => spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, given, path.join(parent, out), out], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
   const lines = () => (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
   for (const [given, outside] of [["http://mixed.example/", "93.184.216.34"], ["http://mixed6.example/", "2606:2800:220:1:248:1893:25c8:1946"]]) {
     const cli = run(given, "kit");
+    // Both orders: this machine's address first for one name, the public
+    // address first for the other.
+    assert.equal(fs.readFileSync(path.join(parent, "order-kit.txt"), "utf8"), "mixed.example 127.0.0.1 93.184.216.34\nmixed6.example 2606:2800:220:1:248:1893:25c8:1946 127.0.0.1\n");
     assert.equal(cli.status, 1, cli.stderr);
     // Its one line is the last: nothing was opened before it.
     assert.equal(cli.stderr, `easybrandkit: ${given} is on a host whose name answers with an address on the public internet, ${outside}, and with one that is not, 127.0.0.1, so no kit was made.\n`);
