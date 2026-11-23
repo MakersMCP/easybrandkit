@@ -18,7 +18,7 @@ const path = require("path");
 const zlib = require("zlib");
 const { timeLeft } = require("./time");
 const { noControls, plainText, noEndSlashes } = require("./text");
-const { isPublicAddress, atRefused, awayWhy, guardFor } = require("./address");
+const { isPublicAddress, atRefused, awayWhy, mixedAnswers, guardFor } = require("./address");
 const { judgedRequest } = require("./dial");
 
 const MAX_BYTES = 15 * 1024 * 1024;
@@ -113,7 +113,13 @@ async function judgedFetch(raw, guard = null) {
   const refused = addresses.map((address) => rule.refused.match(address)).find(Boolean);
   if (refused) throw new Error(`host ${host} ${atRefused(refused)}`);
   // Each address is on the public internet and none is this machine's own,
-  // as for any address the run was not given (see address.js awayWhy).
+  // as for any address the run was not given (see address.js awayWhy). A
+  // name whose answers mix is said to answer so, as in "host
+  // play.google.com answers with an address on the public internet, ...",
+  // where "host play.google.com is on a host whose name answers ..." said
+  // that the host is on a host.
+  const mixed = mixedAnswers(addresses);
+  if (mixed) throw new Error(`host ${host} ${mixed}`);
   const away = awayWhy(addresses);
   if (away) throw new Error(`host ${host} ${away}`);
   return { url, addresses };

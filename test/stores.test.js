@@ -197,9 +197,12 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   t.mock.restoreAll();
   t.mock.method(dns.promises, "lookup", async () => [at].flat().map((address) => ({ address, family: net.isIP(address) })));
   // A host whose name answers both with an address on the public internet
-  // and with one that is not is refused in the words a page gets for it.
+  // and with one that is not is refused in the words a page gets for it,
+  // the name said in place of "is on a host whose name".
   at = ["17.253.144.10", "127.0.0.1"];
-  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/")), (err) => err.message === "host apps.apple.com is on a host whose name answers with an address on the public internet, 17.253.144.10, and with one that is not, 127.0.0.1");
+  await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/")), (err) => err.message === "host apps.apple.com answers with an address on the public internet, 17.253.144.10, and with one that is not, 127.0.0.1");
+  at = ["2620:149:a44::10", "198.18.0.7"];
+  await assert.rejects(stores.checkFetchUrl("https://play.google.com/store/apps/details?id=com.acme.app", guardFor(null)), (err) => err.message === "host play.google.com answers with an address on the public internet, 2620:149:a44::10, and with one in the range a proxy in fake-ip mode gives every name, 198.18.0.0/15, 198.18.0.7");
   at = "17.253.144.10";
   const guard = guardFor("https://apps.apple.com/us/app/acme/id1234567890", { refused: refusedAddresses("17.253.144.0/24") });
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");

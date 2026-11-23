@@ -561,6 +561,12 @@ function mixedWhy(addresses) {
   return `is on a host whose name answers with an address on the public internet, ${outside[0]}, and with ${kind}, ${at}`;
 }
 
+// How a name whose addresses mix answers, as said after the name itself,
+// or "": mixedWhy's words, the name said in place of "is on a host whose
+// name", as for a store's host, which the kit names itself (see stores.js
+// judgedFetch).
+const mixedAnswers = (addresses) => mixedWhy(addresses).replace(/^is on a host whose name /, "");
+
 // Why a host found at these addresses is refused away from the address
 // given, as said after "it" or "which", or "" for one every address of
 // which is on the public internet and none this machine's own: a name whose
@@ -697,4 +703,4 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   return { given: given ? given.href : "", refused, judge, route, found, inside, addressesFor };
 }
 
-module.exports = { isPublicAddress, heldIpv4, ownIp, interfacesUnread, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, UNRESOLVED };
+module.exports = { isPublicAddress, heldIpv4, ownIp, interfacesUnread, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, mixedAnswers, UNRESOLVED };
