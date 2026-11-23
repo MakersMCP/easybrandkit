@@ -38,7 +38,8 @@ const { classify, readSource } = require("./stores");
 const { setTimeLimit, timeLeft, outOfTime, sleep } = require("./time");
 const { SaveError, toldPlainly, removedFrom, startRun, discardRun, saveRun } = require("./run");
 const { checkDir } = require("./folder");
-const { guardFor, refusedAddresses, readUrl, notPublicByForm } = require("./address");
+const { guardFor, refusedAddresses, readUrl, notPublicByForm, interfacesUnread } = require("./address");
+const { moreFiles } = require("./program");
 const { plainText } = require("./text");
 const version = require("./version");
 
@@ -547,6 +548,14 @@ async function makeKit(rawUrl, { dir, stores = true, facts = false, timeLimit = 
   // MAKERSMCP_REFUSE_ADDRESSES, a value of which that does not parse ends
   // the run here, before any work.
   const refused = refusedAddresses();
+  // This machine's network interfaces, whose addresses and IPv6 networks
+  // the rule refuses away from the address given (see address.js ownIp):
+  // a system that does not let them be read ends the run here too, as no
+  // address could be told from one of this machine's.
+  const unread = interfacesUnread();
+  if (unread) {
+    throw new Error(`This machine's network interfaces could not be read: ${unread.words}. Without them easybrandkit cannot tell this machine's own addresses from those on the public internet, so no kit was made.${moreFiles(unread) || " Run it where the system lets a program read them: on Linux, a service needs AF_NETLINK among its RestrictAddressFamilies."}`);
+  }
   const asked = normalizeUrl(rawUrl);
   // Written with no scheme, which reads as https:// (see normalizeUrl).
   const bare = !/^[a-z][a-z0-9+.-]*:\/\//i.test(String(rawUrl || "").trim());

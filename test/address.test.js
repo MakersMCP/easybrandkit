@@ -8,7 +8,7 @@ const assert = require("node:assert/strict");
 const dns = require("node:dns");
 const os = require("node:os");
 const test = require("node:test");
-const { isPublicAddress, heldIpv4, ownIp, notPublicByForm, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
+const { isPublicAddress, heldIpv4, ownIp, interfacesUnread, notPublicByForm, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
 const CASES = require("./address-cases.json");
 
 // This machine's network interfaces as a server's, whose interface holds a
@@ -472,6 +472,64 @@ test("this machine's network interfaces are read once a second at most, whatever
   });
   assert.equal(await guard.judge("https://four.example/"), "is on a host whose name answers with an address on the public internet, 93.184.216.1, and with one of this machine's, 93.184.216.3");
   assert.equal(reads, 4);
+});
+
+// A reading of the interfaces that the system refuses, as where a Linux
+// service's RestrictAddressFamilies leaves out AF_NETLINK, or where this
+// process has as many files open as it may, throws, and Node.js names its
+// error by its number alone. Let go, it left this machine with no address
+// of its own, so each of them was opened away from the address given. The
+// last reading holds; with none, why not is told, which stops a run before
+// any work (see kit.js makeKit).
+test("a reading of this machine's network interfaces that the system refuses keeps the last one, and with none says why", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 7_000_000 });
+  t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  // As Node.js throws it, the error's number given as it is, with no code.
+  const refusal = (errno) => Object.assign(new Error(`A system error occurred: uv_interface_addresses returned Unknown system error ${errno} (Unknown system error ${errno})`), { code: "ERR_SYSTEM_ERROR", errno, syscall: "uv_interface_addresses" });
+  let errno = 0;
+  let reads = 0;
+  // Each stand-in is taken back before the next is put in place, so the
+  // function this test found is there again when it ends: two in place at
+  // once, the mock tracker puts the first back in place of the second.
+  const real = os.networkInterfaces;
+  const first = t.mock.method(os, "networkInterfaces", () => {
+    reads++;
+    if (errno) throw refusal(errno);
+    return SERVER;
+  });
+  const guard = guardFor("https://site.example/");
+  assert.equal(await guard.judge("http://81.2.69.160/"), "is at 81.2.69.160, an address of this machine");
+  errno = 24;
+  for (let n = 1; n <= 3; n++) {
+    t.mock.timers.tick(1_000);
+    assert.equal(await guard.judge("http://81.2.69.160/"), "is at 81.2.69.160, an address of this machine");
+    assert.equal(await guard.judge("http://[2a02:1205:5000::77]/"), "is at 2a02:1205:5000::77, on a network of this machine");
+    assert.equal(interfacesUnread(), null);
+    // Tried again once a second at most, as a reading that was let be.
+    assert.equal(reads, 1 + n);
+  }
+  // Read again once the system lets it.
+  errno = 0;
+  t.mock.timers.tick(1_000);
+  assert.equal(interfacesUnread(), null);
+  first.mock.restore();
+  // With no reading before it, why not, in the system's words for its
+  // number, or its message where it has none.
+  for (const [error, why] of [
+    [refusal(24), { code: "EMFILE", words: "too many open files (EMFILE)" }],
+    [refusal(97), { code: "EAFNOSUPPORT", words: "address family not supported (EAFNOSUPPORT)" }],
+    [Object.assign(new Error("A system error occurred:\nuv_interface_addresses returned nothing"), { code: "ERR_SYSTEM_ERROR" }), { code: "", words: "A system error occurred: uv_interface_addresses returned nothing" }],
+    [new Error("x".repeat(300)), { code: "", words: "x".repeat(200) }],
+  ]) {
+    const reader = t.mock.method(os, "networkInterfaces", () => {
+      throw error;
+    });
+    assert.deepEqual(interfacesUnread(), why);
+    // Within the second, from the same reading.
+    assert.deepEqual(interfacesUnread(), why);
+    reader.mock.restore();
+  }
+  assert.equal(os.networkInterfaces, real);
 });
 
 // A name that answers both with an address on the public internet and with

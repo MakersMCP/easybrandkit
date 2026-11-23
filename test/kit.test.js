@@ -3561,6 +3561,58 @@ test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any 
   }
 });
 
+// A system that does not let a run read this machine's network
+// interfaces, as where a Linux service's RestrictAddressFamilies leaves out
+// AF_NETLINK, stops the run before any work: no address could be told from
+// one of this machine's (see address.js machineNow). Node.js throws such a
+// reading's error with its number alone.
+test("a run whose system does not let it read this machine's network interfaces stops before any work, saying why and what to do", async (t) => {
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  // A browser that keeps a line when it is started, which it is not.
+  const started = path.join(parent, "started.txt");
+  const chrome = path.join(parent, "chrome");
+  fs.writeFileSync(chrome, `#!/bin/sh\necho started >> ${sh(started)}\nexit 1\n`, { mode: 0o755 });
+  setEnv(t, { CHROME_PATH: chrome, MAKERSMCP_REFUSE_ADDRESSES: undefined });
+  const said = (words, advice) => `This machine's network interfaces could not be read: ${words}. Without them easybrandkit cannot tell this machine's own addresses from those on the public internet, so no kit was made. ${advice}`;
+  const cases = [
+    [97, said("address family not supported (EAFNOSUPPORT)", "Run it where the system lets a program read them: on Linux, a service needs AF_NETLINK among its RestrictAddressFamilies.")],
+    [24, said("too many open files (EMFILE)", "This process has as many files open as it may: raise that limit, as ulimit -n does, and run it again.")],
+    [23, said("file table overflow (ENFILE)", "The system has as many files open as it may: close some programs and run it again.")],
+  ];
+  // Each stand-in is taken back before the next is put in place, so the
+  // function this test found is there again for the tests after it: two in
+  // place at once, the mock tracker puts the first back in place of the
+  // second, and every later run would stop here.
+  const real = os.networkInterfaces;
+  for (const [errno, words] of cases) {
+    const reader = t.mock.method(os, "networkInterfaces", () => {
+      throw Object.assign(new Error(`A system error occurred: uv_interface_addresses returned Unknown system error ${errno} (Unknown system error ${errno})`), { code: "ERR_SYSTEM_ERROR", errno, syscall: "uv_interface_addresses" });
+    });
+    for (const url of ["https://acme.com/", "http://localhost:3000/", "https://apps.apple.com/us/app/acme/id1234567890"]) {
+      await assert.rejects(makeKit(url, { dir, stores: false }), (err) => err.message === words, `${errno} ${url}`);
+    }
+    reader.mock.restore();
+  }
+  assert.equal(os.networkInterfaces, real);
+  assert.deepEqual(filesOf(dir), before);
+  assert.equal(fs.existsSync(started), false, "the browser was not started");
+  // The command line ends with it, with exit code 1, and so does --json.
+  const preload = path.join(parent, "refuse-interfaces.js");
+  fs.writeFileSync(preload, `require("os").networkInterfaces = () => { throw Object.assign(new Error("A system error occurred: uv_interface_addresses returned Unknown system error 97 (Unknown system error 97)"), { code: "ERR_SYSTEM_ERROR", errno: 97, syscall: "uv_interface_addresses" }); };\n`);
+  for (const json of [false, true]) {
+    const cli = spawnSync(process.execPath, ["--require", preload, CLI, "https://acme.com/", "--out", dir, ...(json ? ["--json"] : [])], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.equal(cli.stderr.trim().split("\n").pop(), `easybrandkit: ${cases[0][1]}`);
+    if (json) assert.deepEqual(JSON.parse(cli.stdout), { ok: false, error: cases[0][1] });
+  }
+  assert.deepEqual(filesOf(dir), before);
+  assert.equal(fs.existsSync(started), false, "the browser was not started");
+});
+
 test("a site another source named, given with namedBy or --named-by, is read as a page the kit chose: only on port 80 or 443 and on the public internet, refused before anything is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
   const site = await counting(t);
   const dials = await dialHere(t, (host, at) => (at === 80 ? Number(site.port) : null));

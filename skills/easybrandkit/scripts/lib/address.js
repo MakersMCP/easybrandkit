@@ -31,6 +31,7 @@
 const net = require("net");
 const dns = require("dns");
 const os = require("os");
+const util = require("util");
 const { domainToASCII, domainToUnicode } = require("url");
 
 // The ranges that are not on the public internet, as MakersMCP's worker
@@ -206,6 +207,17 @@ function ownIp(raw) {
 // such a page loaded 3 to 5 times more slowly, the main thread busy
 // reading them.
 //
+// A reading the system refuses, as where a Linux service's
+// RestrictAddressFamilies leaves out AF_NETLINK, or where this process has
+// as many files open as it may, leaves the last one of the same function
+// in its place, as this machine's addresses seldom change while a run
+// goes. With none, it gives why not (unread, see interfacesUnread), and a
+// run stops before any work: where the error was let go, the machine was
+// taken for one with no addresses, so every address of this machine and
+// of its IPv6 networks was opened away from the address given, and a name
+// that answered with one of them beside an address on the public internet
+// was no name whose answers mix, with no word.
+//
 // The IPv6 network of an address on the public internet is the prefix its
 // interface gives it, held to /48 at the widest, as a wider one would take
 // in other people's networks, and to /64 at the narrowest, as IPv6
@@ -227,8 +239,10 @@ function machineNow() {
   let interfaces = {};
   try {
     interfaces = read.call(os);
-  } catch {
-    // None to read.
+  } catch (err) {
+    const last = machine && machine.read === read ? machine : null;
+    machine = last ? { ...last, at: now } : { at: now, read, mine: new net.BlockList(), networks: new net.BlockList(), unread: unreadWhy(err) };
+    return machine;
   }
   const mine = new net.BlockList();
   const networks = new net.BlockList();
@@ -246,6 +260,25 @@ function machineNow() {
   machine = { at: now, read, mine, networks };
   return machine;
 }
+
+// Why this machine's network interfaces could not be read, as
+// { code, words }: the system's words for the error by its code, as "too
+// many open files (EMFILE)", where Node.js names it by its number alone, as
+// "Unknown system error 24", or its message cut to 200 characters, its
+// control characters made spaces, when it has no number.
+function unreadWhy(err) {
+  const number = err && Number.isInteger(err.errno) ? -Math.abs(err.errno) : 0;
+  const known = number ? util.getSystemErrorMap().get(number) : null;
+  if (known) return { code: known[0], words: `${known[1]} (${known[0]})` };
+  return { code: "", words: String((err && err.message) || err).replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 200) };
+}
+
+// Why this machine's network interfaces cannot be read, as { code, words },
+// or null where they could be read, now or earlier in the run (see
+// machineNow): a run stops before any work then, as it could not tell this
+// machine's own addresses from those on the public internet (see kit.js
+// makeKit).
+const interfacesUnread = () => machineNow().unread || null;
 
 // Where an IP address stands for a run away from the address given: "" for
 // one on the public internet that is not this machine's own, else "not
@@ -662,4 +695,4 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   return { given: given ? given.href : "", refused, judge, route, found, inside, addressesFor };
 }
 
-module.exports = { isPublicAddress, heldIpv4, ownIp, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, UNRESOLVED };
+module.exports = { isPublicAddress, heldIpv4, ownIp, interfacesUnread, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, UNRESOLVED };
