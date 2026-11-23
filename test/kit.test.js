@@ -3533,6 +3533,42 @@ test("MAKERSMCP_REFUSE_ADDRESSES refuses a store listing given, and one a page l
   assert.deepEqual(asked, []);
 });
 
+// As the README's Limits, SKILL.md and --help say: the words go into the
+// last line for a listing given, and into the kit's notes for one a page
+// links, whose run goes on.
+test("a store listing given whose store's host answers both with an address on the public internet and with one that is not ends the run with those words in its last line, and one a page links is named in the kit's notes in the same words, the run going on, and that store is asked nothing", { skip: noBrowser }, async (t) => {
+  const listing = "https://apps.apple.com/us/app/acme/id1234567890";
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)").replace("</footer>", `<a href="${listing}">App Store</a></footer>`)));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  await dialHere(t);
+  // The store's names answer with an address on the public internet and
+  // with 127.0.0.1, as where a line of the hosts file gives one of them
+  // beside the DNS.
+  t.mock.method(dns.promises, "lookup", async (host) => (/(^|\.)apple\.com$/.test(host) ? ["17.253.144.10", "127.0.0.1"] : ["93.184.216.34"]).map((address) => ({ address, family: 4 })));
+  // The store would name the site as the listing's website.
+  const asked = storeAnswers(t, () => ({ body: JSON.stringify({ results: [{ trackName: "Acme", sellerUrl: `${site.origin}/` }] }) }));
+  const mixed = "host itunes.apple.com answers with an address on the public internet, 17.253.144.10, and with one that is not, 127.0.0.1";
+  // Given, the listing ends the run, and the earlier kit stays.
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit(listing, { dir, stores: false }), (err) => err.message === `${listing} could not be read: ${mixed}.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  // Linked from the page, it is named in the kit's notes and BRAND.md, and
+  // brand.json lists it as not read, the kit made from the site.
+  const { kit } = await makeKit(`${site.origin}/`, { dir: path.join(parent, "site") });
+  assert.deepEqual(kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  const note = `https://apps.apple.com/us/app/id1234567890 could not be read: ${mixed}.`;
+  assert.ok(kit.notes.includes(note), kit.notes.join("\n"));
+  assert.ok(fs.readFileSync(path.join(parent, "site", "BRAND.md"), "utf8").includes(note));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(parent, "site", "brand.json"), "utf8")).stores.map(({ type, ok, error }) => ({ type, ok, error })), [{ type: "appstore", ok: false, error: mixed }]);
+  assert.deepEqual(asked, []);
+});
+
 test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any work, in words that name it; empty, it changes nothing", async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));

@@ -207,14 +207,16 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   // for the address given on such a host, and name the host a listing is
   // read from: play.google.com, and for the App Store the lookup at
   // itunes.apple.com, not apps.apple.com, which the kit does not open for a
-  // listing.
+  // listing. They say where the words go for each kind of listing: the last
+  // line for one given, which ends the run, and the kit's notes for one the
+  // site links, whose run goes on, as kit.test.js holds for both.
   const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
-  assert.ok(readme.includes("A store listing whose host easybrandkit reads it from, play.google.com, or itunes.apple.com for the App Store, answers so fails as easybrandkit reads the listing, before any page is read, as in `<url> could not be read: host <host> answers with an address on the public internet, <address>, and with one ...`, and the same line in the hosts file is the way out there."));
+  assert.ok(readme.includes("A store listing whose host easybrandkit reads it from, play.google.com, or itunes.apple.com for the App Store, answers so is not read: a listing you give fails the run before any page is read, as in `<url> could not be read: host <host> answers with an address on the public internet, <address>, and with one ...`, and one a site links is left out, with the same words in the kit's notes, as the run goes on. The same line in the hosts file is the way out there."));
   const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
-  assert.ok(skill.includes("A store listing whose host the kit reads it from, play.google.com, or itunes.apple.com for the App Store, answers so fails as the kit reads the listing, with `could not be read: host <host> answers with an address on the public internet, <address>, and with one ...` in its last line: the same holds."));
+  assert.ok(skill.includes("A store listing whose host the kit reads it from, play.google.com, or itunes.apple.com for the App Store, answers so is not read, with `could not be read: host <host> answers with an address on the public internet, <address>, and with one ...` in the last line for a listing given, and in a note in BRAND.md for one the site links, as the run goes on without it: the same holds."));
   const { spawnSync } = require("node:child_process");
   const help = spawnSync(process.execPath, [path.join(__dirname, "..", "skills", "easybrandkit", "scripts", "easybrandkit.js"), "--help"], { encoding: "utf8" }).stdout.replace(/\s+/g, " ");
-  assert.ok(help.includes('A store listing whose host the kit reads it from, play.google.com, or itunes.apple.com for the App Store, answers so fails as the kit reads the listing, with "host <host> answers with an address on the public internet, <address>, and with one ..." in its last line, and the same line in the hosts file is the way out there.'));
+  assert.ok(help.includes('A store listing whose host the kit reads it from, play.google.com, or itunes.apple.com for the App Store, answers so is not read, with "host <host> answers with an address on the public internet, <address>, and with one ...": in the last line for a listing given, and in the kit\'s notes for one the site links, as the run goes on. The same line in the hosts file is the way out there.'));
   at = "17.253.144.10";
   const guard = guardFor("https://apps.apple.com/us/app/acme/id1234567890", { refused: refusedAddresses("17.253.144.0/24") });
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
