@@ -297,9 +297,9 @@ test("a local site whose files are named by another of this machine's own names 
   const fs = require("node:fs");
   const path = require("node:path");
   const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
-  assert.ok(readme.includes("or give the address under the name its files use, when that is one of this machine's own names on that port, as `http://localhost:4000/` for a site given as `http://0.0.0.0:4000/` whose page names its files at localhost."));
+  assert.ok(readme.includes("or give the address under the name its files use, when that is `localhost`, `127.0.0.1`, `[::1]`, 0.0.0.0 or `[::]` on that port, as `http://localhost:4000/` for a site given as `http://0.0.0.0:4000/` whose page names its files at localhost."));
   const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
-  assert.ok(skill.includes("When the note names one of this machine's own names on the port given, `localhost`, `127.0.0.1`, `[::1]`, 0.0.0.0 or `[::]`, offer the user a run with the address given under that name instead, as for a site that moves on to another of its names, and run it once they say so."));
+  assert.ok(skill.includes("When the note names `localhost`, `127.0.0.1`, `[::1]`, 0.0.0.0 or `[::]` on the port given, offer the user a run with the address given under that name instead, as for a site that moves on to another of its names, and run it once they say so."));
 });
 
 test("a run that has no address of its own, as one reading a site another source named, holds every address to the rule, this machine's and those on any port included", async (t) => {
