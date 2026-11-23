@@ -487,7 +487,8 @@ test("this machine's network interfaces are read once a second at most, whatever
     reads++;
     return interfaces;
   };
-  t.mock.method(os, "networkInterfaces", reader);
+  const real = os.networkInterfaces;
+  const first = t.mock.method(os, "networkInterfaces", reader);
   const guard = guardFor(null);
   for (let n = 0; n < 50; n++) {
     assert.equal(await guard.judge(`https://four.example/${n}`), "");
@@ -505,12 +506,17 @@ test("this machine's network interfaces are read once a second at most, whatever
   t.mock.timers.setTime(4_000_000);
   assert.equal(await guard.judge("https://four.example/"), "");
   assert.equal(reads, 3);
+  // The first stand-in taken back before the second is put in place, so
+  // the function this test found is there again when it ends.
+  first.mock.restore();
   t.mock.method(os, "networkInterfaces", () => {
     reads++;
     return { eth1: [{ address: "93.184.216.3", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "93.184.216.3/24" }] };
   });
   assert.equal(await guard.judge("https://four.example/"), "is on a host whose name answers with an address on the public internet, 93.184.216.1, and with one of this machine's, 93.184.216.3");
   assert.equal(reads, 4);
+  t.mock.restoreAll();
+  assert.equal(os.networkInterfaces, real);
 });
 
 // A reading of the interfaces that the system refuses, as where a Linux
