@@ -3611,6 +3611,10 @@ test("a run whose system does not let it read this machine's network interfaces 
   }
   assert.deepEqual(filesOf(dir), before);
   assert.equal(fs.existsSync(started), false, "the browser was not started");
+  // The README's Requirements name it as what a run needs.
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const requirements = readme.slice(readme.indexOf("\n## Requirements\n"), readme.indexOf("\n## What you get\n"));
+  assert.ok(requirements.includes("\n- A system that lets a program read this machine's network interfaces: on Linux, a service needs AF_NETLINK among its RestrictAddressFamilies. Where they cannot be read, a run stops before any work and says so (see [Limits](#limits)).\n"), requirements);
 });
 
 test("a site another source named, given with namedBy or --named-by, is read as a page the kit chose: only on port 80 or 443 and on the public internet, refused before anything is opened", { skip: noBrowser || (process.platform === "win32" && "a shell script stands in for the browser") }, async (t) => {
