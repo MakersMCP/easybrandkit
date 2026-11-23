@@ -6929,7 +6929,11 @@ test("a site given whose name answers both with an address on the public interne
   // The run's temp folder is one deeper than this one.
   if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
   const hosts = ["127.0.0.1 localhost", "127.0.0.1 mixed.example", "93.184.216.34 mixed.example", "2606:2800:220:1:248:1893:25c8:1946 mixed6.example", "127.0.0.1 mixed6.example", ""].join("\n");
-  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", hosts]]) fs.writeFileSync(path.join(parent, name), text);
+  // An empty gai.conf, so glibc orders the answers by its own default
+  // table, whatever this machine's gai.conf asks: a line that prefers IPv4,
+  // as Ubuntu's gai.conf offers (precedence ::ffff:0:0/96 100), put
+  // 127.0.0.1 first for mixed6.example too.
+  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", hosts], ["gai.conf", ""]]) fs.writeFileSync(path.join(parent, name), text);
   const asked = path.join(parent, "asked.txt");
   const start = path.join(parent, "start.js");
   const order = path.join(parent, "order.js");
@@ -6962,6 +6966,8 @@ test("a site given whose name answers both with an address on the public interne
   const script = [
     "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 2001:470:1:2::5/64 dev dm0 nodad && ip -6 route add default dev dm0",
     'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    // Where the system has no gai.conf, it takes that table already.
+    '{ [ ! -e /etc/gai.conf ] || mount --bind "$1/gai.conf" /etc/gai.conf; }',
     '"$2" "$1/order.js" > "$1/order-$7.txt"',
     'exec "$2" --require "$3" "$4" "$5" --no-stores --out "$6"',
   ].join(" && ");
