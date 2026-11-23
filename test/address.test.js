@@ -277,6 +277,31 @@ test("the shared table of the host given: this machine's own names on its port w
   }
 });
 
+// A local site whose page names its files by another of this machine's own
+// names on the port given, as one given as http://0.0.0.0:4000/ whose dev
+// server writes them at http://localhost:4000/, as jekyll serve --host
+// 0.0.0.0 and many dev servers do, is read without them, as that name can
+// be another site's (see address.js sameHost); given under the name its
+// files use, it is read with them. The README's Limits and SKILL.md say
+// so, and SKILL.md has an assistant offer that run.
+test("a local site whose files are named by another of this machine's own names on its port is read with them when given under that name, as the README and SKILL.md say", async () => {
+  for (const [given, file, under] of [
+    ["http://0.0.0.0:4000/", "http://localhost:4000/assets/main.css", "http://localhost:4000/"],
+    ["http://localhost:36123/", "http://0.0.0.0:36123/m/main.js", "http://0.0.0.0:36123/"],
+    ["http://127.0.0.1:5173/", "http://[::1]:5173/src/app.js", "http://[::1]:5173/"],
+    ["http://[::]:8080/", "http://127.0.0.1:8080/logo.png", "http://127.0.0.1:8080/"],
+  ]) {
+    assert.match(await guardFor(given).judge(file), /^is (on port \d+, not 80 or 443|not on the public internet)$/, `${given} ${file}`);
+    assert.equal(await guardFor(under).judge(file), "", `${under} ${file}`);
+  }
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("or give the address under the name its files use, when that is one of this machine's own names on that port, as `http://localhost:4000/` for a site given as `http://0.0.0.0:4000/` whose page names its files at localhost."));
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(skill.includes("When the note names one of this machine's own names on the port given, `localhost`, `127.0.0.1`, `[::1]`, 0.0.0.0 or `[::]`, offer the user a run with the address given under that name instead, as for a site that moves on to another of its names, and run it once they say so."));
+});
+
 test("a run that has no address of its own, as one reading a site another source named, holds every address to the rule, this machine's and those on any port included", async (t) => {
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
   const none = guardFor(null);
