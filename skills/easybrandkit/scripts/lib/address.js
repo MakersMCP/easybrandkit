@@ -178,22 +178,27 @@ function isPublicAddress(raw) {
 // puts other customers' servers in it, as a DigitalOcean droplet's /64,
 // theirs, which are refused all the same (the README's Limits say so); the
 // rest of a public IPv4 range on an interface is other people's servers, so
-// in IPv4 the address alone. An IPv6 form of an IPv4 address of the
-// machine's is judged by that address (see heldIpv4). An address that leads
-// into this machine or its network from outside, as the public IPv4
-// address of a router that turns a connection back inside, is no address
-// of its interfaces, and cannot be told from any other, nor can the rest of
-// the user's own network at addresses on the public internet outside the
+// in IPv4 the address alone. An IPv6 address that holds an IPv4 one is
+// judged by that IPv4 address (see heldIpv4) and by itself, as any other
+// IPv6 address: a network that gives this machine a 6to4 address builds it
+// from the IPv4 address of its 6to4 router, which another box holds, and
+// judged by that IPv4 address alone, the machine's own 6to4 address and
+// every device of its 6to4 network, the router at the prefix's ::1 among
+// them, were taken for the public internet. An address that leads into
+// this machine or its network from outside, as the public IPv4 address of
+// a router that turns a connection back inside, is no address of its
+// interfaces, and cannot be told from any other, nor can the rest of the
+// user's own network at addresses on the public internet outside the
 // networks of the interfaces, as another IPv6 network of the same site:
 // MAKERSMCP_REFUSE_ADDRESSES is for those (the README's Limits say so).
 function ownIp(raw) {
   const address = plainIp(raw);
   const family = net.isIP(address);
   if (!family) return "";
-  const held = family === 6 ? heldIpv4(address) : address;
   const { mine, networks } = machineNow();
-  if (held) return mine.check(held, "ipv4") ? "machine" : "";
-  if (mine.check(address, "ipv6")) return "machine";
+  if (family === 4) return mine.check(address, "ipv4") ? "machine" : "";
+  const held = heldIpv4(address);
+  if ((held && mine.check(held, "ipv4")) || mine.check(address, "ipv6")) return "machine";
   return networks.check(address, "ipv6") ? "network" : "";
 }
 

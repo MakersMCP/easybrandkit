@@ -474,6 +474,43 @@ test("the IPv6 network of an address of this machine's is the prefix its interfa
   assert.equal(await guardFor("http://[2001:470:1:3::9]:3000/", { refused: refusedAddresses("2001:470:1::/56") }).judge("http://[2001:470:1:3::9]:3000/"), "is at 2001:470:1:3::9, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
 });
 
+// An IPv6 address that holds an IPv4 one is judged by that IPv4 address and
+// by itself. A network that gives this machine a 6to4 address (2002::/16)
+// builds it from the IPv4 address of its 6to4 router, which another box
+// holds: judged by that IPv4 address alone, the machine's own 6to4 address
+// and every device of its 6to4 network, the router at the prefix's ::1
+// among them, were taken for the public internet, so a page's pictures,
+// frames and fetch() reached them.
+test("an address of this machine's that holds an IPv4 address, as a 6to4 one, and its IPv6 network are this machine's, though another box holds that IPv4 address", async (t) => {
+  t.mock.method(os, "networkInterfaces", () => ({
+    ...LOOPBACK,
+    dm0: [
+      { address: "93.184.215.14", netmask: "255.255.255.255", family: "IPv4", internal: false, cidr: "93.184.215.14/32" },
+      { address: "2002:5db8:d822:1::5", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6", internal: false, cidr: "2002:5db8:d822:1::5/64", scopeid: 0 },
+    ],
+  }));
+  assert.equal(ownIp("2002:5db8:d822:1::5"), "machine");
+  assert.equal(ownIp("2002:5db8:d822:1::1"), "network");
+  assert.equal(ownIp("[2002:5db8:d822:1::50]"), "network");
+  // The IPv4 address it holds is another box's, and another 6to4 network
+  // of that address is another network.
+  assert.equal(ownIp("93.184.216.34"), "");
+  assert.equal(ownIp("2002:5db8:d822:2::1"), "");
+  // An IPv6 form of this machine's own IPv4 address is this machine's.
+  assert.equal(ownIp("2002:5db8:d70e::1"), "machine");
+  assert.equal(ownIp("::ffff:93.184.215.14"), "machine");
+  const site = guardFor("https://site.example/");
+  for (const [raw, why] of [
+    ["http://[2002:5db8:d822:1::5]/pixel.png", "is at 2002:5db8:d822:1::5, an address of this machine"],
+    ["http://[2002:5db8:d822:1::1]/admin", "is at 2002:5db8:d822:1::1, on a network of this machine"],
+    ["http://[2002:5db8:d70e::1]/", "is at 2002:5db8:d70e::1, an address of this machine"],
+    ["http://93.184.216.34/", ""],
+    ["http://[2002:5db8:d822:2::1]/", ""],
+  ]) {
+    assert.equal(await site.judge(raw), why, raw);
+  }
+});
+
 // The machine's network interfaces are read once a second at most, however
 // many addresses the run judges meanwhile, and again where the clock went
 // back or the function that reads them is another, as a test puts one in
