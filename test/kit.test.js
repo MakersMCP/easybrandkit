@@ -7011,7 +7011,12 @@ test("a site given whose name answers both with an address on the public interne
     '"$2" "$1/order.js" > "$1/order-$7.txt"',
     'exec "$2" --require "$3" "$4" "$5" --no-stores --out "$6"',
   ].join(" && ");
-  const run = (given, out) => spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, given, path.join(parent, out), out], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent } });
+  // RESOLV_MULTI, which glibc reads in place of the multi line of
+  // /etc/host.conf, has the system's lookup give every line of the hosts
+  // file for a name, as Ubuntu's host.conf (multi on) has it, where a
+  // host.conf that says multi off, or says nothing, gave the first line
+  // alone and failed the test though the kit was right.
+  const run = (given, out) => spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, given, path.join(parent, out), out], { encoding: "utf8", timeout: 120_000, env: { ...process.env, TMPDIR: parent, RESOLV_MULTI: "on" } });
   const lines = () => (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean);
   for (const [given, outside] of [["http://mixed.example/", "93.184.216.34"], ["http://mixed6.example/", "2606:2800:220:1:248:1893:25c8:1946"]]) {
     const cli = run(given, "kit");
