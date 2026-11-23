@@ -164,48 +164,59 @@ function isPublicAddress(raw) {
 
 // Whether an IP address is this machine's own: "machine" for one of the
 // addresses its network interfaces hold, "network" for one of the IPv6
-// network of such an address, the prefix its interface gives it, /48 or
-// longer, else "". A machine on an IPv6 network holds global addresses of
-// its own (SLAAC), temporary ones among them that come and go, and a server
-// can hold a public IPv4 address on an interface: such an address is on the
-// public internet by its range, so a site that read it off the kit's own
-// connection had the browser load a frame, a picture or a fetch() from a
-// service of this machine that listens on all its addresses, and a site
-// that sent its visitors there had the kit saved as that service's, with no
-// word. A global IPv6 network is mostly the user's own, whose router and
-// other machines answer there, and on a server whose provider puts other
-// customers' servers in it, as a DigitalOcean droplet's /64, theirs, which
-// are refused all the same (the README's Limits say so); the rest of a
-// public IPv4 range on an interface is other people's servers, so in IPv4
-// the address alone. An IPv6 form of an IPv4 address of the machine's is
-// judged by that address (see heldIpv4). An address that leads into this
-// machine or its network from outside, as the public IPv4 address of a
-// router that turns a connection back inside, is no address of its
-// interfaces, and cannot be told from any other: MAKERSMCP_REFUSE_ADDRESSES
-// is for those. As easyscreenshotkit reads them.
+// network of such an address on the public internet (see machineNow), else
+// "". A machine on an IPv6 network holds global addresses of its own
+// (SLAAC, or DHCPv6), temporary ones among them that come and go, and a
+// server can hold a public IPv4 address on an interface: such an address is
+// on the public internet by its range, so a site that read it off the
+// kit's own connection had the browser load a frame, a picture or a fetch()
+// from a service of this machine that listens on all its addresses, and a
+// site that sent its visitors there had the kit saved as that service's,
+// with no word. A global IPv6 network is mostly the user's own, whose
+// router and other machines answer there, and on a server whose provider
+// puts other customers' servers in it, as a DigitalOcean droplet's /64,
+// theirs, which are refused all the same (the README's Limits say so); the
+// rest of a public IPv4 range on an interface is other people's servers, so
+// in IPv4 the address alone. An IPv6 form of an IPv4 address of the
+// machine's is judged by that address (see heldIpv4). An address that leads
+// into this machine or its network from outside, as the public IPv4
+// address of a router that turns a connection back inside, is no address
+// of its interfaces, and cannot be told from any other:
+// MAKERSMCP_REFUSE_ADDRESSES is for those.
 function ownIp(raw) {
   const address = plainIp(raw);
   const family = net.isIP(address);
   if (!family) return "";
   const held = family === 6 ? heldIpv4(address) : address;
-  const { mine, networks, some } = machineNow();
-  if (!some) return "";
+  const { mine, networks } = machineNow();
   if (held) return mine.check(held, "ipv4") ? "machine" : "";
   if (mine.check(address, "ipv6")) return "machine";
   return networks.check(address, "ipv6") ? "network" : "";
 }
 
 // This machine's own addresses (mine) and the IPv6 networks of them
-// (networks), as its network interfaces hold them, and whether it holds any
-// (some), read again once INTERFACES_WAIT has passed since the last reading,
-// or the clock went back, or the function that reads them is another, as a
-// test puts one in its place. The proxy judges every address of every
-// request the browser makes, and each reading takes longer the more
-// interfaces the machine has, as a Docker host has one for each container:
-// read at each judgement, as easyscreenshotkit first read them, they were
-// read 4001 times for one load of a news site's home page, and with 200
-// interfaces such a page loaded 3 to 5 times more slowly, the main thread
-// busy reading them.
+// (networks), as its network interfaces hold them, read again once
+// INTERFACES_WAIT has passed since the last reading, or the clock went
+// back, or the function that reads them is another, as a test puts one in
+// its place. The proxy judges every address of every request the browser
+// makes, and each reading takes longer the more interfaces the machine
+// has, as a Docker host has one for each container: read at each
+// judgement, as easyscreenshotkit first read them, they were read 4001
+// times for one load of a news site's home page, and with 200 interfaces
+// such a page loaded 3 to 5 times more slowly, the main thread busy
+// reading them.
+//
+// The IPv6 network of an address on the public internet is the prefix its
+// interface gives it, held to /48 at the widest, as a wider one would take
+// in other people's networks, and to /64 at the narrowest, as IPv6
+// networks are /64 (RFC 7421): a DHCPv6 client holds the address it gets
+// at /128, and the network's /64 comes from the router's advertisement as
+// a route alone, which the kit does not read, so with the interface's
+// prefix alone the router at the prefix's ::1 and every other device of
+// such a network counted as the public internet. ::1 and the other
+// addresses that are not on the public internet give none: ::1 is held at
+// /128, and the /64 around it holds addresses the rule takes for public by
+// their range.
 const INTERFACES_WAIT = 1_000;
 let machine = null;
 
@@ -221,19 +232,18 @@ function machineNow() {
   }
   const mine = new net.BlockList();
   const networks = new net.BlockList();
-  let some = false;
   for (const list of Object.values(interfaces || {})) {
     for (const one of list || []) {
       const at = plainIp(one && one.address);
       const kind = net.isIP(at);
       if (!kind) continue;
-      some = true;
       mine.addAddress(at, kind === 4 ? "ipv4" : "ipv6");
-      const bits = Number(String(one.cidr || "").split("/")[1]);
-      if (kind === 6 && bits >= 48 && bits < 128) networks.addSubnet(at, bits, "ipv6");
+      // An address whose prefix is not given is held alone, at /128.
+      const bits = Number(String(one.cidr || "").split("/")[1]) || 128;
+      if (kind === 6 && isPublicAddress(at)) networks.addSubnet(at, Math.min(64, Math.max(48, bits)), "ipv6");
     }
   }
-  machine = { at: now, read, mine, networks, some };
+  machine = { at: now, read, mine, networks };
   return machine;
 }
 

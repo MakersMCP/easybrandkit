@@ -370,6 +370,71 @@ test("an address this machine's network interfaces hold, a public one included, 
   assert.equal(notPublicByForm(new URL("http://81.2.69.161/")), false);
 });
 
+// The IPv6 network of a global address of this machine's is the prefix its
+// interface gives it, held to /48 at the widest and /64 at the narrowest.
+// A DHCPv6 client holds the address it gets at /128, and the network's /64
+// comes from the router's advertisement as a route alone, which the kit
+// does not read: with no network for such an address, the router at the
+// prefix's ::1 and every other device of the user's own network counted as
+// the public internet, so a page's picture, frame and fetch() reached them
+// and a site that sent its visitors there had the kit saved as the
+// router's, and a device of that network given by its name, which answers
+// with its private IPv4 address and its global IPv6 one, was refused as a
+// name whose answers mix, where on a network that gives addresses by SLAAC,
+// at /64, it was read. ::1, which every machine holds at /128, is no global
+// address and gives no network.
+test("the IPv6 network of an address of this machine's is the prefix its interface gives it, /48 at the widest and /64 at the narrowest, so the /64 around one held at /128, as DHCPv6 gives one", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 3_000_000 });
+  const v6 = (address, bits) => ({ address, netmask: "", family: "IPv6", internal: false, cidr: `${address}/${bits}`, scopeid: 0 });
+  // An address whose prefix Node.js could not tell, with cidr null, as for
+  // a netmask that is not one, is held alone, at /128.
+  let interfaces = { ...LOOPBACK, eth0: [{ address: "192.168.1.20", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "192.168.1.20/24" }, v6("2001:470:1:2::5", 128), v6("fe80::5", 64)], tun0: [{ ...v6("2001:470:9:9::5", 0), cidr: null }] };
+  t.mock.method(os, "networkInterfaces", () => interfaces);
+  const names = { "router.example": ["2001:470:1:2::1"], "nas.example": ["192.168.1.50", "2001:470:1:2::50"], "site.example": ["93.184.216.34"] };
+  t.mock.method(dns.promises, "lookup", async (host) => {
+    if (!names[host]) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+    return names[host].map((address) => ({ address, family: address.includes(":") ? 6 : 4 }));
+  });
+  const site = guardFor("https://site.example/");
+  for (const [raw, why] of [
+    ["http://[2001:470:1:2::1]/pixel.png", "is at 2001:470:1:2::1, on a network of this machine"],
+    ["http://router.example/api", "is at 2001:470:1:2::1, on a network of this machine"],
+    ["https://[2001:470:1:2:ffff:ffff:ffff:fffe]/", "is at 2001:470:1:2:ffff:ffff:ffff:fffe, on a network of this machine"],
+    ["http://[2001:470:1:2::5]/", "is at 2001:470:1:2::5, an address of this machine"],
+    ["http://[2001:470:9:9::7]/", "is at 2001:470:9:9::7, on a network of this machine"],
+    // Another /64 is another network.
+    ["http://[2001:470:1:3::1]/", ""],
+    ["http://[2001:470:1:1:ffff:ffff:ffff:ffff]/", ""],
+    // ::/64, around ::1, holds no network of this machine's.
+    ["http://[::1:0:0:1]/", ""],
+  ]) {
+    assert.equal(await site.judge(raw), why, raw);
+  }
+  // A device of that network given by its name is the user's own, every
+  // address of it, as on a network that gives addresses by SLAAC; away from
+  // the address given it is refused by its first address that is not on
+  // the public internet.
+  assert.deepEqual(await guardFor("http://nas.example:5000/").route("http://nas.example:5000/"), { why: "", addresses: ["192.168.1.50", "2001:470:1:2::50"] });
+  assert.equal(await site.judge("http://nas.example/"), "is at 192.168.1.50, an address not on the public internet");
+  // A prefix from /48 to /64 is the network: from a /56, another address of
+  // it outside any /64 of the machine's is refused, and one past the /56 is
+  // not.
+  interfaces = { ...LOOPBACK, eth0: [v6("2a02:1205:5000:ab00::5", 56)] };
+  t.mock.timers.tick(1_000);
+  assert.equal(await site.judge("http://[2a02:1205:5000:abff::9]/"), "is at 2a02:1205:5000:abff::9, on a network of this machine");
+  assert.equal(await site.judge("http://[2a02:1205:5000:ac00::1]/"), "");
+  // A shorter prefix gives the /48 around the address, and no more of it.
+  interfaces = { ...LOOPBACK, eth0: [v6("2a02:1205:5000::5", 40)] };
+  t.mock.timers.tick(1_000);
+  assert.equal(await site.judge("http://[2a02:1205:5000:ffff::1]/"), "is at 2a02:1205:5000:ffff::1, on a network of this machine");
+  assert.equal(await site.judge("http://[2a02:1205:5001::1]/"), "");
+  // At /64, as SLAAC gives one, the /64 alone.
+  interfaces = { ...LOOPBACK, eth0: [v6("2001:470:1:2::5", 64)] };
+  t.mock.timers.tick(1_000);
+  assert.equal(await site.judge("http://[2001:470:1:2::1]/"), "is at 2001:470:1:2::1, on a network of this machine");
+  assert.equal(await site.judge("http://[2001:470:1:3::1]/"), "");
+});
+
 // The machine's network interfaces are read once a second at most, however
 // many addresses the run judges meanwhile, and again where the clock went
 // back or the function that reads them is another, as a test puts one in
