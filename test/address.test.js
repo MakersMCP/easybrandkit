@@ -427,6 +427,8 @@ test("the IPv6 network of an address of this machine's is the prefix its interfa
     ["https://[2001:470:1:2:ffff:ffff:ffff:fffe]/", "is at 2001:470:1:2:ffff:ffff:ffff:fffe, on a network of this machine"],
     ["http://[2001:470:1:2::5]/", "is at 2001:470:1:2::5, an address of this machine"],
     ["http://[2001:470:9:9::7]/", "is at 2001:470:9:9::7, on a network of this machine"],
+    // Held at /128, its network is the /64 around it, not the /48.
+    ["http://[2001:470:9:a::1]/", ""],
     // Another /64 is another network.
     ["http://[2001:470:1:3::1]/", ""],
     ["http://[2001:470:1:1:ffff:ffff:ffff:ffff]/", ""],
