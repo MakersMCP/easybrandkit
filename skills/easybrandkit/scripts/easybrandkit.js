@@ -95,7 +95,11 @@ wherever the kit meets it, the address given included, which stops the run
 before any work, with "on a host whose name answers with an address on the
 public internet, <address>, and with one ...": to read such a site, have the
 machine answer its name with the address you mean alone, as a line in its
-hosts file does.
+hosts file does. A store listing whose host the kit reads it from,
+play.google.com, or itunes.apple.com for the App Store, answers so fails as
+the kit reads the listing, with "host <host> answers with an address on the
+public internet, <address>, and with one ..." in its last line, and the same
+line in the hosts file is the way out there.
 
 A page's own move to an address that is not a web address, such as mailto:,
 is cancelled before the browser hands it to a program of this machine. On
