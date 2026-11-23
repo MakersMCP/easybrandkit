@@ -28,6 +28,7 @@
 // a run, and a connection, the browser's through the proxy and the kit's
 // own, goes only to one of those (see guardFor).
 
+const fs = require("fs");
 const net = require("net");
 const dns = require("dns");
 const os = require("os");
@@ -203,27 +204,45 @@ function ownIp(raw) {
 }
 
 // This machine's own addresses (mine) and the IPv6 networks of them
-// (networks), as its network interfaces hold them, read again once
-// INTERFACES_WAIT has passed since the last reading, or the clock went
-// back, or the function that reads them is another, as a test puts one in
-// its place. The proxy judges every address of every request the browser
-// makes, and each reading takes longer the more interfaces the machine
-// has, as a Docker host has one for each container: read at each
-// judgement, as easyscreenshotkit first read them, they were read 4001
-// times for one load of a news site's home page, and with 200 interfaces
-// such a page loaded 3 to 5 times more slowly, the main thread busy
-// reading them.
+// (networks), read again once a second has passed since the last reading
+// (wait, see below), or the clock went back, or a function that reads them
+// is another, as a test puts one in its place. os.networkInterfaces() lists
+// the addresses of the interfaces that are up and have a link alone, as
+// Node.js's libuv leaves the others out, on every system. On Linux the
+// kernel takes a connection to more of them for one to this machine, which
+// its own files list (see kernelAddresses), and those are read too, as
+// easyscreenshotkit reads them: an address of an interface that is up with
+// no link, as a cable out, a veth whose other end is down or a bridge whose
+// containers or virtual machines are all stopped, of an interface that is
+// down, and every address of a range routed to the machine itself, as a
+// pool of addresses for a proxy is set up (ip route add local ... dev lo).
+// Read from the interfaces alone, each was taken for an address on the
+// public internet away from the address given: a page's pictures, frames
+// and fetch() reached a service of this machine that listens on all its
+// addresses there, through the kit's proxy, what a fetch() read went into
+// brand.json, and a site that sent its visitors there had the kit saved as
+// that service's, with no word.
 //
-// A reading the system refuses, as where a Linux service's
-// RestrictAddressFamilies leaves out AF_NETLINK, or where this process has
-// as many files open as it may, leaves the last one of the same function
-// in its place, as this machine's addresses seldom change while a run
-// goes. With none, it gives why not (unread, see interfacesUnread), and a
-// run stops before any work: where the error was let go, the machine was
-// taken for one with no addresses, so every address of this machine and
-// of its IPv6 networks was opened away from the address given, and a name
-// that answered with one of them beside an address on the public internet
-// was no name whose answers mix, with no word.
+// The proxy judges every address of every request the browser makes, and
+// each reading takes longer the more interfaces the machine has, as a
+// Docker host has one for each container: read at each judgement, as
+// easyscreenshotkit first read them, they were read 4001 times for one load
+// of a news site's home page, and with 200 interfaces such a page loaded 3
+// to 5 times more slowly, the main thread busy reading them. The kernel's
+// lists of its routes take longer to read the more routes it holds (see
+// KERNEL_ROUTES), so a machine of many is read again only once a second has
+// passed for each ROUTES_A_SECOND of them, where that is longer.
+//
+// A reading of the interfaces that the system refuses, as where a Linux
+// service's RestrictAddressFamilies leaves out AF_NETLINK, or where this
+// process has as many files open as it may, leaves the last one of the same
+// functions in its place, as this machine's addresses seldom change while a
+// run goes. With none, it gives why not (unread, see interfacesUnread), and
+// a run stops before any work: where the error was let go, the machine was
+// taken for one with no addresses, so every address of this machine and of
+// its IPv6 networks was opened away from the address given, and a name that
+// answered with one of them beside an address on the public internet was
+// no name whose answers mix, with no word.
 //
 // The IPv6 network of an address on the public internet is the prefix its
 // interface gives it, held to /48 at the widest, as a wider one would take
@@ -237,34 +256,163 @@ function ownIp(raw) {
 // /128, and the /64 around it holds addresses the rule takes for public by
 // their range.
 const INTERFACES_WAIT = 1_000;
+const ROUTES_A_SECOND = 20_000;
 let machine = null;
+
+// The kernel's lists of this machine's addresses and routes, on Linux, and
+// how the kit reads one (read(file), the file's text), which a test puts
+// another function in place of.
+const KERNEL_FILES = {
+  trieStats: "/proc/net/fib_triestat",
+  trie: "/proc/net/fib_trie",
+  inet6: "/proc/net/if_inet6",
+  routeStats6: "/proc/net/rt6_stats",
+  route6: "/proc/net/ipv6_route",
+};
+const kernel = { read: (file) => fs.readFileSync(file, "latin1") };
+
+// The most routes the kernel's list of them is read with: it lists them a
+// page at a time, each page counted from the first route again, so the time
+// a reading takes grows with the square of their number, the run's main
+// thread doing nothing else meanwhile. On a busy machine here
+// /proc/net/fib_trie took 5 to 7 ms to read with 2,000 IPv4 routes, which
+// /proc/net/fib_triestat counts as 4,000 where the kernel keeps its local
+// and main tables as one, 150 ms with 20,000 and 75 s with 300,000;
+// /proc/net/ipv6_route took 7 ms with 2,000 IPv6 routes and 1.7 to 2.1 s
+// with 20,000. A machine of more, as a router, is read by its interfaces
+// that are up and have a link, and in IPv6 by the addresses of all its
+// interfaces too (/proc/net/if_inet6, a line for each address).
+const KERNEL_ROUTES = 4_000;
+
+// An IPv6 address as the kernel's files write it, 32 hex digits, in the
+// form a BlockList takes, or "".
+function hexIpv6(hex) {
+  if (!/^[0-9a-f]{32}$/i.test(hex)) return "";
+  return hex.match(/.{4}/g).join(":");
+}
+
+// The text each of the kernel's files last gave, for the function that read
+// it: a file that cannot be read is taken as it was last read, as a reading
+// of the interfaces that the system refuses is (see machineNow), so a moment
+// where this process has as many files open as it may does not have the
+// addresses it lists taken for the public internet until it is read again.
+// A file never read, as where /proc is not there or the system does not let
+// it be read, is taken as empty, and the interfaces stand alone for what it
+// lists.
+let kernelTexts = { read: null, texts: {} };
+
+// The addresses the kernel takes a connection to for one to this machine,
+// as [address, prefix] pairs: in IPv4 (four) every LOCAL entry of the
+// tables every connection is looked up in by the kernel's own rules, local,
+// main and default (the parts of /proc/net/fib_trie after "Local:", "Main:"
+// and "Id 253:"), an address of an interface, whatever its state, or a range
+// routed to the machine itself; in IPv6 (six) every address of an
+// interface, whatever its state (/proc/net/if_inet6), and every route of
+// the kind local (RTF_LOCAL in /proc/net/ipv6_route) of /48 or longer; and
+// each address of an interface with the prefix its interface gives it
+// (prefixes), for its network (see machineNow). A transparent proxy routes
+// every address to the machine itself in a table of its own, 0.0.0.0/0 and
+// ::/0, which only the packets it marks go by, as a rule of its own says:
+// taken, it made every address of the internet one of this machine's. In
+// IPv4 such a table is a part of fib_trie of its own, as "Id 100:"; the
+// kernel names no table for an IPv6 route, so a local route shorter than
+// /48 is left out. The routes are listed only where the kernel's counts of
+// them (/proc/net/fib_triestat, /proc/net/rt6_stats) are KERNEL_ROUTES at
+// most. Empty on any other system; routes: how many routes the kernel
+// counted.
+function kernelAddresses() {
+  const found = { four: [], six: [], prefixes: [], routes: 0 };
+  if (process.platform !== "linux") return found;
+  if (kernelTexts.read !== kernel.read) kernelTexts = { read: kernel.read, texts: {} };
+  const { texts } = kernelTexts;
+  const text = (file) => {
+    try {
+      texts[file] = String(kernel.read(file));
+    } catch {
+      // As it was last read, or empty (see kernelTexts).
+    }
+    return texts[file] || "";
+  };
+  // fib_triestat names each table and its count of prefixes, the routes
+  // fib_trie lists for it.
+  const counts4 = [...text(KERNEL_FILES.trieStats).matchAll(/^\s*Prefixes:\s*(\d+)\s*$/gm)].map((m) => Number(m[1]));
+  const routes4 = counts4.reduce((sum, n) => sum + n, 0);
+  // rt6_stats: seven counts in hex, the fourth the routes.
+  const counts6 = text(KERNEL_FILES.routeStats6).trim().split(/\s+/);
+  const routes6 = /^[0-9a-f]+$/i.test(counts6[3] || "") ? parseInt(counts6[3], 16) : Infinity;
+  found.routes = routes4 + (Number.isFinite(routes6) ? routes6 : 0);
+  let local = false;
+  let leaf = "";
+  for (const line of counts4.length && routes4 <= KERNEL_ROUTES ? text(KERNEL_FILES.trie).split("\n") : []) {
+    if (/^\S/.test(line)) {
+      local = /^(?:Local|Main|Id 253):/.test(line);
+      leaf = "";
+      continue;
+    }
+    if (!local) continue;
+    const key = /^\s*\|-- (\d{1,3}(?:\.\d{1,3}){3})\s*$/.exec(line);
+    if (key) {
+      leaf = key[1];
+      continue;
+    }
+    if (/^\s*\+--/.test(line)) {
+      leaf = "";
+      continue;
+    }
+    const entry = /^\s*\/(\d{1,2}) \S+ (\S+)/.exec(line);
+    if (entry && leaf && entry[2] === "LOCAL" && net.isIP(leaf) === 4 && Number(entry[1]) <= 32) found.four.push([leaf, Number(entry[1])]);
+  }
+  for (const line of text(KERNEL_FILES.inet6).split("\n")) {
+    const [hex, , bits] = line.trim().split(/\s+/);
+    const at = hexIpv6(hex || "");
+    if (!at) continue;
+    found.six.push([at, 128]);
+    found.prefixes.push([at, parseInt(bits, 16)]);
+  }
+  for (const line of routes6 <= KERNEL_ROUTES ? text(KERNEL_FILES.route6).split("\n") : []) {
+    const fields = line.trim().split(/\s+/);
+    const at = hexIpv6(fields[0] || "");
+    const prefix = parseInt(fields[1], 16);
+    if (!at || !(prefix >= 48 && prefix <= 128) || !/^[0-9a-f]{8}$/i.test(fields[8] || "")) continue;
+    if (parseInt(fields[8], 16) & 0x80000000) found.six.push([at, prefix]);
+  }
+  return found;
+}
 
 function machineNow() {
   const now = Date.now();
-  if (machine && machine.read === os.networkInterfaces && now >= machine.at && now - machine.at < INTERFACES_WAIT) return machine;
+  if (machine && machine.read === os.networkInterfaces && machine.kernel === kernel.read && now >= machine.at && now - machine.at < machine.wait) return machine;
   const read = os.networkInterfaces;
   let interfaces = {};
   try {
     interfaces = read.call(os);
   } catch (err) {
-    const last = machine && machine.read === read ? machine : null;
-    machine = last ? { ...last, at: now } : { at: now, read, mine: new net.BlockList(), networks: new net.BlockList(), unread: unreadWhy(err) };
+    const last = machine && machine.read === read && machine.kernel === kernel.read ? machine : null;
+    machine = last ? { ...last, at: now } : { at: now, read, kernel: kernel.read, wait: INTERFACES_WAIT, mine: new net.BlockList(), networks: new net.BlockList(), unread: unreadWhy(err) };
     return machine;
   }
   const mine = new net.BlockList();
   const networks = new net.BlockList();
+  // The network of an IPv6 address on the public internet (see above); one
+  // whose prefix is not given is held alone, at /128.
+  const network = (at, bits) => {
+    if (isPublicAddress(at)) networks.addSubnet(at, Math.min(64, Math.max(48, bits || 128)), "ipv6");
+  };
   for (const list of Object.values(interfaces || {})) {
     for (const one of list || []) {
       const at = plainIp(one && one.address);
       const kind = net.isIP(at);
       if (!kind) continue;
       mine.addAddress(at, kind === 4 ? "ipv4" : "ipv6");
-      // An address whose prefix is not given is held alone, at /128.
-      const bits = Number(String(one.cidr || "").split("/")[1]) || 128;
-      if (kind === 6 && isPublicAddress(at)) networks.addSubnet(at, Math.min(64, Math.max(48, bits)), "ipv6");
+      if (kind === 6) network(at, Number(String(one.cidr || "").split("/")[1]));
     }
   }
-  machine = { at: now, read, mine, networks };
+  const { four, six, prefixes, routes } = kernelAddresses();
+  for (const [at, bits] of four) mine.addSubnet(at, bits, "ipv4");
+  for (const [at, bits] of six) mine.addSubnet(at, bits, "ipv6");
+  for (const [at, bits] of prefixes) network(at, bits);
+  // wait: how long this reading is kept.
+  machine = { at: now, read, kernel: kernel.read, wait: Math.max(INTERFACES_WAIT, (routes / ROUTES_A_SECOND) * 1_000), mine, networks };
   return machine;
 }
 
@@ -708,4 +856,4 @@ function guardFor(givenRaw, { refused = refusedAddresses("") } = {}) {
   return { given: given ? given.href : "", refused, judge, route, found, inside, addressesFor };
 }
 
-module.exports = { isPublicAddress, heldIpv4, ownIp, interfacesUnread, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, mixedAnswers, UNRESOLVED };
+module.exports = { isPublicAddress, heldIpv4, ownIp, kernel, interfacesUnread, notPublicByForm, sameHost, portOf, refusedAddresses, guardFor, readUrl, atRefused, awayWhy, mixedAnswers, UNRESOLVED };

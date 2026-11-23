@@ -8,7 +8,7 @@ const assert = require("node:assert/strict");
 const dns = require("node:dns");
 const os = require("node:os");
 const test = require("node:test");
-const { isPublicAddress, heldIpv4, ownIp, interfacesUnread, notPublicByForm, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
+const { isPublicAddress, heldIpv4, ownIp, kernel, interfacesUnread, notPublicByForm, refusedAddresses, guardFor, sameHost } = require("../skills/easybrandkit/scripts/lib/address");
 const CASES = require("./address-cases.json");
 
 // This machine's network interfaces as a server's, whose interface holds a
@@ -513,6 +513,254 @@ test("an address of this machine's that holds an IPv4 address, as a 6to4 one, an
   }
 });
 
+// The kernel's lists of a machine with an interface up with no link (eth9,
+// a veth whose other end is down), one that is down (kd0), ranges routed to
+// the machine itself, /24, /64 and /40, and a transparent proxy's table
+// 100, which routes every address to the machine itself for the packets it
+// marks alone, as a network namespace of such a machine lists them;
+// prefixes and routes6 stand for the counts of routes the kernel gives, as
+// easyscreenshotkit's tests hold them.
+const KERNEL = {
+  trieStats: (prefixes = [1, 3, 9]) => `Basic info: size of leaf: 48 bytes, size of tnode: 40 bytes.\n${["Id 100", "Main", "Local"].map((name, i) => `${name}:\n\tAver depth:     1.00\n\tMax depth:      1\n\tLeaves:         ${prefixes[i]}\n\tPrefixes:       ${prefixes[i]}\n\tInternal nodes: 1\n\tPointers: 8\nNull ptrs: 5\nTotal size: 1  kB\n\nCounters:\n---------\ngets = 0\n`).join("\n")}`,
+  trie: `Id 100:
+  |-- 0.0.0.0
+     /0 host LOCAL
+Main:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 0.0.0.0
+        /0 link UNICAST
+     |-- 93.184.216.0
+        /24 link UNICAST
+     |-- 198.51.100.0
+        /24 link UNICAST
+Local:
+  +-- 0.0.0.0/0 3 0 5
+     +-- 93.184.216.0/23 3 0 5
+        +-- 93.184.216.64/27 2 0 2
+           |-- 93.184.216.77
+              /32 host LOCAL
+           |-- 93.184.216.88
+              /32 host LOCAL
+        |-- 93.184.216.255
+           /32 link BROADCAST
+        |-- 93.184.217.0
+           /24 host LOCAL
+     +-- 127.0.0.0/8 2 0 2
+        +-- 127.0.0.0/31 1 0 0
+           |-- 127.0.0.0
+              /8 host LOCAL
+           |-- 127.0.0.1
+              /32 host LOCAL
+        |-- 127.255.255.255
+           /32 link BROADCAST
+     +-- 198.51.100.0/24 2 0 2
+        |-- 198.51.100.9
+           /32 host LOCAL
+        |-- 198.51.100.255
+           /32 link BROADCAST
+`,
+  inet6: `2a022f0c800000880000000000000008 05 80 00 82      kd0
+2a022f0c800000770000000000000005 04 40 00 82     eth9
+00000000000000000000000000000001 01 80 10 80       lo
+2a022f0c800000010000000000000009 02 40 00 82       d0
+fe80000000000000acdbd3fffef59979 02 40 20 80       d0
+`,
+  routeStats6: (routes6 = 14) => `0012 000b 0002 ${routes6.toString(16).padStart(4, "0")} 0000 0000 0000\n`,
+  route6: `00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
+2a022f0c800000010000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000002 00000000 00000001       d0
+2a022f0c800000770000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth9
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 00000001       d0
+00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000003 00000000 80200001       lo
+2a022f0c800000010000000000000009 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000005 00000000 80200001       d0
+2a022f0c800000770000000000000005 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000002 00000000 80200001     eth9
+2a022f0c800000880000000000000008 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000003 00000000 80200001      kd0
+2a022f0c800000990000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
+2a022f0c810000000000000000000000 28 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
+ff000000000000000000000000000000 08 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000002 00000000 00000001       d0
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo
+`,
+};
+
+// On Linux the kernel takes a connection to more of this machine's
+// addresses for one to itself than os.networkInterfaces() lists, which
+// leaves out each interface that is not up with a link: an address of an
+// interface up with no link, as a veth whose other end is down, of one
+// that is down, and every address of a range routed to the machine itself
+// (ip route add local ... dev lo). Read from the interfaces alone, each was
+// taken for an address on the public internet, and through the kit's proxy
+// a page reached this machine's service there. Each address of an
+// interface gives its IPv6 network as one of a running interface does. A
+// transparent proxy's table of its own is not this machine's; nor, as the
+// kernel names no table for an IPv6 route, is an IPv6 range routed to the
+// machine shorter than /48. A machine of more routes than the kernel lists
+// in a few milliseconds is not read by them, and read again only once a
+// second has passed for each 20,000 of them. A file that cannot be read a
+// moment later is taken as it was last read, and where the files cannot be
+// read at all, the interfaces stand alone.
+test("on Linux an address the kernel holds for this machine on an interface that is down or has no link, or in a range routed to it, is this machine's, and so is the IPv6 network of such an interface", { skip: process.platform !== "linux" && "the kernel's lists are read on Linux only" }, async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 7_500_000 });
+  // What Node.js lists of such a machine: lo and the running dummy d0.
+  let listed = {
+    ...LOOPBACK,
+    d0: [
+      { address: "198.51.100.9", netmask: "255.255.255.0", family: "IPv4", internal: false, cidr: "198.51.100.9/24" },
+      { address: "2a02:2f0c:8000:1::9", netmask: "ffff:ffff:ffff:ffff::", family: "IPv6", internal: false, cidr: "2a02:2f0c:8000:1::9/64", scopeid: 0 },
+    ],
+  };
+  t.mock.method(os, "networkInterfaces", () => listed);
+  let prefixes = [1, 3, 9];
+  let routes6 = 14;
+  // The files that cannot be read for a while, as where this process has as
+  // many files open as it may.
+  let refusing = [];
+  const reads = [];
+  const files = { "/proc/net/fib_triestat": () => KERNEL.trieStats(prefixes), "/proc/net/fib_trie": () => KERNEL.trie, "/proc/net/if_inet6": () => KERNEL.inet6, "/proc/net/rt6_stats": () => KERNEL.routeStats6(routes6), "/proc/net/ipv6_route": () => KERNEL.route6 };
+  const reader = t.mock.method(kernel, "read", (file) => {
+    reads.push(file.replace("/proc/net/", ""));
+    if (refusing.includes(file)) throw Object.assign(new Error(`EMFILE: too many open files, open '${file}'`), { code: "EMFILE" });
+    if (!files[file]) throw Object.assign(new Error(`ENOENT: no such file or directory, open '${file}'`), { code: "ENOENT" });
+    return files[file]();
+  });
+  const at = (address) => `is at ${address}, an address of this machine`;
+  const onNetwork = (address) => `is at ${address}, on a network of this machine`;
+  const url = (address) => (address.includes(":") ? `http://[${address}]/secret` : `http://${address}/secret`);
+  const guard = guardFor("https://93.184.215.14/");
+  const kept = [
+    // An interface up with no link, and its IPv6 network.
+    ["93.184.216.77", at("93.184.216.77")],
+    ["2a02:2f0c:8000:77::5", at("2a02:2f0c:8000:77::5")],
+    ["2a02:2f0c:8000:77::99", onNetwork("2a02:2f0c:8000:77::99")],
+    // An interface that is down; its IPv6 address held at /128 has the /64
+    // around it.
+    ["93.184.216.88", at("93.184.216.88")],
+    ["2a02:2f0c:8000:88::8", at("2a02:2f0c:8000:88::8")],
+    ["2a02:2f0c:8000:88::99", onNetwork("2a02:2f0c:8000:88::99")],
+    // Ranges routed to the machine itself.
+    ["93.184.217.50", at("93.184.217.50")],
+    ["::ffff:93.184.217.50", at("::ffff:5db8:d932")],
+    ["2a02:2f0c:8000:99::7", at("2a02:2f0c:8000:99::7")],
+  ];
+  for (const [address, why] of [
+    ...kept,
+    // The running interface, as before.
+    ["198.51.100.9", "is not on the public internet"],
+    ["2a02:2f0c:8000:1::9", at("2a02:2f0c:8000:1::9")],
+    // Not this machine's: the rest of eth9's IPv4 range, the transparent
+    // proxy's table, and an IPv6 range routed to the machine shorter than
+    // /48, beyond eth9's and kd0's /64.
+    ["93.184.216.99", ""],
+    ["93.184.215.14", ""],
+    ["2606:4700::1", ""],
+    ["2a02:2f0c:8100::7", ""],
+    ["2a02:2f0c:8000:89::1", ""],
+  ]) {
+    assert.equal(await guard.judge(url(address)), why, address);
+  }
+  assert.deepEqual(reads.sort(), ["fib_trie", "fib_triestat", "if_inet6", "ipv6_route", "rt6_stats"]);
+  // A connection of the kit's or the proxy's is refused before it is made.
+  await assert.rejects(guard.addressesFor(url("93.184.217.50")), (err) => err.code === "ENOTPUBLIC" && err.message === `${url("93.184.217.50")} ${at("93.184.217.50")}`);
+  assert.deepEqual(await guard.route(url("2a02:2f0c:8000:77::5")), { why: at("2a02:2f0c:8000:77::5"), addresses: [] });
+  // A name that answers with one of them beside an address on the public
+  // internet answers both ways, the address given on it included.
+  t.mock.method(dns.promises, "lookup", async (host) => ({ "mixed.example": ["93.184.215.99", "93.184.216.77"], "mixed6.example": ["2606:4700::1", "2a02:2f0c:8000:99::7"] })[host].map((address) => ({ address, family: address.includes(":") ? 6 : 4 })));
+  assert.equal(await guard.judge("https://mixed.example/"), "is on a host whose name answers with an address on the public internet, 93.184.215.99, and with one of this machine's, 93.184.216.77");
+  assert.equal(await guardFor("https://mixed6.example/").judge("https://mixed6.example/"), "is on a host whose name answers with an address on the public internet, 2606:4700::1, and with one of this machine's, 2a02:2f0c:8000:99::7");
+  // Files that cannot be read a moment later are taken as they were last
+  // read.
+  refusing = ["/proc/net/fib_trie", "/proc/net/if_inet6", "/proc/net/ipv6_route"];
+  reads.length = 0;
+  t.mock.timers.tick(1_000);
+  for (const [address, why] of kept) assert.equal(await guard.judge(url(address)), why, address);
+  assert.deepEqual(reads.sort(), ["fib_trie", "fib_triestat", "if_inet6", "ipv6_route", "rt6_stats"]);
+  refusing = [];
+  // More routes than the kernel lists in a few milliseconds: the lists of
+  // routes are not read, the addresses of the interfaces are.
+  prefixes = [1, 2_000, 2_000];
+  routes6 = 4_001;
+  reads.length = 0;
+  t.mock.timers.tick(1_000);
+  assert.equal(await guard.judge(url("93.184.216.77")), "");
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:99::7")), "");
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:77::5")), at("2a02:2f0c:8000:77::5"));
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:77::99")), onNetwork("2a02:2f0c:8000:77::99"));
+  assert.deepEqual(reads.sort(), ["fib_triestat", "if_inet6", "rt6_stats"]);
+  // At most as many as it may: read.
+  prefixes = [1, 1_000, 2_999];
+  routes6 = 4_000;
+  reads.length = 0;
+  t.mock.timers.tick(1_000);
+  assert.equal(await guard.judge(url("93.184.216.77")), at("93.184.216.77"));
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:99::7")), at("2a02:2f0c:8000:99::7"));
+  assert.deepEqual(reads.sort(), ["fib_trie", "fib_triestat", "if_inet6", "ipv6_route", "rt6_stats"]);
+  // A machine of 100,000 routes is read again once 5 s have passed, where
+  // one of a few is read again each second.
+  prefixes = [0, 50_000, 50_000];
+  routes6 = 0;
+  t.mock.timers.tick(1_000);
+  await guard.judge(url("93.184.216.77"));
+  reads.length = 0;
+  t.mock.timers.tick(4_999);
+  await guard.judge(url("93.184.216.77"));
+  assert.deepEqual(reads, []);
+  t.mock.timers.tick(1);
+  await guard.judge(url("93.184.216.77"));
+  assert.deepEqual(reads.sort(), ["fib_triestat", "if_inet6", "ipv6_route", "rt6_stats"]);
+  // A line the kit cannot read is passed over, and the rest is read: no
+  // address that is not one, as 999.1.1.1 or 32 characters that are not
+  // hex digits, and no prefix past an address's bits, which a list of
+  // addresses would not take, nor a route whose kind is not written as one.
+  reader.mock.restore();
+  const odd = t.mock.method(kernel, "read", (file) => ({
+    "/proc/net/fib_triestat": "Local:\n\tPrefixes:       3\nId 253:\n\tPrefixes:       1\n",
+    "/proc/net/fib_trie": "Local:\n  +-- 93.184.219.0/24 2 0 2\n     |-- 999.1.1.1\n        /32 host LOCAL\n     |-- 93.184.219.1\n        /40 host LOCAL\n     |-- 93.184.219.2\n        /32 host LOCAL\nId 253:\n  |-- 93.184.220.0\n     /24 host LOCAL\n",
+    "/proc/net/if_inet6": "zz022f0c800000aa0000000000000001 04 40 00 82     eth8\n2a022f0c800000aa0000000000000001 04 40 00 82     eth8\n",
+    "/proc/net/rt6_stats": "0012 000b 0002 0003 0000 0000 0000\n",
+    "/proc/net/ipv6_route": "2a022f0c800000bb0000000000000000 ff 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo\n2a022f0c800000cc0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001zz       lo\n2a022f0c800000dd0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo\n",
+  })[file]);
+  for (const [address, why] of [
+    ["93.184.219.2", at("93.184.219.2")],
+    // The default table is one every connection is looked up in too.
+    ["93.184.220.9", at("93.184.220.9")],
+    ["93.184.219.1", ""],
+    ["2a02:2f0c:8000:aa::1", at("2a02:2f0c:8000:aa::1")],
+    ["2a02:2f0c:8000:bb::7", ""],
+    ["2a02:2f0c:8000:cc::7", ""],
+    ["2a02:2f0c:8000:dd::7", at("2a02:2f0c:8000:dd::7")],
+  ]) {
+    assert.equal(await guard.judge(url(address)), why, address);
+  }
+  odd.mock.restore();
+  // Where the kernel's files cannot be read at all, as where /proc is not
+  // there, the interfaces alone, read at once where the function that
+  // reads the files is another, as a test puts one in its place.
+  t.mock.method(kernel, "read", () => {
+    throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+  });
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:77::5")), "");
+  assert.equal(await guard.judge(url("93.184.216.77")), "");
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:1::9")), at("2a02:2f0c:8000:1::9"));
+  // What another function read last is not this one's.
+  assert.equal(await guard.judge(url("93.184.219.2")), "");
+  // And read again each second, as where the kernel counts no routes.
+  listed = LOOPBACK;
+  t.mock.timers.tick(1_000);
+  assert.equal(await guard.judge(url("2a02:2f0c:8000:1::9")), "");
+  // The texts say whose addresses the run knows, where they said every
+  // address the network interfaces hold, which macOS and Windows list for
+  // the interfaces that are up and have a link alone.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { spawnSync } = require("node:child_process");
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  assert.ok(readme.includes("every address this machine holds that its system lists (see below), on Linux those of an interface that is down or has no link and every address of a range routed to the machine itself too, read as the run goes, and in IPv6 the network of each address of an interface"));
+  assert.ok(readme.includes("- The run knows your machine's own addresses as its system lists them. On macOS and Windows that is the addresses of the network interfaces that are up and have a link"));
+  assert.ok(readme.includes("an IPv4 one in the kernel's local, main and default tables, which its own rules look every connection up in, and an IPv6 one when it is /48 or longer"));
+  assert.ok(readme.includes("A list of the kernel's that the run read and cannot read again a moment later, as where this process has as many files open as it may, is taken as it was, and where it cannot read the kernel's lists at all, as where `/proc` is not there, it takes the addresses of the interfaces that are up and have a link alone."));
+  assert.ok(fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").includes("and not at an address of the user's machine there that its system lists (the README's Limits say which), as its global IPv6 address or a server's public IPv4 address"));
+  const help = spawnSync(process.execPath, [path.join(__dirname, "..", "skills", "easybrandkit", "scripts", "easybrandkit.js"), "--help"], { encoding: "utf8" }).stdout.replace(/\s+/g, " ");
+  assert.ok(help.includes("and none is this machine's own, as its system lists them, or on the IPv6 network of one"));
+});
+
 // The machine's network interfaces are read once a second at most, however
 // many addresses the run judges meanwhile, and again where the clock went
 // back or the function that reads them is another, as a test puts one in
@@ -520,6 +768,10 @@ test("an address of this machine's that holds an IPv4 address, as a 6to4 one, an
 test("this machine's network interfaces are read once a second at most, whatever the run judges meanwhile", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 5_000_000 });
   t.mock.method(dns.promises, "lookup", async () => [1, 2, 3, 4].map((n) => ({ address: `93.184.216.${n}`, family: 4 })));
+  // The kernel's lists of this machine's own, which on a machine of many
+  // routes are read less often than once a second (see the test of them
+  // above), are none here.
+  t.mock.method(kernel, "read", () => "");
   let reads = 0;
   let interfaces = LOOPBACK;
   const reader = () => {
@@ -568,6 +820,8 @@ test("this machine's network interfaces are read once a second at most, whatever
 test("a reading of this machine's network interfaces that the system refuses keeps the last one, and with none says why", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 7_000_000 });
   t.mock.method(dns.promises, "lookup", async () => [{ address: "93.184.216.34", family: 4 }]);
+  // The kernel's lists, none here, as above.
+  t.mock.method(kernel, "read", () => "");
   // As Node.js throws it, the error's number given as it is, with no code.
   const refusal = (errno) => Object.assign(new Error(`A system error occurred: uv_interface_addresses returned Unknown system error ${errno} (Unknown system error ${errno})`), { code: "ERR_SYSTEM_ERROR", errno, syscall: "uv_interface_addresses" });
   let errno = 0;
@@ -605,12 +859,15 @@ test("a reading of this machine's network interfaces that the system refuses kee
     [Object.assign(new Error("A system error occurred:\nuv_interface_addresses returned nothing"), { code: "ERR_SYSTEM_ERROR" }), { code: "", words: "A system error occurred: uv_interface_addresses returned nothing" }],
     [new Error("x".repeat(300)), { code: "", words: "x".repeat(200) }],
   ]) {
+    let tries = 0;
     const reader = t.mock.method(os, "networkInterfaces", () => {
+      tries++;
       throw error;
     });
     assert.deepEqual(interfacesUnread(), why);
     // Within the second, from the same reading.
     assert.deepEqual(interfacesUnread(), why);
+    assert.equal(tries, 1);
     reader.mock.restore();
   }
   assert.equal(os.networkInterfaces, real);

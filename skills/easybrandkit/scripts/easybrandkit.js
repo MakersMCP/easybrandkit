@@ -70,7 +70,7 @@ was not given. Any other address the kit opens, as a page it chose, each hop
 of a redirect, a page's own move, a frame or a window it opens and
 robots.txt with --facts, is opened only on port 80 or 443, and only when
 every address the kit's own lookup finds for its name is on the public
-internet and none is this machine's own, as its interfaces hold it, or on
+internet and none is this machine's own, as its system lists them, or on
 the IPv6 network of one: a name it cannot look up is not opened, nor a name
 under .local or of one label, which it does not look up, nor an address it
 cannot read itself, as one whose host has a label of broken punycode

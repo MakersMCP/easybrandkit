@@ -6673,29 +6673,145 @@ test("an address of this machine's own on the public internet, as its interfaces
   assert.equal(fs.existsSync(path.join(parent, "kit-leads")), false);
 });
 
+// Namespaces whose network has addresses on the public internet the kernel
+// takes a connection to for one to this machine and Node.js does not list:
+// on an interface that is up with no link, a veth whose other end is down,
+// as a port with no cable or a bridge whose containers are all stopped; on
+// an interface that is down; and in ranges routed to the machine itself.
+const kernelOnly = ownAddresses || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "ip link set lo up && ip link add v0 type veth peer name v1 && ip link set v0 up && ip addr add 93.184.216.34/24 dev v0 && ip -6 addr add 2001:470:1:2::5/64 dev v0 nodad && ip link add kd0 type dummy && ip addr add 93.184.216.88/32 dev kd0 && ip route add local 93.184.217.0/24 dev lo && ip -6 route add local 2a02:2f0c:8000:99::/64 dev lo"]).status !== 0 && "no veth pair with one end down, dummy left down or local routes for ranges in a network namespace of its own");
+
+test("an address this machine holds on an interface that is up with no link or is down, or in a range routed to it, is not opened away from the address given: pictures, a frame and a fetch() there are not, a site that leads there gets no kit, and the service there is asked nothing", { skip: noBrowser || kernelOnly }, (t) => {
+  // In namespaces of their own: the loopback; a running dummy that holds
+  // the site, site.example at 93.184.215.14 by the hosts file; a veth, v0,
+  // whose other end is left down, so it is up with no link, holding
+  // 93.184.216.34/24 and 2001:470:1:2::5/64; a dummy left down, kd0,
+  // holding 93.184.216.88; and ranges routed to the machine itself,
+  // 93.184.217.0/24 and 2a02:2f0c:8000:99::/64. Node.js lists none of these
+  // addresses, yet a connection to each reaches this machine, where a
+  // service of its own listens on port 80. The site's page has pictures at
+  // each, one on v0's IPv6 network, a frame at v0's IPv4 address and a
+  // fetch() from there, whose answer it writes into a heading. Each server
+  // keeps each request it gets.
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-kernel-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The run's temp folder is one deeper than this one.
+  if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
+  for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", "127.0.0.1 localhost\n93.184.215.14 site.example\n"]]) fs.writeFileSync(path.join(parent, name), text);
+  const start = path.join(parent, "start.js");
+  const pictures = ["http://93.184.216.34/pixel4.png", "http://[2001:470:1:2::5]/pixel6.png", "http://[2001:470:1:2::99]/net6.png", "http://93.184.216.88/down4.png", "http://93.184.217.50/range4.png", "http://[2a02:2f0c:8000:99::7]/range6.png"];
+  const page = brandPage("rgb(255,0,0)").replace(
+    "</body>",
+    `${pictures.map((src) => `<img src="${src}" width="10" height="10">`).join("")}<iframe src="http://93.184.216.34/frame" width="200" height="100"></iframe>
+    <script>fetch("http://93.184.216.34/api").then((r) => r.text()).then((text) => { const h = document.createElement("h2"); h.textContent = text; document.querySelector("main").append(h); }).catch(() => {});</script></body>`,
+  );
+  fs.writeFileSync(
+    start,
+    [
+      // Done in the kit's main thread alone, as Node.js loads this file in
+      // the kit's worker threads too.
+      `if (!require("worker_threads").isMainThread) return;`,
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const keep = (line) => fs.appendFileSync(process.env.ASKED_FILE, line + "\\n");`,
+      `const page = ${JSON.stringify(page)};`,
+      `const png = Buffer.from(${JSON.stringify(pngOf(10, 10, () => [0, 0, 255]).toString("base64"))}, "base64");`,
+      `const site = http.createServer((req, res) => {`,
+      `  keep("site " + req.url + " " + req.headers.host);`,
+      `  if (req.url === "/" && process.env.SITE_LEADS) return res.writeHead(302, { location: "http://93.184.216.34/" }).end();`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end(page);`,
+      `});`,
+      `site.listen(80, "93.184.215.14", () => site.unref());`,
+      `const machine = (req, res) => {`,
+      `  keep("machine " + req.socket.localAddress + " " + req.url);`,
+      `  if (req.url === "/api") return res.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "*" }).end("MACHINE-SECRET-DATA");`,
+      `  if (req.url.endsWith(".png")) return res.writeHead(200, { "content-type": "image/png" }).end(png);`,
+      `  res.writeHead(200, { "content-type": "text/html" }).end("<title>Machine admin</title><h1>THIS-MACHINE-ADMIN-PANEL</h1>");`,
+      `};`,
+      `for (const host of ["93.184.216.34", "93.184.216.88", "93.184.217.50"]) { const one = http.createServer(machine); one.listen(80, host, () => one.unref()); }`,
+      `const six = http.createServer(machine);`,
+      `six.listen({ port: 80, host: "::", ipv6Only: true }, () => six.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  const script = [
+    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 93.184.215.14/32 dev dm0",
+    "ip link add v0 type veth peer name v1 && ip link set v0 up && ip addr add 93.184.216.34/24 dev v0 && ip -6 addr add 2001:470:1:2::5/64 dev v0 nodad",
+    "ip link add kd0 type dummy && ip addr add 93.184.216.88/32 dev kd0",
+    "ip route add local 93.184.217.0/24 dev lo && ip -6 route add local 2a02:2f0c:8000:99::/64 dev lo",
+    'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
+    // What Node.js lists of this machine there.
+    `"$2" -e 'console.log(Object.keys(require("os").networkInterfaces()).sort().join(" "))' > "$1/listed-$6.txt"`,
+    'exec "$2" --require "$3" "$4" http://site.example/ --no-stores --out "$5"',
+  ].join(" && ");
+  const run = (leads) => {
+    const asked = path.join(parent, leads ? "asked-leads.txt" : "asked.txt");
+    const env = { ...process.env, TMPDIR: parent, ASKED_FILE: asked };
+    if (leads) env.SITE_LEADS = "1";
+    const out = leads ? "kit-leads" : "kit";
+    const cli = spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", script, "sh", parent, process.execPath, start, CLI, path.join(parent, out), out], { encoding: "utf8", timeout: 120_000, env });
+    return { cli, lines: (fs.existsSync(asked) ? fs.readFileSync(asked, "utf8") : "").trim().split("\n").filter(Boolean) };
+  };
+  const { cli, lines } = run(false);
+  // Node.js lists neither v0 nor kd0.
+  assert.equal(fs.readFileSync(path.join(parent, "listed-kit.txt"), "utf8"), "dm0 lo\n");
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /^Saved the Acme brand kit to /);
+  assert.ok(lines.includes("site / site.example"), lines.join("\n"));
+  assert.deepEqual(lines.filter((line) => !line.startsWith("site ")), [], "no request reached the machine's service");
+  const kit = JSON.parse(fs.readFileSync(path.join(parent, "kit", "brand.json"), "utf8"));
+  assert.ok(!JSON.stringify(kit).includes("MACHINE-SECRET-DATA") && !JSON.stringify(kit).includes("THIS-MACHINE"), JSON.stringify(kit.text));
+  assert.ok(kit.notes.includes("http://site.example/ tried to open http://93.184.216.34/frame, which is at 93.184.216.34, an address of this machine: it was not opened."), kit.notes.join("\n"));
+  // The notes name the first three addresses the browser asked for, and
+  // count the rest, each refused as this machine's.
+  const why = {
+    "93.184.216.34": "an address of this machine",
+    "2001:470:1:2::5": "an address of this machine",
+    "2001:470:1:2::99": "on a network of this machine",
+    "93.184.216.88": "an address of this machine",
+    "93.184.217.50": "an address of this machine",
+    "2a02:2f0c:8000:99::7": "an address of this machine",
+  };
+  const asked = kit.notes.filter((note) => note.startsWith("While easybrandkit read http://site.example/, the browser asked for "));
+  assert.equal(asked.length, 3, kit.notes.join("\n"));
+  for (const note of asked) {
+    const [, address, reason] = /, which is at ([0-9a-f.:]+), (an address of this machine|on a network of this machine): it was not reached\.$/.exec(note) || [];
+    assert.equal(why[address], reason, note);
+  }
+  assert.ok(kit.notes.some((note) => /^\d+ more addresses the browser asked for were not reached either\.$/.test(note)), kit.notes.join("\n"));
+  // A site that sends its visitors there gets no kit, and the service there
+  // is asked nothing.
+  const leads = run(true);
+  assert.equal(leads.cli.status, 1, leads.cli.stderr);
+  assert.equal(leads.cli.stderr.trim().split("\n").pop(), "easybrandkit: http://site.example/ led to http://93.184.216.34/, which is at 93.184.216.34, an address of this machine, so no kit was made.");
+  assert.deepEqual(leads.lines.filter((line) => !line.startsWith("site ")), [], "no request reached the machine's service");
+  assert.equal(fs.existsSync(path.join(parent, "kit-leads")), false);
+});
+
 // Namespaces whose interface holds an IPv6 address at /128, as a DHCPv6
 // client holds the address it gets, with the network's /64 a route alone,
-// as a router's advertisement gives it, and other addresses of that /64
-// taken by this machine's loopback, so a program here answers for them as
-// devices of that network would, though no interface holds them.
-const dhcpNetwork = ownAddresses || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 2001:470:1:2::5/128 dev dm0 nodad && ip -6 route add 2001:470:1:2::/64 dev dm0 && ip -6 route add local 2001:470:1:2::1/128 dev lo"]).status !== 0 && "no dummy network that takes an IPv6 address at /128 with its /64 as a route, and a local route for another address of it");
+// as a router's advertisement gives it, through a veth pair to a network
+// namespace of its own, where other addresses of that /64 are held and a
+// program here answers for them, as devices of that network would.
+const dhcpNetwork = ownAddresses || (spawnSync("unshare", ["-c", "-m", "-n", "--keep-caps", "sh", "-c", "ip link set lo up && ip link add v0 type veth peer name v1 && ip link set v0 up && ip addr add 2001:470:1:2::5/128 dev v0 nodad && ip -6 route add 2001:470:1:2::/64 dev v0 && unshare -n true"]).status !== 0 && "no veth pair whose end takes an IPv6 address at /128 with its /64 as a route, or no network namespace inside these");
 
 test("a device of the IPv6 network of an address this machine holds at /128, as DHCPv6 gives one, is not opened away from the address given: a frame, pictures and a fetch() there are not, a site that leads there gets no kit, and the device is asked nothing", { skip: noBrowser || dhcpNetwork }, (t) => {
-  // In namespaces of their own: the loopback, and a network whose interface
-  // holds 93.184.216.34 and 2001:470:1:2::5/128, with 2001:470:1:2::/64 as a
-  // route alone. A program of the test's own answers for 2001:470:1:2::1,
-  // the router at the prefix's ::1, and for 2001:470:1:2::77, a camera of
-  // that network, as those devices would. The site, site.example at
-  // 93.184.216.34 by the hosts file, holds a frame and a picture at the
-  // router, a picture at the camera and a fetch() of router.example, the
-  // router by its name, whose answer it writes into a heading. Each server
-  // keeps each request it gets.
+  // In namespaces of their own: the loopback, a network whose interface
+  // holds 93.184.216.34, and a veth, v0, that holds 2001:470:1:2::5/128,
+  // with 2001:470:1:2::/64 as a route alone. Its other end is in a network
+  // namespace of its own, the rest of that network, where 2001:470:1:2::1,
+  // the router at the prefix's ::1, and 2001:470:1:2::77, a camera of that
+  // network, are held, and a program of the test's own answers for both, as
+  // those devices would. The site, site.example at 93.184.216.34 by the
+  // hosts file, holds a frame and a picture at the router, a picture at the
+  // camera and a fetch() of router.example, the router by its name, whose
+  // answer it writes into a heading. Each server keeps each request it gets.
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-dhcp-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   // The run's temp folder is one deeper than this one.
   if (roomlessIn(parent)) return t.skip(roomlessIn(parent));
   for (const [name, text] of [["resolv.conf", "nameserver 127.0.0.1\noptions timeout:1 attempts:1\n"], ["nsswitch.conf", "hosts: files\n"], ["hosts", "127.0.0.1 localhost\n93.184.216.34 site.example\n2001:470:1:2::1 router.example\n"]]) fs.writeFileSync(path.join(parent, name), text);
   const start = path.join(parent, "start.js");
+  const device = path.join(parent, "device.js");
   const page = brandPage("rgb(255,0,0)").replace(
     "</body>",
     `<iframe src="http://[2001:470:1:2::1]/admin" width="200" height="100"></iframe><img src="http://[2001:470:1:2::1]/pixel.png" width="10" height="10"><img src="http://[2001:470:1:2::77]/cam.png" width="10" height="10">
@@ -6711,29 +6827,64 @@ test("a device of the IPv6 network of an address this machine holds at /128, as 
       `const http = require("http");`,
       `const keep = (line) => fs.appendFileSync(process.env.ASKED_FILE, line + "\\n");`,
       `const page = ${JSON.stringify(page)};`,
-      `const png = Buffer.from(${JSON.stringify(pngOf(10, 10, () => [0, 0, 255]).toString("base64"))}, "base64");`,
       `const site = http.createServer((req, res) => {`,
       `  keep("site " + req.url + " " + req.headers.host);`,
       `  if (req.url === "/" && process.env.SITE_LEADS) return res.writeHead(302, { location: "http://[2001:470:1:2::1]/" }).end();`,
       `  res.writeHead(200, { "content-type": "text/html" }).end(page);`,
       `});`,
       `site.listen(80, "93.184.216.34", () => site.unref());`,
+      ``,
+    ].join("\n"),
+  );
+  // The devices, in their own network namespace, which end with the run:
+  // the program there looks for the run's process each 200 ms, and ends
+  // after the longest a run may take in any case.
+  fs.writeFileSync(
+    device,
+    [
+      `const fs = require("fs");`,
+      `const http = require("http");`,
+      `const [listening, run] = process.argv.slice(2);`,
+      `const keep = (line) => fs.appendFileSync(process.env.ASKED_FILE, line + "\\n");`,
+      `const png = Buffer.from(${JSON.stringify(pngOf(10, 10, () => [0, 0, 255]).toString("base64"))}, "base64");`,
       `const device = http.createServer((req, res) => {`,
       `  keep("device " + req.socket.localAddress + " " + req.url + " " + req.headers.host);`,
       `  if (req.url === "/api") return res.writeHead(200, { "content-type": "text/plain", "access-control-allow-origin": "*" }).end("ROUTER-SECRET-DATA");`,
       `  if (req.url.endsWith(".png")) return res.writeHead(200, { "content-type": "image/png" }).end(png);`,
       `  res.writeHead(200, { "content-type": "text/html" }).end("<title>Router admin</title><h1>ROUTER-ADMIN-PANEL</h1>");`,
       `});`,
-      `device.listen({ port: 80, host: "::", ipv6Only: true }, () => device.unref());`,
+      `device.listen({ port: 80, host: "::", ipv6Only: true }, () => fs.writeFileSync(listening, ""));`,
+      `setInterval(() => {`,
+      `  try {`,
+      `    process.kill(Number(run), 0);`,
+      `  } catch {`,
+      `    process.exit(0);`,
+      `  }`,
+      `}, 200);`,
+      `setTimeout(() => process.exit(0), 130_000);`,
       ``,
     ].join("\n"),
   );
+  // The rest of the network: a shell that is in a network namespace of its
+  // own once it has made its mark, then takes v1, which is moved there.
+  const rest = [
+    ': > "$0/in-$2"',
+    'while [ ! -e "$0/moved-$2" ]; do sleep 0.05; done',
+    "ip link set lo up && ip link set v1 up && ip addr add 2001:470:1:2::1/64 dev v1 nodad && ip addr add 2001:470:1:2::77/64 dev v1 nodad",
+    'exec "$1" "$0/device.js" "$0/listening-$2" "$2"',
+  ].join(" && ");
   const script = [
-    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 93.184.216.34/32 dev dm0 && ip addr add 2001:470:1:2::5/128 dev dm0 nodad",
-    "ip -6 route add 2001:470:1:2::/64 dev dm0 && ip -6 route add local 2001:470:1:2::1/128 dev lo && ip -6 route add local 2001:470:1:2::77/128 dev lo",
+    "set -e",
+    "ip link set lo up && ip link add dm0 type dummy && ip link set dm0 up && ip addr add 93.184.216.34/32 dev dm0",
+    "ip link add v0 type veth peer name v1",
+    `unshare -n sh -c '${rest}' "$1" "$2" "$$" < /dev/null > /dev/null 2>&1 &`,
+    'while [ ! -e "$1/in-$$" ]; do sleep 0.05; done',
+    'ip link set v1 netns "$!" && : > "$1/moved-$$"',
+    "ip link set v0 up && ip addr add 2001:470:1:2::5/128 dev v0 nodad && ip -6 route add 2001:470:1:2::/64 dev v0",
+    'while [ ! -e "$1/listening-$$" ]; do sleep 0.05; done',
     'mount --bind "$1/resolv.conf" /etc/resolv.conf && mount --bind "$1/nsswitch.conf" /etc/nsswitch.conf && mount --bind "$1/hosts" /etc/hosts',
     'exec "$2" --require "$3" "$4" http://site.example/ --no-stores --out "$5"',
-  ].join(" && ");
+  ].join("\n");
   const run = (leads) => {
     const asked = path.join(parent, leads ? "asked-leads.txt" : "asked.txt");
     const env = { ...process.env, TMPDIR: parent, ASKED_FILE: asked };
