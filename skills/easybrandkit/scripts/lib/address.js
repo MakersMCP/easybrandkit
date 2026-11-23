@@ -165,9 +165,9 @@ function isPublicAddress(raw) {
 }
 
 // Whether an IP address is this machine's own: "machine" for one of the
-// addresses its network interfaces hold, "network" for one of the IPv6
-// network of such an address on the public internet (see machineNow), else
-// "". A machine on an IPv6 network holds global addresses of its own
+// addresses it holds, "network" for one of the IPv6 network of an address
+// of an interface on the public internet (see machineNow), else "". A
+// machine on an IPv6 network holds global addresses of its own
 // (SLAAC, or DHCPv6), temporary ones among them that come and go, and a
 // server can hold a public IPv4 address on an interface: such an address is
 // on the public internet by its range, so a site that read it off the
@@ -187,10 +187,10 @@ function isPublicAddress(raw) {
 // every device of its 6to4 network, the router at the prefix's ::1 among
 // them, were taken for the public internet. An address that leads into
 // this machine or its network from outside, as the public IPv4 address of
-// a router that turns a connection back inside, is no address of its
-// interfaces, and cannot be told from any other, nor can the rest of the
-// user's own network at addresses on the public internet outside the
-// networks of the interfaces, as another IPv6 network of the same site:
+// a router that turns a connection back inside, is no address it holds,
+// and cannot be told from any other, nor can the rest of the user's own
+// network at addresses on the public internet outside the networks of its
+// interfaces, as another IPv6 network of the same site:
 // MAKERSMCP_REFUSE_ADDRESSES is for those (the README's Limits say so).
 function ownIp(raw) {
   const address = plainIp(raw);
@@ -249,12 +249,13 @@ function ownIp(raw) {
 // in other people's networks, and to /64 at the narrowest, as IPv6
 // networks are /64 (RFC 7421): a DHCPv6 client holds the address it gets
 // at /128, and the network's /64 comes from the router's advertisement as
-// a route alone, which the kit does not read, so with the interface's
-// prefix alone the router at the prefix's ::1 and every other device of
-// such a network counted as the public internet. ::1 and the other
-// addresses that are not on the public internet give none: ::1 is held at
-// /128, and the /64 around it holds addresses the rule takes for public by
-// their range.
+// a route alone, which the kit does not take for a network (of the
+// kernel's routes it takes the local ones alone, see kernelAddresses), so
+// with the interface's prefix alone the router at the prefix's ::1 and
+// every other device of such a network counted as the public internet. ::1
+// and the other addresses that are not on the public internet give none:
+// ::1 is held at /128, and the /64 around it holds addresses the rule takes
+// for public by their range.
 const INTERFACES_WAIT = 1_000;
 const ROUTES_A_SECOND = 20_000;
 let machine = null;

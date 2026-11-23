@@ -399,15 +399,15 @@ test("an address this machine's network interfaces hold, a public one included, 
 // interface gives it, held to /48 at the widest and /64 at the narrowest.
 // A DHCPv6 client holds the address it gets at /128, and the network's /64
 // comes from the router's advertisement as a route alone, which the kit
-// does not read: with no network for such an address, the router at the
-// prefix's ::1 and every other device of the user's own network counted as
-// the public internet, so a page's picture, frame and fetch() reached them
-// and a site that sent its visitors there had the kit saved as the
-// router's, and a device of that network given by its name, which answers
-// with its private IPv4 address and its global IPv6 one, was refused as a
-// name whose answers mix, where on a network that gives addresses by SLAAC,
-// at /64, it was read. ::1, which every machine holds at /128, is no global
-// address and gives no network.
+// does not take for a network: with no network for such an address, the
+// router at the prefix's ::1 and every other device of the user's own
+// network counted as the public internet, so a page's picture, frame and
+// fetch() reached them and a site that sent its visitors there had the kit
+// saved as the router's, and a device of that network given by its name,
+// which answers with its private IPv4 address and its global IPv6 one, was
+// refused as a name whose answers mix, where on a network that gives
+// addresses by SLAAC, at /64, it was read. ::1, which every machine holds
+// at /128, is no global address and gives no network.
 test("the IPv6 network of an address of this machine's is the prefix its interface gives it, /48 at the widest and /64 at the narrowest, so the /64 around one held at /128, as DHCPv6 gives one", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 3_000_000 });
   const v6 = (address, bits) => ({ address, netmask: "", family: "IPv6", internal: false, cidr: `${address}/${bits}`, scopeid: 0 });
@@ -468,6 +468,9 @@ test("the IPv6 network of an address of this machine's is the prefix its interfa
   const path = require("node:path");
   const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
   const limits = readme.slice(readme.indexOf("\n## Limits\n")).replace(/\s+/g, " ");
+  // The README names the rule, and the route a router gives as one the kit
+  // does not take for a network, as it reads the kernel's local routes alone.
+  assert.ok(limits.includes("The network of an IPv6 address is the prefix its interface gives it, held to /48 at the widest and /64 at the narrowest, so an address held at /128, as a DHCPv6 server gives one while the router gives its network as a route alone, which easybrandkit does not take for a network of this machine, has the /64 around it."));
   assert.match(limits, /Nor can it tell the rest of your own network where it is at public addresses outside the networks of this machine's interfaces, [^.]*: a page can have the browser reach a device there too\. On such a network, name its ranges in `MAKERSMCP_REFUSE_ADDRESSES`, which then refuses them as the address you give too\./);
   const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
   assert.match(skill, /The kit takes the rest of the user's own network for the public internet where it is at public addresses outside the networks of the machine's interfaces, [^.]*\. When the user says their network is such, tell them that `MAKERSMCP_REFUSE_ADDRESSES` can name its ranges, which are then refused as the address given too\./);
