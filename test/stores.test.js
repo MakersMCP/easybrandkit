@@ -203,6 +203,12 @@ test("a store's addresses are judged as every address the kit opens is: by the t
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guardFor("https://acme.com/")), (err) => err.message === "host apps.apple.com answers with an address on the public internet, 17.253.144.10, and with one that is not, 127.0.0.1");
   at = ["2620:149:a44::10", "198.18.0.7"];
   await assert.rejects(stores.checkFetchUrl("https://play.google.com/store/apps/details?id=com.acme.app", guardFor(null)), (err) => err.message === "host play.google.com answers with an address on the public internet, 2620:149:a44::10, and with one in the range a proxy in fake-ip mode gives every name, 198.18.0.0/15, 198.18.0.7");
+  // The README's Limits and SKILL.md quote it so, beside the words for the
+  // address given on such a host.
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("A store listing whose store's host answers so fails as easybrandkit reads the listing, before any page is read, as in `<url> could not be read: host <host> answers with an address on the public internet, <address>, and with one ...`, and the same line in the hosts file is the way out there."));
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(skill.includes("A store listing whose store's host answers so fails as the kit reads the listing, with `could not be read: host <host> answers with an address on the public internet, <address>, and with one ...` in its last line: the same holds."));
   at = "17.253.144.10";
   const guard = guardFor("https://apps.apple.com/us/app/acme/id1234567890", { refused: refusedAddresses("17.253.144.0/24") });
   await assert.rejects(stores.checkFetchUrl("https://apps.apple.com/us/app/acme/id1234567890", guard), (err) => err.message === "host apps.apple.com is at 17.253.144.10, an address MAKERSMCP_REFUSE_ADDRESSES refuses");
