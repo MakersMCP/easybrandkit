@@ -528,9 +528,11 @@ test("an address of this machine's that holds an IPv4 address, as a 6to4 one, an
 // in IPv4 a /24 in the local table and one in the main table, which the
 // kernel lists under "Main:" apart from "Local:" where the machine has a
 // rule of its own, as for the transparent proxy's table below, and in IPv6
-// a /64, a /56, a /48, a /47 and a /40, and a transparent proxy's table
-// 100, which routes every address to the machine itself for the packets it
-// marks alone, as a network namespace of such a machine lists them;
+// a /64, a /56, a /48, a /47, a /40 and a /128 of an address no interface
+// holds, as an AnyIP or virtual IP setup routes one, and a transparent
+// proxy's table 100, which routes every address to the machine itself for
+// the packets it marks alone, as a network namespace of such a machine
+// lists them;
 // prefixes and routes6 stand for the counts of routes the kernel gives, as
 // easyscreenshotkit's tests hold them.
 const KERNEL = {
@@ -582,7 +584,7 @@ Local:
 fe80000000000000acdbd3fffef59979 02 40 20 80       d0
 2a022f0c900000000000000000000005 06 28 00 80       w0
 `,
-  routeStats6: (routes6 = 17) => `0012 000b 0002 ${routes6.toString(16).padStart(4, "0")} 0000 0000 0000\n`,
+  routeStats6: (routes6 = 18) => `0012 000b 0002 ${routes6.toString(16).padStart(4, "0")} 0000 0000 0000\n`,
   route6: `00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
 2a022f0c800000010000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000002 00000000 00000001       d0
 2a022f0c800000770000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth9
@@ -592,6 +594,7 @@ fe80000000000000acdbd3fffef59979 02 40 20 80       d0
 2a022f0c800000770000000000000005 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000002 00000000 80200001     eth9
 2a022f0c800000880000000000000008 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000003 00000000 80200001      kd0
 2a022f0c800000990000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
+2a022f0c800000b00000000000000005 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
 2a022f0c8000a0000000000000000000 38 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
 2a022f0c810000000000000000000000 28 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000001 00000000 80000001       lo
 2a022f0c820000000000000000000000 30 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000002 00000000 80000001       lo
@@ -631,7 +634,7 @@ test("on Linux an address the kernel holds for this machine on an interface that
   };
   t.mock.method(os, "networkInterfaces", () => listed);
   let prefixes = [1, 4, 9];
-  let routes6 = 17;
+  let routes6 = 18;
   // The files that cannot be read for a while, as where this process has as
   // many files open as it may.
   let refusing = [];
@@ -665,13 +668,16 @@ test("on Linux an address the kernel holds for this machine on an interface that
     // Ranges routed to the machine itself: in IPv4 in the local table and
     // in the main table, which the kernel lists apart under "Main:" where
     // the machine has a rule of its own, each a table its own rules look
-    // every connection up in; in IPv6 a /64, a /56 and a /48.
+    // every connection up in; in IPv6 a /64, a /56 and a /48, and a /128
+    // of an address no interface holds, which ipv6_route lists alone, as
+    // /proc/net/if_inet6 does not.
     ["93.184.217.50", at("93.184.217.50")],
     ["93.184.218.7", at("93.184.218.7")],
     ["::ffff:93.184.217.50", at("::ffff:5db8:d932")],
     ["2a02:2f0c:8000:99::7", at("2a02:2f0c:8000:99::7")],
     ["2a02:2f0c:8000:a0ab::7", at("2a02:2f0c:8000:a0ab::7")],
     ["2a02:2f0c:8200:ab::1", at("2a02:2f0c:8200:ab::1")],
+    ["2a02:2f0c:8000:b0::5", at("2a02:2f0c:8000:b0::5")],
   ];
   for (const [address, why] of [
     ...kept,
@@ -679,9 +685,9 @@ test("on Linux an address the kernel holds for this machine on an interface that
     ["198.51.100.9", "is not on the public internet"],
     ["2a02:2f0c:8000:1::9", at("2a02:2f0c:8000:1::9")],
     // Not this machine's: the rest of eth9's IPv4 range, the transparent
-    // proxy's table, an address past the /56, and IPv6 ranges routed to the
+    // proxy's table, an address past the /56, IPv6 ranges routed to the
     // machine shorter than /48, a /47 and a /40, beyond eth9's and kd0's
-    // /64.
+    // /64, and the address next to the /128, which gives no network.
     ["93.184.216.99", ""],
     ["93.184.215.14", ""],
     ["2606:4700::1", ""],
@@ -689,6 +695,7 @@ test("on Linux an address the kernel holds for this machine on an interface that
     ["2a02:2f0c:8301:5::1", ""],
     ["2a02:2f0c:8100::7", ""],
     ["2a02:2f0c:8000:89::1", ""],
+    ["2a02:2f0c:8000:b0::6", ""],
   ]) {
     assert.equal(await guard.judge(url(address)), why, address);
   }
@@ -793,10 +800,10 @@ test("on Linux an address the kernel holds for this machine on an interface that
   // fib_trie, the IPv4 one, and rt6_stats for ipv6_route, the IPv6 one. The
   // other lists are read.
   prefixes = [1, 4, 9];
-  routes6 = 17;
+  routes6 = 18;
   for (const [count, list, unread, others] of [
     ["fib_triestat", "fib_trie", ["93.184.216.77", "93.184.217.50", "93.184.218.7"], ["2a02:2f0c:8000:77::5", "2a02:2f0c:8000:99::7"]],
-    ["rt6_stats", "ipv6_route", ["2a02:2f0c:8000:99::7", "2a02:2f0c:8000:a0ab::7", "2a02:2f0c:8200:ab::1"], ["2a02:2f0c:8000:77::5", "93.184.217.50", "93.184.218.7"]],
+    ["rt6_stats", "ipv6_route", ["2a02:2f0c:8000:99::7", "2a02:2f0c:8000:a0ab::7", "2a02:2f0c:8200:ab::1", "2a02:2f0c:8000:b0::5"], ["2a02:2f0c:8000:77::5", "93.184.217.50", "93.184.218.7"]],
   ]) {
     const seen = [];
     const uncounted = t.mock.method(kernel, "read", (file) => {
