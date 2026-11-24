@@ -316,6 +316,60 @@ test("a picture that does not come is skipped, a host that cannot be found is to
   assert.equal(unknown.error, "host itunes.apple.com could not be looked up");
 });
 
+// As the README's Limits and SKILL.md say, where SKILL.md said that a host
+// whose answers mix is refused with the reason in a last line or a note: a
+// picture the run's rule refuses is passed over before its host is asked
+// anything, as a picture that does not come is, and no reason is kept, so
+// none reaches a last line or a note (kit.test.js holds those).
+test("a picture of a listing or a profile on a host whose name's answers mix, or at another address the run's rule refuses, is left out as a picture that does not come is, its host asked nothing, and nothing says why", async (t) => {
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const png = Buffer.alloc(33);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(1024, 20);
+  // The pictures' hosts answer with an address on the public internet and
+  // with 127.0.0.1, as where a line of the hosts file gives one beside the
+  // DNS; every other name is on the public internet alone.
+  let at = { "is1-ssl.mzstatic.com": ["17.253.144.20", "127.0.0.1"], "play-lh.googleusercontent.com": ["142.250.184.1", "127.0.0.1"], "pbs.twimg.com": ["151.101.0.159", "127.0.0.1"] };
+  t.mock.method(dns.promises, "lookup", async (host) => (at[host] || ["17.253.144.30"]).map((address) => ({ address, family: net.isIP(address) })));
+  const lookup = { results: [{ trackName: "Acme", artworkUrl512: "https://is1-ssl.mzstatic.com/image/thumb/a/AppIcon.png/512x512bb.jpg", screenshotUrls: ["https://is2-ssl.mzstatic.com/image/thumb/1.png/392x696bb.jpg"] }] };
+  let title = `<meta property="og:title" content="Acme (@acme) on X">`;
+  const asked = storeAnswers(t, (url) => {
+    if (url.hostname === "itunes.apple.com") return { body: JSON.stringify(lookup) };
+    if (url.hostname === "play.google.com") return { body: `<meta property="og:title" content="Acme - Apps on Google Play"><img src="https://play-lh.googleusercontent.com/ICON=s48-rw" alt="Icon image">` };
+    if (url.hostname === "x.com") return { body: `${title}<meta property="og:image" content="https://pbs.twimg.com/profile_images/17/abc_200x200.jpg">` };
+    return { body: png };
+  });
+  const { guardFor, refusedAddresses } = require("../skills/easybrandkit/scripts/lib/address");
+  // The hosts a read asked, and what it gave, each read with a lookup of
+  // its own.
+  const read = async (link, refused) => {
+    asked.length = 0;
+    const source = await stores.readSource(stores.classify(link), dir, guardFor("https://acme.com/", refused ? { refused: refusedAddresses(refused) } : {}));
+    return { ok: source.ok, error: source.error, files: source.assets.map((asset) => asset.file), hosts: asked.map(({ url }) => new URL(url).hostname) };
+  };
+  // An App Store listing's icon on such a host is left out, and its
+  // screenshot on another host is saved.
+  assert.deepEqual(await read("https://apps.apple.com/us/app/acme/id1234567890"), { ok: true, error: undefined, files: ["appstore-shot-01.png"], hosts: ["itunes.apple.com", "is2-ssl.mzstatic.com"] });
+  // A Google Play listing and a profile with no picture left are read all
+  // the same, by their names.
+  assert.deepEqual(await read("https://play.google.com/store/apps/details?id=com.acme.app"), { ok: true, error: undefined, files: [], hosts: ["play.google.com"] });
+  assert.deepEqual(await read("https://x.com/acme"), { ok: true, error: undefined, files: [], hosts: ["x.com"] });
+  // A profile with no name and no picture left is not read, and its error
+  // gives no reason either.
+  title = "";
+  assert.deepEqual(await read("https://x.com/acme"), { ok: false, error: "no images could be downloaded", files: [], hosts: ["x.com"] });
+  // A picture at an address not on the public internet, and one at an
+  // address MAKERSMCP_REFUSE_ADDRESSES refuses, the same.
+  at = { "is1-ssl.mzstatic.com": ["10.0.0.5"], "is2-ssl.mzstatic.com": ["17.253.144.40"] };
+  assert.deepEqual(await read("https://apps.apple.com/us/app/acme/id1234567890", "17.253.144.40"), { ok: true, error: undefined, files: [], hosts: ["itunes.apple.com"] });
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("A picture of a listing or a profile on a host whose name's answers mix, or at another address easybrandkit does not open, is left out as any picture that does not download is, and no last line or note says why."));
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(skill.includes("A picture of a listing or a profile on a host that answers so, or at another address the kit does not open, is left out as any picture that does not download is, and no last line or note says why."));
+});
+
 test("a listing's hosts are each looked up once, its pictures and its redirects judged and connected by that one answer, a run's own lookup shared", async (t) => {
   const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-stores-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

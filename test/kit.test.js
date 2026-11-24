@@ -3569,6 +3569,57 @@ test("a store listing given whose store's host answers both with an address on t
   assert.deepEqual(asked, []);
 });
 
+// As the README's Limits and SKILL.md say: a listing's pictures on a host
+// whose answers mix are left out as any picture that does not download is,
+// and no last line or note says why, where SKILL.md said that such a host
+// is refused with the reason in a last line or a note.
+test("a store listing whose pictures are on a host that answers both with an address on the public internet and with one that is not is read without them, given or linked, that host is asked nothing, and no last line or note says why", { skip: noBrowser }, async (t) => {
+  const listing = "https://apps.apple.com/us/app/acme/id1234567890";
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)", "rgb(255,255,255)").replace("</footer>", `<a href="${listing}">App Store</a></footer>`)));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  // The listing's website by a name of its own on port 80, which the
+  // lookup below puts on a public address and the kit's proxy reaches here.
+  const web = Number(new URL(site.origin).port);
+  await dialHere(t, (host, port) => (port === 80 ? web : null));
+  // The pictures' host answers with an address on the public internet and
+  // with 127.0.0.1, as where a line of the hosts file gives one beside the
+  // DNS; the store and the website are on the public internet alone.
+  t.mock.method(dns.promises, "lookup", async (host) => (host === "is1-ssl.mzstatic.com" ? ["17.253.144.20", "127.0.0.1"] : ["17.253.144.10"]).map((address) => ({ address, family: 4 })));
+  const png = Buffer.alloc(33);
+  png.writeUInt32BE(0x89504e47, 0);
+  png.writeUInt32BE(1024, 16);
+  png.writeUInt32BE(1024, 20);
+  const art = "https://is1-ssl.mzstatic.com/image/thumb";
+  let seller = "http://site.test/";
+  const asked = storeAnswers(t, (url) => (url.hostname === "itunes.apple.com" ? { body: JSON.stringify({ results: [{ trackName: "Acme", sellerUrl: seller, artworkUrl512: `${art}/a/AppIcon.png/512x512bb.jpg`, screenshotUrls: [`${art}/1.png/392x696bb.jpg`] }] }) } : { body: png }));
+  const hosts = () => [...new Set(asked.map(({ url }) => new URL(url).hostname))];
+  // Given with a website, the kit comes from the website, and its note
+  // says only that no picture of the listing came.
+  const given = await makeKit(listing, { dir: path.join(parent, "given"), stores: false });
+  assert.deepEqual(given.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  assert.deepEqual(given.kit.stores.map(({ ok, assets, error }) => ({ ok, assets, error })), [{ ok: true, assets: [], error: undefined }]);
+  assert.deepEqual(withoutBusyNotes(given.kit.notes), [`${listing} is a store listing none of whose pictures could be downloaded, so the kit comes from the website it names, ${seller}.`]);
+  // Given with no website, the run ends with no word of why, and the
+  // earlier kit stays.
+  seller = "";
+  const dir = path.join(parent, "kit");
+  writeFiles(dir, EARLIER);
+  const before = filesOf(dir);
+  await assert.rejects(makeKit(listing, { dir, stores: false }), (err) => err.message === `${listing}: no picture of the listing could be downloaded, and it names no website, so no kit was made.` && err.earlierKit === dir);
+  assert.deepEqual(filesOf(dir), before);
+  // Linked from the page, brand.json lists it as read, with no pictures,
+  // and no note names it.
+  const linked = await makeKit(`${site.origin}/`, { dir: path.join(parent, "site") });
+  assert.deepEqual(linked.kit.logos.map((logo) => logo.file), ["logo-01.png", "logo-02.png"]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(parent, "site", "brand.json"), "utf8")).stores.map(({ type, ok, assets, error }) => ({ type, ok, assets, error })), [{ type: "appstore", ok: true, assets: [], error: undefined }]);
+  assert.deepEqual(withoutBusyNotes(linked.kit.notes), []);
+  assert.deepEqual(hosts(), ["itunes.apple.com"]);
+});
+
 test("a MAKERSMCP_REFUSE_ADDRESSES that does not parse stops the run before any work, in words that name it; empty, it changes nothing", async (t) => {
   const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
