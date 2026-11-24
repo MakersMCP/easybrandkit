@@ -558,6 +558,17 @@ async function launch({ width, height }, { guard = null } = {}) {
         `--window-size=${width},${height}`,
         "--hide-scrollbars",
         "--mute-audio",
+        // No sound output either, which on Linux has the browser play a
+        // page's sound into nothing, so it reaches no sound server or sound
+        // device of this machine. With --mute-audio alone, a page that made
+        // an AudioContext had the browser connect to the sound server in
+        // XDG_RUNTIME_DIR, the desktop's own, and where XDG_RUNTIME_DIR is
+        // unset, as in a container, a cron job or a CI box, PulseAudio's
+        // client made a folder for it in the temp folder, pulse- and 12
+        // letters or digits, and kept its link to that folder in pulse/ of
+        // the config folder, which is in the profile (see downloadsIn) and
+        // goes with it: each such run left one more empty folder there.
+        "--disable-audio-output",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",

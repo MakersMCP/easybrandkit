@@ -5392,7 +5392,7 @@ test("a call on the connection to a browser that has ended fails at once", { ski
   assert.ok(Date.now() - started < 500, `told after ${Date.now() - started} ms`);
 });
 
-test("a browser the kit starts listens on no port, has HTTP/3 off, moves no http address to https by itself, and the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
+test("a browser the kit starts listens on no port, has HTTP/3 off and no sound output, moves no http address to https by itself, and the kit drives it through a pipe only it holds", { skip: noBrowser || (process.platform !== "linux" && "a process's sockets are read from /proc on Linux only") }, async (t) => {
   const temp = ownTemp(t);
   if (!temp) return t.skip("the temp folder is too deep for a browser");
   const tmpdir = process.env.TMPDIR;
@@ -5452,6 +5452,8 @@ test("a browser the kit starts listens on no port, has HTTP/3 off, moves no http
       }
     }).find((line) => has(line, "--remote-debugging-pipe") && !has(line, "--type"));
     assert.ok(started && has(started, "--disable-quic"), String(started));
+    // Nor has it a sound output (see the test of a page's sound below).
+    assert.ok(has(started, "--disable-audio-output"), String(started));
     // Nor does it move an http address to https by itself: not over https
     // first (HTTPS-Upgrades, and HTTPS-First on Chrome 157), nor for a name
     // whose DNS gives an HTTPS record, as every name behind Cloudflare does
@@ -7318,6 +7320,68 @@ test("on Linux the browser starts with a session bus where nothing listens, no d
   assert.equal(first, path.join(profile[1], "stand-ins"));
   const nothing = ["/usr/bin/true", "/bin/true"].find((file) => fs.existsSync(file));
   assert.deepEqual(rest.slice(0, 6), Array(6).fill(nothing));
+});
+
+// A page that makes an AudioContext, which has the browser start its sound
+// output before the page's script goes on, and then names its title.
+const SOUND_PAGE = `<!doctype html><title>Acme</title><h1>Acme</h1><script>
+const sound = new AudioContext();
+document.title = "Sound at " + sound.sampleRate;
+</script>`;
+
+test("on Linux the browser plays a page's sound into nothing: it reaches no sound server in XDG_RUNTIME_DIR, and where that is unset, run after run leaves no folder of PulseAudio's in the temp folder", { skip: (process.platform !== "linux" && "the sound servers looked for in XDG_RUNTIME_DIR and the config folder are Linux's") || noBrowser }, async (t) => {
+  const net = require("node:net");
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const temp = ownTemp(t);
+  if (!temp) return t.skip("the temp folder is too deep for a browser");
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "ebk-snd-"));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  // The test's own sockets are made in its folder, whose path has to leave
+  // them the 107 bytes a socket's path takes.
+  if (Buffer.byteLength(path.join(parent, "runtime", "pulse", "native")) > 107) return t.skip(`the path of the test's folder, ${parent}, is too long for the sockets it makes there`);
+  // A sound server of the test's own in a runtime folder of the test's, as
+  // a desktop has its own in XDG_RUNTIME_DIR: PulseAudio's socket, which
+  // PipeWire serves too, and PipeWire's own. Each connection is counted and
+  // closed.
+  const runtime = path.join(parent, "runtime");
+  fs.mkdirSync(path.join(runtime, "pulse"), { recursive: true, mode: 0o700 });
+  fs.chmodSync(runtime, 0o700);
+  const reached = [];
+  for (const name of ["pulse/native", "pipewire-0"]) {
+    const listening = net.createServer((socket) => {
+      reached.push(name);
+      socket.destroy();
+    }).listen(path.join(runtime, name));
+    await once(listening, "listening");
+    t.after(() => listening.close());
+  }
+  const site = await serve((req, res) => res.writeHead(200, { "content-type": "text/html" }).end(SOUND_PAGE));
+  t.after(() => site.server.close());
+  // A home with no config folder, as a container's, a cron job's or a CI
+  // box's can be: the user's own config folder has no pulse folder there.
+  const home = path.join(parent, "home");
+  fs.mkdirSync(home);
+  setEnv(t, { TMPDIR: temp, HOME: home, XDG_CONFIG_HOME: undefined, XDG_RUNTIME_DIR: runtime });
+  const play = async (what) => {
+    const browser = await launch({ width: 800, height: 600 }, { guard: guardFor(`${site.origin}/`) });
+    try {
+      const cdp = await openPage(browser, { width: 800, height: 600 });
+      await navigate(cdp, `${site.origin}/`);
+      const { result } = await cdp.send("Runtime.evaluate", { expression: "document.title", returnByValue: true });
+      assert.match(String(result.value), /^Sound at \d+$/, `${what}: the page made its AudioContext`);
+    } finally {
+      await browser.close();
+    }
+  };
+  await play("a desktop's runtime folder");
+  assert.deepEqual(reached, [], "the browser reached no sound server in XDG_RUNTIME_DIR");
+  assert.deepEqual(fs.readdirSync(temp), []);
+  delete process.env.XDG_RUNTIME_DIR;
+  for (const run of [1, 2]) {
+    await play(`run ${run}`);
+    assert.deepEqual(fs.readdirSync(temp), [], `run ${run} leaves nothing in the temp folder`);
+    assert.equal(fs.existsSync(path.join(home, ".config", "pulse")), false, `run ${run} leaves nothing in the user's config folder`);
+  }
 });
 
 // Also where this process's own temp folder has one, as the tests above
