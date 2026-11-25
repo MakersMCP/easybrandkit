@@ -1478,9 +1478,8 @@ function refusedNotes(refused = [], past = false) {
 // its scripts run (see openPage): alert() does nothing, confirm() gives true
 // and prompt() the text it offers, "" when it offers none. Each wraps the
 // browser's own function: it keeps that function's name, its length and its
-// want of a prototype, and its code reads as the browser's own, where a
-// function of the kit's would show its source, as a page's check for bots
-// can look.
+// want of a prototype, and its code reads as native code, though without the
+// function's name, where a function of the kit's would show its source.
 const ANSWERED_DIALOGS = `(() => {
   const answer = (name, given) => {
     window[name] = new Proxy(window[name], { apply: (own, self, args) => given(args) });
@@ -1514,9 +1513,11 @@ async function openPage(chrome, { width, height }) {
   // Cancel and the other was held, the page's own holding its tab until
   // the run failed. A frame of another site runs apart, and the browser
   // tells its dialogs: each is answered with OK, a prompt() with the text
-  // it offers. Two such frames that ask at once can still have one
-  // answered with Cancel and the other held, which holds that frame alone,
-  // and the page's load is waited for no longer than its time.
+  // it offers. Two such frames that ask at once can still have one held and
+  // the other given Cancel, or have one given the answer meant for the
+  // other's dialog, as "" for a prompt() where the other's was an alert().
+  // A frame held so holds itself alone, and the page's load is waited for
+  // no longer than its time.
   cdp.on("Page.javascriptDialogOpening", ({ defaultPrompt = "" }) => cdp.send("Page.handleJavaScriptDialog", { accept: true, promptText: defaultPrompt }).catch(() => {}));
   await cdp.send("Page.enable");
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: ANSWERED_DIALOGS });

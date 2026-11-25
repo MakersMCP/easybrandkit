@@ -683,8 +683,8 @@ const ASKING_PAGE = (frame) => `<!doctype html><html><head><title>Acme</title><s
     addEventListener("message", ({ data }) => (document.getElementById("frame").textContent = data));
     ${ASKED("The page", "Ada")}
     const own = document.body.appendChild(document.createElement("iframe")).contentWindow;
-    const browsers = ["alert", "confirm", "prompt"].every((name) => /\\[native code\\]/.test(Function.prototype.toString.call(window[name])) && !Object.prototype.hasOwnProperty.call(window[name], "prototype"));
-    document.getElementById("page").textContent = said + ", and its own frame's " + own.confirm("Stay?") + " and " + own.prompt("Your name?", "Cy") + ", the browser's own functions " + browsers;
+    const native = ["alert", "confirm", "prompt"].every((name) => /\\[native code\\]/.test(Function.prototype.toString.call(window[name])) && window[name].name === name && window[name].length === 0 && !Object.prototype.hasOwnProperty.call(window[name], "prototype"));
+    document.getElementById("page").textContent = said + ", and its own frame's " + own.confirm("Stay?") + " and " + own.prompt("Your name?", "Cy") + ", native code with the functions' names and lengths " + native;
   </script>
 </body></html>`;
 const ASKING_FRAME = `<!doctype html><html><body><p>Hello</p><script>
@@ -719,7 +719,7 @@ test("a page and a frame of another site that ask with alert(), confirm() and pr
   }
   const { kit } = await makeKit(`${site.origin}/`, { dir, stores: false });
   assert.deepEqual(kit.text.headings, [
-    { tag: "h1", text: "The page: OK 30 times of 30, and its prompt gave Ada, and its own frame's true and Cy, the browser's own functions true" },
+    { tag: "h1", text: "The page: OK 30 times of 30, and its prompt gave Ada, and its own frame's true and Cy, native code with the functions' names and lengths true" },
     { tag: "h2", text: "A frame of another site: OK 30 times of 30, and its prompt gave Bea" },
   ]);
 });
