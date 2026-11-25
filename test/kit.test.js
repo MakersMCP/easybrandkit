@@ -608,6 +608,57 @@ test("a page of many fixed elements gets a few hundred hidden, and none once the
   assert.equal(late.calls.set, 0);
 });
 
+// A page that opens a dialog with alert(), confirm() and prompt() as it
+// loads, and with alert() again on its first turn of the wheel, past which
+// comes a part the page adds once it is scrolled to. Each dialog held the
+// tab until someone answered it, and nothing did: the run failed with "The
+// browser tab stopped answering", whatever its time.
+const ALERTS_PAGE = (heading, later, nav = "") => `<!doctype html><html><head><title>Acme</title><style>
+  body{margin:0;background:rgb(255,255,255)}
+  h1,h2{color:rgb(15,23,42)}
+  header{height:60px;display:flex;align-items:center;gap:20px;padding-left:20px}
+  .hero{height:1400px;background:rgb(0,128,96)}
+  .later{height:900px}
+  footer{height:200px;background:rgb(29,36,62);display:flex;align-items:center;padding-left:20px}
+</style></head><body>
+  <header><a href="/">${svg("rgb(255,0,0)", 120, 30)}</a>${nav}</header>
+  <section class="hero"><h1 id="heading">${heading}</h1></section>
+  <section class="later" id="later"></section>
+  <footer><a href="/">${svg("rgb(255,255,255)", 120, 30)}</a></footer>
+  <script>
+    alert("Welcome");
+    const ok = confirm("Stay a while?");
+    prompt("Your name?");
+    document.getElementById("heading").textContent += ok ? ", and OK was clicked" : ", and OK was not clicked";
+    addEventListener("wheel", () => alert("You scrolled"), { once: true });
+    new IntersectionObserver((seen, watch) => {
+      if (!seen.some((one) => one.isIntersecting)) return;
+      watch.disconnect();
+      document.getElementById("later").insertAdjacentHTML("beforeend", ${JSON.stringify(later)});
+    }).observe(document.getElementById("later"));
+  </script>
+</body></html>`;
+
+test("a dialog a page opens with alert(), confirm() or prompt(), as it loads or on the kit's first turn of the wheel, is answered with OK, so the page is read, with --facts too", { skip: noBrowser }, async (t) => {
+  const pages = {
+    "/": ALERTS_PAGE("Acme for teams", "<h2>Made for teams that ship</h2>", `<nav><a href="/pricing">Pricing</a></nav>`),
+    "/pricing": ALERTS_PAGE("Pricing", "<p>Pro is $12 per month for each seat.</p>"),
+  };
+  const site = await serve((req, res) => (pages[req.url] ? res.writeHead(200, { "content-type": "text/html" }).end(pages[req.url]) : res.writeHead(404).end()));
+  const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  });
+  const { kit, facts } = await makeKit(`${site.origin}/`, { dir, stores: false, facts: true });
+  assert.deepEqual(kit.text.headings, [
+    { tag: "h1", text: "Acme for teams, and OK was clicked" },
+    { tag: "h2", text: "Made for teams that ship" },
+  ]);
+  assert.deepEqual(facts.pages.map((page) => page.role), ["home", "pricing"], JSON.stringify(facts.skipped));
+  assert.match(fs.readFileSync(path.join(dir, "pages", "pricing.md"), "utf8"), /Pro is \$12 per month for each seat\./);
+});
+
 test("a page's words are read while the tab answers, also once the run's time is up, and a tab that does not answer ends the read at once", async (t) => {
   t.after(() => setTimeLimit(120_000));
   let asked = 0;
@@ -2572,7 +2623,7 @@ test("a store listing whose website fails keeps what the listing gave and says s
   const kept = filesOf(earlier);
   await assert.rejects(makeKit(listing, { dir: earlier, stores: false, timeLimit: 45_000 }), (err) => err.message === `${seller} shows no content yet and the run has no time left to wait for it, so nothing was read. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
   assert.deepEqual(filesOf(earlier), kept, "no time left to wait");
-  answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", "<script>alert(1)</script></body>"));
+  answers = (req, res) => res.writeHead(200, { "content-type": "text/html" }).end(brandPage("rgb(255,0,0)").replace("</body>", "<script>for (;;);</script></body>"));
   await assert.rejects(makeKit(listing, { dir: earlier, stores: false, log: limitFromOpening(12_000) }), (err) => err.message === `The browser tab stopped answering while it read ${seller}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === earlier);
   assert.deepEqual(filesOf(earlier), kept, "a tab that stops answering at the end of the run's time");
 
@@ -3815,7 +3866,7 @@ function withStalledTab(t, method, stalled = Infinity) {
 
 test("a tab that stops answering is told in words, and more time is advised only to a run that used up its own", { skip: noBrowser }, async (t) => {
   const page = brandPage("rgb(255,0,0)");
-  const dialog = page.replace("</body>", "<script>alert(1)</script></body>");
+  const endless = page.replace("</body>", "<script>for (;;);</script></body>");
   let html = page;
   const site = await serve((req, res) => {
     if (req.url === "/deep") return res.writeHead(200, { "content-type": "text/html" }).end(page);
@@ -3834,9 +3885,9 @@ test("a tab that stops answering is told in words, and more time is advised only
   const stalledTab = withStalledTab(t, "Page.getLayoutMetrics");
   await assert.rejects(stalledTab(site.origin, { dir, stores: false }), (err) => err.message === `The browser tab stopped answering while it read ${url}, so no kit was made. Try again.` && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before, "a call's own limit");
-  // A page that stops the tab with a dialog, in a run that has no time left
-  // for the next call.
-  html = dialog;
+  // A page whose script never ends, which stops the tab, in a run that has
+  // no time left for the next call.
+  html = endless;
   await assert.rejects(makeKit(site.origin, { dir, stores: false, log: limitFromOpening(12_000) }), (err) => err.message === `The browser tab stopped answering while it read ${url}, so no kit was made. Try again, or give it more time with --timeout.` && err.earlierKit === dir);
   assert.deepEqual(filesOf(dir), before, "the run's own limit");
 

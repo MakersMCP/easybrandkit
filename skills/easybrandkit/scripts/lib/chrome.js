@@ -1489,6 +1489,10 @@ async function openPage(chrome, { width, height }) {
   cdp.proxy = chrome.proxy || null;
   if (chrome.tabs) chrome.tabs.set(targetId, cdp);
   await noPreloading(cdp);
+  // A dialog a page opens with alert(), confirm() or prompt(), as it loads
+  // or on the kit's first turn of the wheel, holds the tab until someone
+  // answers it, and nothing else does: each one is answered with OK.
+  cdp.on("Page.javascriptDialogOpening", () => cdp.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => {}));
   await cdp.send("Page.enable");
   await guard(cdp);
   cdp.answer = await watchAnswer(cdp);
