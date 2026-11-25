@@ -37,7 +37,7 @@ easybrandkit-linear.app/
   logo-01.png            the header logo, on its real background
   logo-01.svg            the same logo as a vector, when the page draws it as SVG
   logo-02.png            the footer logo
-  screen-01.png          the first screen at 2x, without the cookie bar
+  screen-01.png          the first screen at 2x
   appstore-icon.png      the app icon at 1024 px, when the site links to its app
   appstore-shot-01.png   and up to five store screenshots
   x-profile.jpg          the profile pictures of the accounts it links to
@@ -240,8 +240,13 @@ In Shiny for Python, `ui.Theme.from_brand("easybrandkit-stripe.com/_brand.yml")`
 - With `--facts`, rules that do not finish in their time, 30 s at most, list no claims: `FACTS.md` and the summary say so, and `facts.json` has a `claimsError` field. A page built to keep them busy costs that, and `pages/` still holds the text of each page read.
 - Instagram, Facebook and TikTok serve nothing without a login, so they are not asked.
 - A logo drawn into a canvas or a WebGL scene is not found.
-- Colors come from what the home page shows. A main color used on one button of another page will not show up.
-- `--facts` reads text as the page shows it. A claim drawn inside an image or a video, one shown only on hover or in a closed tab, a plan behind a currency or region switch, and a menu link that appears only on hover are not seen.
+- A dialog or a cookie bar over the page is read with the page, so its words and colors can be among the kit's; where it keeps the page from scrolling or pins it in place, the words and logos past the first screen can be missing from `BRAND.md`, and where it pins it, `screen-01.png` and the first screen on the card can come out one flat color and `--facts` can read no page: look at `card.png` before you use such a kit.
+- A page that scrolls its content inside a box it pins to the screen, as an app's shell does, is read for words and logos only as far as that box shows on one screen, and where the box is hidden with what floats over the page, `screen-01.png` and the first screen on the card can come out one flat color and `--facts` reads none of its text: take the first screen from the site yourself.
+- A background or a scene a page draws in a box it pins behind itself is hidden with what floats over the page, so `screen-01.png` and the first screen on the card show the page without it: take the page's look from the site itself.
+- A section the page fades in as it is scrolled to and out again above it, as AOS does by default, is at an opacity of 0 when easybrandkit reads the page back at its top, so its headings, button labels and logos are not in `BRAND.md`, though the colors of what it holds count, and with `--facts` its text is in `pages/`: take its words from there or from the site.
+- A dialog a page keeps ready at an opacity of 0 shows nothing, yet the colors of what it holds count among the kit's, so its button can give the kit its first button color and `_brand.yml` its primary: check the colors against the site.
+- Colors come from the home page. A main color used on one button of another page will not show up.
+- `--facts` reads the text each page holds, not what the screen shows: a claim drawn inside an image or a video and a plan the page loads only after a currency or region switch are not seen, and neither is text the page hides with `display: none` or `visibility: hidden`, as a closed tab or a menu link that shows only on hover often is. Text a page marks `aria-hidden` is left out of `pages/` and `FACTS.md`, so where its dialog code marks the page so while a dialog is open, `pages/home.md` can hold little more than the page's title, while text the page keeps out of view without hiding it, as a closed drawer moved past the edge of the screen, can be read as the page's: look at the page yourself when `pages/home.md` is that short or a claim in `FACTS.md` is not one it shows.
 
 ## License
 

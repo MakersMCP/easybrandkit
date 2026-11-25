@@ -12,8 +12,8 @@
 //                  real background (no transparency, short side >= 240 px),
 //                  header marks first
 //   logo-01.svg …  the same logo as a vector, when the page draws it as SVG
-//   screen-01.png  the first screen as a visitor sees it, at 2x, without
-//                  cookie bars and chat bubbles
+//   screen-01.png  the first screen at 2x, with what floats over it hidden
+//                  (see page.js hideOverlays)
 //   card.png       the kit on one picture: logos, colors, fonts, first screen
 //   appstore-icon.png, appstore-shot-01.png, x-profile.jpg …
 //                  the app icon and screenshots from the app store listings
@@ -185,8 +185,8 @@ function withLogoColor(colors, logos) {
   return list.slice(0, 8);
 }
 
-// The first screen as a visitor sees it, at 2x, without the cookie bar, chat
-// bubble or promo box floating over it.
+// The first screen at 2x, without what hideOverlays tells floats over it,
+// as a cookie bar, a chat bubble or a promo box.
 async function captureFirstScreen(cdp, dir) {
   await cdp.send("Runtime.evaluate", { expression: "window.scrollTo({ top: 0, left: 0, behavior: 'instant' })" }).catch(() => {});
   await sleep(600);
