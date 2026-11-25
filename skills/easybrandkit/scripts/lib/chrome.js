@@ -1474,6 +1474,22 @@ function refusedNotes(refused = [], past = false) {
   return notes;
 }
 
+// What OK gives a dialog a page opens, given in the page's own world before
+// its scripts run (see openPage): alert() does nothing, confirm() gives true
+// and prompt() the text it offers, "" when it offers none. Each wraps the
+// browser's own function: it keeps that function's name, its length and its
+// want of a prototype, and its code reads as the browser's own, where a
+// function of the kit's would show its source, as a page's check for bots
+// can look.
+const ANSWERED_DIALOGS = `(() => {
+  const answer = (name, given) => {
+    window[name] = new Proxy(window[name], { apply: (own, self, args) => given(args) });
+  };
+  answer("alert", () => undefined);
+  answer("confirm", () => true);
+  answer("prompt", ([, text]) => (text === undefined ? "" : String(text)));
+})();`;
+
 // A new tab, set to a desktop screen of the given size. Headless Chrome says
 // "HeadlessChrome" in its user agent, and some sites answer that with a
 // stripped page; the tab says "Chrome", as the same browser with a window
@@ -1491,9 +1507,19 @@ async function openPage(chrome, { width, height }) {
   await noPreloading(cdp);
   // A dialog a page opens with alert(), confirm() or prompt(), as it loads
   // or on the kit's first turn of the wheel, holds the tab until someone
-  // answers it, and nothing else does: each one is answered with OK.
-  cdp.on("Page.javascriptDialogOpening", () => cdp.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => {}));
+  // answers it, and nothing else does. The page's own, and those of its
+  // frames of the same site, are given what OK gives in the page's own
+  // world (ANSWERED_DIALOGS), so they never reach the browser: there, one
+  // that came as a frame of another site asked its own was answered with
+  // Cancel and the other was held, the page's own holding its tab until
+  // the run failed. A frame of another site runs apart, and the browser
+  // tells its dialogs: each is answered with OK, a prompt() with the text
+  // it offers. Two such frames that ask at once can still have one
+  // answered with Cancel and the other held, which holds that frame alone,
+  // and the page's load is waited for no longer than its time.
+  cdp.on("Page.javascriptDialogOpening", ({ defaultPrompt = "" }) => cdp.send("Page.handleJavaScriptDialog", { accept: true, promptText: defaultPrompt }).catch(() => {}));
   await cdp.send("Page.enable");
+  await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: ANSWERED_DIALOGS });
   await guard(cdp);
   cdp.answer = await watchAnswer(cdp);
   await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });

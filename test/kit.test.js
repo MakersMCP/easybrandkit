@@ -659,6 +659,71 @@ test("a dialog a page opens with alert(), confirm() or prompt(), as it loads or 
   assert.match(fs.readFileSync(path.join(dir, "pages", "pricing.md"), "utf8"), /Pro is \$12 per month for each seat\./);
 });
 
+// What a page or a frame asks as it loads: alert() and confirm() 30 times
+// each and prompt() once, with a text it offers, then what OK gave it.
+const ASKED = (who, offered) => `let ok = 0;
+    for (let i = 0; i < 30; i++) {
+      alert("Welcome " + i);
+      if (confirm("Stay a while?")) ok++;
+    }
+    const said = "${who}: OK " + ok + " times of 30, and its prompt gave " + prompt("Your name?", "${offered}");`;
+// A page that asks so as it loads, in a frame of its own too, while a frame
+// of another site, which runs apart, asks so as it loads and tells the page
+// what OK gave it.
+const ASKING_PAGE = (frame) => `<!doctype html><html><head><title>Acme</title><style>
+  body{margin:0;background:rgb(255,255,255)}
+  h1,h2{color:rgb(15,23,42)}
+  header{height:60px;display:flex;align-items:center;padding-left:20px}
+  .hero{height:1400px;background:rgb(0,128,96)}
+  iframe{width:400px;height:200px;border:0}
+</style></head><body>
+  <header><a href="/">${svg("rgb(255,0,0)", 120, 30)}</a></header>
+  <section class="hero"><h1 id="page">Acme</h1><h2 id="frame">Acme</h2><iframe src="${frame}"></iframe></section>
+  <script>
+    addEventListener("message", ({ data }) => (document.getElementById("frame").textContent = data));
+    ${ASKED("The page", "Ada")}
+    const own = document.body.appendChild(document.createElement("iframe")).contentWindow;
+    const browsers = ["alert", "confirm", "prompt"].every((name) => /\\[native code\\]/.test(Function.prototype.toString.call(window[name])) && !Object.prototype.hasOwnProperty.call(window[name], "prototype"));
+    document.getElementById("page").textContent = said + ", and its own frame's " + own.confirm("Stay?") + " and " + own.prompt("Your name?", "Cy") + ", the browser's own functions " + browsers;
+  </script>
+</body></html>`;
+const ASKING_FRAME = `<!doctype html><html><body><p>Hello</p><script>
+    ${ASKED("A frame of another site", "Bea")}
+    parent.postMessage(said, "*");
+  </script></body></html>`;
+
+test("a page and a frame of another site that ask with alert(), confirm() and prompt() at the same moment are each answered with OK, a prompt() with the text it offers, and the page is read", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => {
+    if (req.url === "/frame") return res.writeHead(200, { "content-type": "text/html" }).end(ASKING_FRAME);
+    if (req.url !== "/") return res.writeHead(404).end();
+    res.writeHead(200, { "content-type": "text/html" }).end(ASKING_PAGE(`${site.origin.replace("127.0.0.1", "localhost")}/frame`));
+  });
+  const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  });
+  // The page's own dialogs, and those of a frame of its own, never reach the
+  // browser, where one asked as the frame of another site asked its own
+  // was answered with Cancel: the browser tells the frame's alone.
+  const { navigate } = require("../skills/easybrandkit/scripts/lib/chrome");
+  const chrome = await launch({ width: 1600, height: 900 }, { guard: guardFor(`${site.origin}/`) });
+  try {
+    const cdp = await openPage(chrome, { width: 1600, height: 900 });
+    const told = [];
+    cdp.on("Page.javascriptDialogOpening", ({ url }) => told.push(url));
+    await navigate(cdp, `${site.origin}/`);
+    assert.ok(told.length > 0 && told.every((url) => url.startsWith(site.origin.replace("127.0.0.1", "localhost"))), JSON.stringify(told.slice(0, 5)));
+  } finally {
+    await chrome.close();
+  }
+  const { kit } = await makeKit(`${site.origin}/`, { dir, stores: false });
+  assert.deepEqual(kit.text.headings, [
+    { tag: "h1", text: "The page: OK 30 times of 30, and its prompt gave Ada, and its own frame's true and Cy, the browser's own functions true" },
+    { tag: "h2", text: "A frame of another site: OK 30 times of 30, and its prompt gave Bea" },
+  ]);
+});
+
 test("a page's words are read while the tab answers, also once the run's time is up, and a tab that does not answer ends the read at once", async (t) => {
   t.after(() => setTimeLimit(120_000));
   let asked = 0;
