@@ -91,6 +91,15 @@ test("the addresses are tried with the families in turn, the next 250 ms after t
   assert.ok(attempts.slice(1).every((one) => one.socket.destroyed), "the other attempts were ended");
 });
 
+test("each connection is made with Nagle's algorithm off, as the browser makes its own", { timeout: 30_000 }, async (t) => {
+  const server = await site(t);
+  const connect = t.mock.method(net, "connect");
+  const socket = dialLib.wire.dial("127.0.0.1", server.address().port, "acme.test");
+  t.after(() => socket.destroy());
+  await once(socket, "connect");
+  assert.deepEqual(connect.mock.calls.map((call) => call.arguments[0]), [{ host: "127.0.0.1", port: server.address().port, autoSelectFamily: false, noDelay: true }]);
+});
+
 test("an attempt that fails starts the next at once, and a connection whose every attempt failed fails as its first address does", { timeout: 30_000 }, async (t) => {
   const server = await site(t);
   const closed = await closedPort();

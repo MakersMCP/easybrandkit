@@ -22,7 +22,12 @@ const tls = require("tls");
 // Where each connection to one address is made: the one place a run makes
 // one. name is the host the connection is for, a name or the address
 // itself. Tests put their own servers in place of the addresses here.
-const wire = { dial: (address, port, name) => net.connect({ host: address, port, autoSelectFamily: false }) };
+// Nagle's algorithm is off on it, as the browser has it on its own
+// connections: with it on, the browser's small writes through the proxy,
+// as the frames of HTTP/2 and the records of TLS, could wait for the site
+// to acknowledge the one before, and a page loaded more slowly than the
+// browser loads it by itself.
+const wire = { dial: (address, port, name) => net.connect({ host: address, port, autoSelectFamily: false, noDelay: true }) };
 
 // How long an attempt is waited for before the next one starts, as RFC 8305
 // has it.
