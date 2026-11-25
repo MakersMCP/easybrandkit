@@ -724,6 +724,155 @@ test("a page and a frame of another site that ask with alert(), confirm() and pr
   ]);
 });
 
+// A page that fades its parts in as they come into view and out again once
+// they leave it, as AOS does by default: past a hero with one teal button,
+// three sections each a box at an opacity of 0 but while it is in view,
+// with a heading and two orange buttons, and a footer whose logo sits in
+// such a box. Two pink buttons in the hero are at an opacity of 0
+// themselves.
+const FADING_PAGE = `<!doctype html><html><head><title>Acme</title><style>
+  body{margin:0;background:rgb(255,255,255)}
+  header{height:60px;display:flex;align-items:center;padding-left:20px}
+  .hero{height:840px}
+  section.part{height:700px}
+  .hero a,.part a{display:inline-block;width:180px;height:44px;margin-right:20px;color:rgb(255,255,255)}
+  .hero a{background:rgb(15,118,110)}
+  .hero a.gone{background:rgb(219,39,119);opacity:0}
+  .part a{background:rgb(234,88,12)}
+  [data-fade]{opacity:0;transition:opacity .4s}
+  [data-fade].in{opacity:1}
+  footer{height:200px;background:rgb(29,36,62)}
+</style></head><body>
+  <header><a href="/">${svg("rgb(255,0,0)", 120, 30)}</a></header>
+  <section class="hero"><h1>Email that sells</h1><a href="/start">Start free</a><a class="gone" href="/offer">Get the offer</a><a class="gone" href="/deal">Get the deal</a></section>
+  ${["Everything you need", "Plans for every shop", "Made for busy teams"].map((heading) => `<section class="part"><div data-fade><h2>${heading}</h2><a href="/try">Try it now</a><a href="/demo">Book a demo</a></div></section>`).join("")}
+  <footer><div data-fade><a href="/">${svg("rgb(0,160,0)", 120, 30)}</a></div></footer>
+  <script>
+    const fade = () => {
+      for (const part of document.querySelectorAll("[data-fade]")) part.classList.toggle("in", scrollY + innerHeight > part.getBoundingClientRect().top + scrollY + 120);
+    };
+    addEventListener("scroll", fade);
+    fade();
+  </script>
+</body></html>`;
+
+test("the buttons of a section the page fades in as it is scrolled to and out again above it give the brand their colors, while a button at an opacity of 0 itself gives none, and the section's headings, button labels and logo are not in the kit's words and logos, and its text is in pages/, as the README and SKILL.md say", { skip: noBrowser }, async (t) => {
+  const site = await serve((req, res) => (req.url === "/" ? res.writeHead(200, { "content-type": "text/html" }).end(FADING_PAGE) : res.writeHead(404).end()));
+  const dir = path.join(fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-")), "kit");
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  });
+  const { kit } = await makeKit(`${site.origin}/`, { dir, stores: false, facts: true });
+  // The sections' orange first, as they hold the most buttons, and no pink.
+  assert.deepEqual(kit.colors.filter((color) => color.role === "button").map((color) => color.hex), ["#ea580c", "#0f766e"], JSON.stringify(kit.colors));
+  assert.match(fs.readFileSync(path.join(dir, "_brand.yml"), "utf8"), /\n {2}primary: "#ea580c"\n/);
+  // The kit reads the page back at its top, where the sections and the
+  // footer's logo are at an opacity of 0.
+  assert.deepEqual(kit.text.headings, [{ tag: "h1", text: "Email that sells" }]);
+  assert.deepEqual(kit.text.ctas, ["Start free"]);
+  assert.deepEqual(kit.logos.map((logo) => logo.where), ["header"]);
+  assert.match(fs.readFileSync(path.join(dir, "pages", "home.md"), "utf8"), /\n## Everything you need\n[^]*\n## Plans for every shop\n[^]*\n## Made for busy teams\n/);
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("- A section the page fades in as it is scrolled to and out again above it, as AOS does by default, is at an opacity of 0 when easybrandkit reads the page back at its top, so its headings, button labels and logos are not in `BRAND.md`, though the colors of what it holds count, and with `--facts` its text is in `pages/`: take its words from there or from the site."));
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(skill.includes("\"Words on the page\" leaves out, with no note, the headings and button labels of a section the page fades in as it is scrolled to and out again above it, as AOS does by default: when it holds no heading past the page's first, do not take it for all the page says, and with `--facts`, read the rest in `pages/home.md`."));
+});
+
+// Pages of the kinds the README's Limits name, each with a header logo, an
+// h1 and an orange button on its first screen, an h2 past it and a footer
+// logo: under a dialog that pins the page in place with position:fixed on
+// its <body> (/pinned), an app's shell that scrolls its page inside a box it
+// pins to the screen (/shell), over a background drawn in a box the page
+// pins behind itself (/behind), and with a dialog kept ready at an opacity
+// of 0 (/ready).
+const KIND_CONTENT = `<header><a href="/">${svg("rgb(255,0,0)", 120, 30)}</a><nav><a href="/pricing">Pricing</a></nav></header>
+  <section class="hero"><h1>Acme for teams</h1><p>Trusted by 12,000 shops in 30 countries.</p><a class="go" href="/start">Start now</a></section>
+  <section class="more"><h2>Plans that grow</h2></section>
+  <footer><a href="/">${svg("rgb(255,255,255)", 120, 30)}</a></footer>`;
+const KIND_PAGE = (style, body) => `<!doctype html><html><head><title>Acme</title><style>
+  body{margin:0;background:rgb(255,255,255)}
+  header{height:60px;display:flex;align-items:center;gap:20px;padding-left:20px}
+  .hero{height:1400px;background:rgb(0,128,96)}
+  .more{height:600px}
+  .go,.box a{display:inline-block;width:180px;height:44px;color:rgb(255,255,255);background:rgb(234,88,12)}
+  footer{height:200px;background:rgb(29,36,62)}
+  ${style}
+</style></head><body>${body}</body></html>`;
+const KIND_PAGES = {
+  "/pinned": KIND_PAGE(
+    `body{position:fixed;inset:0;overflow:hidden}
+    .holder{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.4)}
+    .box{width:400px;height:300px;background:rgb(255,255,255)}
+    .box a{background:rgb(37,99,235)}`,
+    `${KIND_CONTENT}<div class="holder"><div class="box" role="dialog"><h2>Get 20% off</h2><a href="/claim">Claim</a></div></div>`,
+  ),
+  "/shell": KIND_PAGE(`#app{position:fixed;inset:0;overflow:auto} .hero{height:900px}`, `<div id="app">${KIND_CONTENT}</div>`),
+  "/behind": KIND_PAGE(`body{background:transparent} .hero{background:transparent} .bg{position:fixed;inset:0;z-index:-1;background:rgb(11,61,145)}`, `<div class="bg"></div>${KIND_CONTENT}`),
+  "/ready": KIND_PAGE(
+    `.ready{position:fixed;inset:0;opacity:0;display:flex;align-items:center;justify-content:center}
+    .ready a{display:inline-block;width:180px;height:44px;background:rgb(124,58,237)}`,
+    `${KIND_CONTENT}<div class="ready" role="dialog"><h2>Join our list</h2><a href="/join">Sign up</a><a href="/later">Later</a></div>`,
+  ),
+};
+
+test("a page pinned in place under a dialog, an app's shell, a page over a background pinned behind it and a page with a dialog kept ready at an opacity of 0 are read as the README's Limits and SKILL.md say", { skip: noBrowser }, async (t) => {
+  // The home page is the one a run reads.
+  let home = "";
+  const site = await serve((req, res) => (req.url === "/" ? res.writeHead(200, { "content-type": "text/html" }).end(home) : res.writeHead(404).end()));
+  const parent = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-out-"));
+  t.after(() => {
+    site.server.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  });
+  const run = (kind, facts) => {
+    home = KIND_PAGES[kind];
+    return makeKit(`${site.origin}/`, { dir: path.join(parent, kind.slice(1)), stores: false, facts });
+  };
+  const screen = (kind) => readPng(path.join(parent, kind.slice(1), "screen-01.png"));
+  const flat = (png) => new Set([[10, 10], [1600, 120], [1600, 900], [400, 1500], [3190, 1790]].map(([x, y]) => png.pixel(x, y).join())).size === 1;
+  const buttons = (kit) => kit.colors.filter((color) => color.role === "button").map((color) => color.hex);
+  // A dialog that pins the page in place is read with it, the page's words
+  // and logos past its first screen are not, its first screen comes out one
+  // flat color and --facts reads no page.
+  const pinned = await run("/pinned", true);
+  assert.deepEqual(pinned.kit.text.headings.map((heading) => heading.text), ["Acme for teams", "Get 20% off"]);
+  assert.deepEqual(pinned.kit.text.ctas, ["Start now", "Claim"]);
+  assert.deepEqual(buttons(pinned.kit).sort(), ["#2563eb", "#ea580c"]);
+  assert.deepEqual(pinned.kit.logos.map((logo) => logo.where), ["header"]);
+  assert.ok(flat(screen("/pinned")), "the first screen of a page pinned under a dialog");
+  assert.deepEqual([pinned.facts.pages, pinned.facts.skipped.map((page) => page.reason)], [[], ["its text could not be read"]]);
+  // An app's shell gives words and logos from what its box shows on one
+  // screen, and the box is hidden: one flat color, and no page read.
+  const shell = await run("/shell", true);
+  assert.deepEqual(shell.kit.text.headings.map((heading) => heading.text), ["Acme for teams"]);
+  assert.deepEqual(shell.kit.logos.map((logo) => logo.where), ["header"]);
+  assert.ok(flat(screen("/shell")), "the first screen of an app's shell");
+  assert.deepEqual(shell.facts.pages, []);
+  // A background pinned behind the page is hidden in the first screen.
+  await run("/behind", false);
+  assert.deepEqual(screen("/behind").pixel(1600, 900), [255, 255, 255], "the background behind the page");
+  // A dialog kept ready at an opacity of 0 gives the kit its button color.
+  const ready = await run("/ready", false);
+  assert.deepEqual(buttons(ready.kit), ["#7c3aed", "#ea580c"]);
+  assert.match(fs.readFileSync(path.join(parent, "ready", "_brand.yml"), "utf8"), /\n {2}primary: "#7c3aed"\n/);
+  assert.deepEqual(ready.kit.text.headings.map((heading) => heading.text), ["Acme for teams", "Plans that grow"]);
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  for (const sentence of [
+    "- A dialog or a cookie bar over the page is read with the page, so its words and colors can be among the kit's; where it keeps the page from scrolling or pins it in place, the words and logos past the first screen can be missing from `BRAND.md`, and where it pins it, `screen-01.png` and the first screen on the card can come out one flat color and `--facts` can read no page: look at `card.png` before you use such a kit.",
+    "- A page that scrolls its content inside a box it pins to the screen, as an app's shell does, is read for words and logos only as far as that box shows on one screen, and where the box is hidden with what floats over the page, `screen-01.png` and the first screen on the card can come out one flat color and `--facts` reads none of its text: take the first screen from the site yourself.",
+    "- A background or a scene a page draws in a box it pins behind itself is hidden with what floats over the page, so `screen-01.png` and the first screen on the card show the page without it: take the page's look from the site itself.",
+    "- A dialog a page keeps ready at an opacity of 0 shows nothing, yet the colors of what it holds count among the kit's, so its button can give the kit its first button color and `_brand.yml` its primary: check the colors against the site.",
+  ]) assert.ok(readme.includes(sentence), sentence);
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  for (const sentence of [
+    "- A dialog or a cookie bar over the page is read with the page, and one that pins the page in place can leave `screen-01.png` one flat color and, with `--facts`, no page read: if BRAND.md lists no logo, the colors or the button labels look like a cookie wall, a dialog, a login page or a loading screen, or `screen-01.png` is one flat color, tell the user what you got instead of guessing.",
+    "- A page that scrolls its content inside a box it pins to the screen, as an app's shell does, is read for words and logos only as far as that box shows on one screen, and its `screen-01.png` can come out one flat color and, with `--facts`, its FACTS.md say that no page could be read: tell the user, and do not take the words for all the page says.",
+    "- A background or a scene a page draws in a box it pins behind itself is missing from `screen-01.png` and the card: do not take that first screen for the site's look.",
+    "- A dialog a page keeps ready at an opacity of 0 shows nothing, yet the colors of what it holds count, so the kit's `button` color can be one the site never shows: show the user `card.png` before you build on it.",
+  ]) assert.ok(skill.includes(sentence), sentence);
+});
+
 test("a page's words are read while the tab answers, also once the run's time is up, and a tab that does not answer ends the read at once", async (t) => {
   t.after(() => setTimeLimit(120_000));
   let asked = 0;

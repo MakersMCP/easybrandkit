@@ -1334,6 +1334,77 @@ test("a page that changes the builtins the kit's cleaning uses cannot switch it 
   }
 });
 
+// A home page with no dialog open that keeps widgets of its own closed as
+// children of <body> it marks aria-hidden: a cart drawer in a fixed box
+// moved past the screen's right edge, in a wrapper of no height, a drawer
+// moved so itself, and a tooltip's portal of 1 px at the screen's corner.
+// A drawer it does not mark is read.
+const CLOSED_WIDGETS_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Acme</title><style>
+  body{font:16px sans-serif;margin:0} header{height:60px} section{height:1200px} footer{height:120px}
+  .flyout{position:fixed;top:0;right:0;bottom:0;width:400px;transform:translateX(100%);background:rgb(255,255,255)}
+  .drawer{position:absolute;top:0;right:0;width:380px;height:100vh;transform:translateX(110%)}
+  .tip{position:absolute;left:-1px;top:-1px;width:1px;height:1px;overflow:hidden}
+</style></head><body>
+  <header><a href="/"><svg width="120" height="30" aria-label="Acme"><rect width="120" height="30" fill="#2050c0"/></svg></a></header>
+  <main><section><h1>Acme ships your orders the same day</h1><p>Trusted by 12,000 shops in 30 countries.</p></section></main>
+  <footer><p>Acme, Inc.</p></footer>
+  <div id="cart" aria-hidden="true"><div class="flyout"><h2>Your Cart</h2><p>You are $85.00 away from free shipping</p><p>Join 250,000 happy shop owners.</p><a href="/checkout">Check out</a></div></div>
+  <aside class="drawer" aria-hidden="true"><h2>Your bag is empty</h2><p>Rated 4.9 out of 5 by 50,000 sleepers.</p></aside>
+  <div class="tip" aria-hidden="true">Rated 4.8 out of 5 by 3,200 reviewers.</div>
+  <aside class="drawer"><h2>Your wishlist is empty</h2></aside>
+</body></html>`;
+
+// A page whose dialog code marks what sits beside a dialog it sets within
+// the page aria-hidden, at each level from <body> down, as the aria-hidden
+// package's hideOthers does: its header, its sections and its footer.
+const INSIDE_DIALOG_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Acme</title><style>
+  body{font:16px sans-serif;margin:0} header{height:60px} section{height:600px} footer{height:120px}
+  .layer{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.4)}
+  .box{width:400px;height:300px;background:rgb(255,255,255)}
+</style></head><body>
+  <div id="root"><div class="app"><header><a href="/">Acme</a></header>
+  <section><h1>Acme ships your orders the same day</h1><p>Trusted by 12,000 shops in 30 countries.</p></section>
+  <section><p>We shipped 2.4 million parcels in 2025.</p></section>
+  <div class="layer"><div class="box" role="dialog" aria-modal="true"><p>Join our list</p><button>Sign up</button></div></div></div></div>
+  <footer><p>Acme, Inc.</p></footer>
+  <script>
+    for (let at = document.querySelector(".box"); at !== document.body; at = at.parentNode) {
+      for (const other of at.parentNode.children) if (other !== at && other.tagName !== "SCRIPT") other.setAttribute("aria-hidden", "true");
+    }
+  </script>
+</body></html>`;
+
+test("--facts leaves out what a page marks aria-hidden, as a closed cart drawer or a tooltip's portal that is a child of <body>, or what dialog code marks beside a dialog set within the page, and reads a drawer past the screen's edge it does not mark, as the README and SKILL.md say", { skip: noBrowser }, async (t) => {
+  const pages = { "/": CLOSED_WIDGETS_PAGE, "/inside": INSIDE_DIALOG_PAGE };
+  const server = http.createServer((req, res) => (pages[req.url] ? res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(pages[req.url]) : res.writeHead(404).end()));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dir = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "easybrandkit-facts-run-"));
+  let chrome;
+  t.after(async () => {
+    if (chrome) await chrome.close();
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const { facts } = await makeKit(`${origin}/`, { dir, stores: false, facts: true });
+  assert.deepEqual(facts.stats.map((s) => s.quote), ["Trusted by 12,000 shops in 30 countries."]);
+  const home = fs.readFileSync(path.join(dir, "pages", "home.md"), "utf8");
+  assert.match(home, /\n# Acme ships your orders the same day\nTrusted by 12,000 shops in 30 countries\.\n/, home);
+  assert.doesNotMatch(home, /Your Cart|85\.00|250,000|Check out|Your bag|4\.9|3,200/, home);
+  assert.match(home, /\n## Your wishlist is empty\n/, home);
+  // The page with a dialog set within it, read as the run reads a page.
+  setTimeLimit(120_000);
+  chrome = await launch({ width: 1600, height: 900 }, { guard: guardFor(`${origin}/`) });
+  const cdp = await openPage(chrome, { width: 1600, height: 900 });
+  await navigate(cdp, `${origin}/inside`);
+  const lines = pageLines(await readModel(cdp));
+  assert.ok(!lines.some((line) => /Acme ships|12,000|2\.4 million/.test(line)), JSON.stringify(lines));
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("Text a page marks `aria-hidden` is left out of `pages/` and `FACTS.md`, so where its dialog code marks the page so while a dialog is open, `pages/home.md` can hold little more than the page's title, while text the page keeps out of view without hiding it, as a closed drawer moved past the edge of the screen, can be read as the page's: look at the page yourself when `pages/home.md` is that short or a claim in `FACTS.md` is not one it shows."));
+  const skill = fs.readFileSync(path.join(__dirname, "..", "skills", "easybrandkit", "SKILL.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(skill.includes("Text a page marks `aria-hidden` is left out of it, so where the page's dialog code marks the page so while a dialog is open, `pages/home.md` can hold little more than the page's title and FACTS.md none of the home page's claims, while text the page keeps out of view without hiding it, as a closed drawer, can be read as the page's: tell the user when the home page's claims are missing, instead of taking them for none."));
+});
+
 test("--facts end to end: the home page and the pages it links to, as robots.txt allows", { skip: noBrowser }, async (t) => {
   const head = (title) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>body{font:16px sans-serif;margin:0} header{height:60px} .big{font-size:48px} main{min-height:1200px}</style></head><body>`;
   const nav = `<header><nav><a href="/"><svg width="90" height="24" aria-label="Acme"><rect width="90" height="24" fill="#2050c0"/></svg></a> <a href="/pricing">Pricing</a> <a href="/customers">Customers</a> <a href="/security">Security</a> <a href="/about">About</a></nav></header>`;
